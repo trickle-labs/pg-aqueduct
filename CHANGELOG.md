@@ -7,8 +7,96 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [v0.1.0 — Initial Implementation](#v010--initial-implementation)
 - [Unreleased — Repository Bootstrap](#unreleased--repository-bootstrap)
 <!-- TOC end -->
+
+---
+
+## [v0.1.0] — Initial Implementation
+
+**Released:** 2026-05-18
+**Tag:** [`v0.1.0`](https://github.com/trickle-labs/pg-aqueduct/releases/tag/v0.1.0)
+
+The first working release of `pg_aqueduct`. All Phase 0, Phase 1, and Phase 2
+roadmap items are complete. The full plan → apply → rollback → import cycle runs
+against real PostgreSQL via Testcontainers with no skipped tests.
+
+### What's New
+
+#### Eight CLI Commands
+
+| Command | Description |
+|---|---|
+| `aqueduct init` | Bootstrap the `aqueduct.*` catalog schema; optionally scaffold a new project |
+| `aqueduct plan` | Compute the migration plan from desired state (`.sql` files) vs live state; output as text, JSON, or Markdown |
+| `aqueduct apply` | Execute the plan; supports `--dry-run` and `--resume` for crash recovery |
+| `aqueduct status` | Show current version, pg_trickle info, and drift summary |
+| `aqueduct validate` | Offline syntax and IVM-supportability check — no database required |
+| `aqueduct rollback` | Revert to a prior DAG version via a forward migration plan |
+| `aqueduct import` | Bootstrap migration files from a live pg_trickle deployment |
+| `aqueduct unlock` | Release a stale project lock (emergency use) |
+
+#### Migration Planning
+
+- Parses `migrations/streams/*.sql` and `migrations/sources/*.sql` with
+  `-- @aqueduct:key = value` front-matter for `kind`, `schedule`, `refresh_mode`,
+  `cdc_mode`, `depends_on`, and `owned`.
+- Infers dependency edges from SQL `FROM`/`JOIN` clauses using `sqlparser` (pure
+  Rust, no C build dependencies).
+- Detects cycles in the DAG and reports them clearly before any DDL runs.
+- Classifies every change into one of four cost classes: **Free**, **In-place**,
+  **Rebuild**, or **Blue/green**.
+- Template variable substitution: `{{ var.NAME }}` expands from per-target `vars`
+  in `aqueduct.toml`; `${ENV_VAR}` expands from the environment.
+
+#### Catalog Schema
+
+An `aqueduct.*` schema is bootstrapped on first `aqueduct init`. It tracks:
+- `aqueduct.dag_versions` — full plan snapshot at each successful apply
+- `aqueduct.migrations` — every migration run with status, progress, and CLI version
+- `aqueduct.locks` — project-level serialisation lock (crash-safe via TTL expiry)
+- `aqueduct.cluster_profile` — per-cluster calibration data
+
+#### Safety Features
+
+- `allow_full_refresh = false` in `aqueduct.toml` blocks any Rebuild-class plan.
+- `maintenance_window` gates Rebuild and Blue/green steps to a time window.
+- `aqueduct apply` refuses to run against a hot standby (`pg_is_in_recovery()`).
+- `plan` and `status` open read-only transactions and cannot mutate data.
+- Locks are automatically cleaned up on crash via TTL expiry.
+
+#### Observability
+
+- Structured JSON logs on stderr when `--log-format json` is set, or when
+  `$CI`, `$GITHUB_ACTIONS`, `$GITLAB_CI`, or `$CIRCLECI` are present.
+- `application_name` is set to `aqueduct/<project>/<migration_id>` on every
+  connection, making in-flight migrations visible in `pg_stat_activity`.
+
+#### Testing
+
+- **42 unit tests** covering config, parser, DAG, differ, classifier, plan
+  builder, renderer, and SQL validator.
+- **10 integration tests** using Testcontainers + a mock `pg_trickle` schema
+  installed on vanilla PostgreSQL (no real extension required).
+- **6 CLI integration tests** covering the full end-to-end lifecycle.
+- All 58 tests pass; none are skipped.
+
+#### CI / CD
+
+Five GitHub Actions jobs run on every pull request:
+- **Lint** — `cargo fmt --check` + `cargo clippy -D warnings`
+- **Unit tests** — `cargo test --lib --all` on Ubuntu and macOS
+- **Integration tests** — Testcontainers (Docker) on Ubuntu
+- **CLI integration tests** — Testcontainers (Docker) on Ubuntu
+- **Coverage** — cargo-tarpaulin on `aqueduct-core`
+
+#### Other
+
+- `examples/minimal/` — 3-node DAG example (`orders` source → `order_totals`
+  stream → `customer_tiers` stream) with a complete `aqueduct.toml`.
+- `ESSENCE.md` — architecture overview and design principles.
+- `justfile` — developer convenience recipes (`test`, `lint`, `fmt`, `coverage`).
 
 ---
 
