@@ -1,0 +1,64 @@
+[workspace]
+members = [
+    "crates/aqueduct-core",
+    "crates/aqueduct-cli",
+    "crates/aqueduct-testkit",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/trickle-labs/pg-aqueduct"
+rust-version = "1.80"
+
+[workspace.dependencies]
+aqueduct-core = { path = "crates/aqueduct-core" }
+aqueduct-testkit = { path = "crates/aqueduct-testkit" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Database
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-chrono-0_4"] }
+postgres-types = { version = "0.2", features = ["derive"] }
+deadpool-postgres = { version = "0.14" }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# SQL parsing
+sqlparser = "0.54"
+
+# Graph algorithms
+petgraph = "0.6"
+
+# Hashing
+sha2 = "0.10"
+hex = "0.4"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Utilities
+regex = "1"
+indexmap = { version = "2", features = ["serde"] }
+tempfile = "3"
+
+# Testing
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["postgres"] }
