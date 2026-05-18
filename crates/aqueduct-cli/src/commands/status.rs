@@ -199,4 +199,3 @@ pub async fn run(args: StatusArgs) -> anyhow::Result<()> {
         tokio::time::sleep(interval).await;
     }
 }
-

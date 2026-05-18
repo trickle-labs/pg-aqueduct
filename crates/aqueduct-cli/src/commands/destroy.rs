@@ -57,7 +57,10 @@ pub async fn run(args: DestroyArgs) -> anyhow::Result<()> {
     let result = destroy_project(&client, &options).await?;
 
     if result.is_empty() {
-        println!("Nothing to destroy. Project '{}' has no managed resources.", project_name);
+        println!(
+            "Nothing to destroy. Project '{}' has no managed resources.",
+            project_name
+        );
         return Ok(());
     }
 
@@ -80,10 +83,7 @@ pub async fn run(args: DestroyArgs) -> anyhow::Result<()> {
     for v in &result.consumer_views_dropped {
         println!("  ✓ dropped consumer view: {}", v);
     }
-    println!(
-        "  ✓ deleted {} catalog row(s)",
-        result.catalog_rows_deleted
-    );
+    println!("  ✓ deleted {} catalog row(s)", result.catalog_rows_deleted);
 
     Ok(())
 }

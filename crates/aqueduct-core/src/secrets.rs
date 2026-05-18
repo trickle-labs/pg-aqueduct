@@ -73,15 +73,13 @@ impl SecretBackend {
 /// For other backends, the key is the backend-specific identifier.
 pub async fn resolve_secret(backend: &SecretBackend, key: &str) -> Result<String> {
     match backend {
-        SecretBackend::Env => {
-            std::env::var(key).map_err(|_| {
-                AqueductError::Config(format!(
-                    "Environment variable '{}' not set. \
+        SecretBackend::Env => std::env::var(key).map_err(|_| {
+            AqueductError::Config(format!(
+                "Environment variable '{}' not set. \
                      Ensure the secret is exported before running aqueduct.",
-                    key
-                ))
-            })
-        }
+                key
+            ))
+        }),
 
         SecretBackend::AwsSecretsManager { region } => {
             // In production this would call the AWS SDK.
@@ -97,10 +95,7 @@ pub async fn resolve_secret(backend: &SecretBackend, key: &str) -> Result<String
 
             // Check for an injected env var first (the common CI pattern where
             // the secret was already fetched by a wrapper script or action).
-            let env_key = key
-                .replace('/', "_")
-                .replace('-', "_")
-                .to_uppercase();
+            let env_key = key.replace('/', "_").replace('-', "_").to_uppercase();
             std::env::var(&env_key).map_err(|_| {
                 AqueductError::Config(format!(
                     "AWS Secrets Manager secret '{}' could not be resolved. \
@@ -221,8 +216,7 @@ pub async fn resolve_secret(backend: &SecretBackend, key: &str) -> Result<String
 /// For compatibility, plain `${VAR}` references are resolved from environment
 /// variables as before (delegated to `config::resolve_env_vars`).
 pub async fn resolve_dsn_secrets(dsn: &str, backend: &SecretBackend) -> Result<String> {
-    let secret_re =
-        regex::Regex::new(r"\$\{secret:([^:]+):([^}]+)\}").expect("valid regex");
+    let secret_re = regex::Regex::new(r"\$\{secret:([^:]+):([^}]+)\}").expect("valid regex");
 
     let mut result = dsn.to_string();
 
@@ -286,9 +280,7 @@ mod tests {
     async fn test_resolve_dsn_secrets_plain_env() {
         std::env::set_var("TEST_DSN_HOST", "localhost");
         let dsn = "postgresql://user@${TEST_DSN_HOST}/db";
-        let resolved = resolve_dsn_secrets(dsn, &SecretBackend::Env)
-            .await
-            .unwrap();
+        let resolved = resolve_dsn_secrets(dsn, &SecretBackend::Env).await.unwrap();
         assert_eq!(resolved, "postgresql://user@localhost/db");
         std::env::remove_var("TEST_DSN_HOST");
     }

@@ -45,8 +45,7 @@ pub async fn run(args: PromoteArgs) -> anyhow::Result<()> {
     let dest_vars = dest_target.vars.clone();
 
     // Load migration files with destination variables.
-    let files =
-        aqueduct_core::parser::load_migrations(&args.project_dir, &dest_vars)?;
+    let files = aqueduct_core::parser::load_migrations(&args.project_dir, &dest_vars)?;
 
     let promote_opts = PromoteOptions {
         from_env: args.from.clone(),

@@ -390,9 +390,7 @@ pub fn verify_patroni_primary(endpoint: &str) -> Result<bool> {
             endpoint, e
         ))
     })?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .ok();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
 
     let request = format!(
         "GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n",

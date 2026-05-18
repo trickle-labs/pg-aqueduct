@@ -1244,7 +1244,10 @@ async fn test_destroy_project_full() {
     let count_before = aqueduct_core::live_state::get_stream_table_count(&db.client)
         .await
         .expect("count before");
-    assert_eq!(count_before, 1, "One stream table should exist before destroy");
+    assert_eq!(
+        count_before, 1,
+        "One stream table should exist before destroy"
+    );
 
     // Full destroy.
     let opts = DestroyOptions {
@@ -1257,13 +1260,19 @@ async fn test_destroy_project_full() {
 
     assert!(!result.dry_run);
     assert_eq!(result.stream_tables_dropped.len(), 1);
-    assert!(result.catalog_rows_deleted > 0, "Should delete catalog rows");
+    assert!(
+        result.catalog_rows_deleted > 0,
+        "Should delete catalog rows"
+    );
 
     // Stream table count should now be 0.
     let count_after = aqueduct_core::live_state::get_stream_table_count(&db.client)
         .await
         .expect("count after");
-    assert_eq!(count_after, 0, "No stream tables should remain after destroy");
+    assert_eq!(
+        count_after, 0,
+        "No stream tables should remain after destroy"
+    );
 }
 
 /// Test: planner fuzzing — random DAG mutations always produce a consistent plan.
@@ -1281,7 +1290,10 @@ async fn test_planner_fuzzing_random_mutations() {
 
     // Seed the PRNG with a fixed value for reproducibility.
     let mut state: u64 = 0xDEAD_BEEF_CAFE_1234;
-    let lcg_next = |s: u64| s.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+    let lcg_next = |s: u64| {
+        s.wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407)
+    };
 
     let table_names = ["alpha", "beta", "gamma", "delta"];
 
@@ -1294,7 +1306,10 @@ async fn test_planner_fuzzing_random_mutations() {
     for tname in &table_names {
         db.client
             .execute(
-                &format!("CREATE TABLE IF NOT EXISTS raw_{} (id bigint, val numeric)", tname),
+                &format!(
+                    "CREATE TABLE IF NOT EXISTS raw_{} (id bigint, val numeric)",
+                    tname
+                ),
                 &[],
             )
             .await
@@ -1308,9 +1323,7 @@ async fn test_planner_fuzzing_random_mutations() {
         let qname = QualifiedName::new("public", table_name);
 
         // Toggle: if table is in desired, remove it; otherwise add it.
-        let already_present = current_desired
-            .iter()
-            .any(|s| s.qualified_name == qname);
+        let already_present = current_desired.iter().any(|s| s.qualified_name == qname);
 
         if already_present {
             current_desired.retain(|s| s.qualified_name != qname);
@@ -1344,12 +1357,10 @@ async fn test_planner_fuzzing_random_mutations() {
         }
 
         let topo = topological_sort(&desired_state).expect("topo");
-        let current_version = aqueduct_core::live_state::get_latest_dag_version(
-            &db.client,
-            project,
-        )
-        .await
-        .expect("get version");
+        let current_version =
+            aqueduct_core::live_state::get_latest_dag_version(&db.client, project)
+                .await
+                .expect("get version");
         let next_version = current_version.map(|v| v + 1).unwrap_or(1);
         let plan = build_plan(project, current_version, next_version, &diff, &topo);
 
@@ -1360,7 +1371,9 @@ async fn test_planner_fuzzing_random_mutations() {
             .unwrap_or_else(|e| panic!("execute failed on iteration {}: {}", iteration, e));
 
         // After apply, plan should be empty (convergence invariant).
-        let actual2 = read_live_state(&db.client).await.expect("read live state 2");
+        let actual2 = read_live_state(&db.client)
+            .await
+            .expect("read live state 2");
         let diff2 = compute_diff(&desired_state, &actual2);
         assert!(
             diff2.is_empty(),
@@ -1370,4 +1383,3 @@ async fn test_planner_fuzzing_random_mutations() {
         );
     }
 }
-

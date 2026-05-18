@@ -902,9 +902,13 @@ fn test_status_interval_parse() {
         if let Some(n) = s.strip_suffix('s') {
             n.parse::<u64>().ok().map(std::time::Duration::from_secs)
         } else if let Some(n) = s.strip_suffix('m') {
-            n.parse::<u64>().ok().map(|v| std::time::Duration::from_secs(v * 60))
+            n.parse::<u64>()
+                .ok()
+                .map(|v| std::time::Duration::from_secs(v * 60))
         } else if let Some(n) = s.strip_suffix('h') {
-            n.parse::<u64>().ok().map(|v| std::time::Duration::from_secs(v * 3600))
+            n.parse::<u64>()
+                .ok()
+                .map(|v| std::time::Duration::from_secs(v * 3600))
         } else {
             s.parse::<u64>().ok().map(std::time::Duration::from_secs)
         }
@@ -953,8 +957,18 @@ fn test_destroy_options_dry_run_flag() {
 fn test_secret_backend_all_variants() {
     use aqueduct_core::secrets::SecretBackend;
 
-    let valid = ["env", "", "aws", "aws-secrets-manager", "gcp",
-                 "gcp-secret-manager", "vault", "hashicorp-vault", "sops", "age"];
+    let valid = [
+        "env",
+        "",
+        "aws",
+        "aws-secrets-manager",
+        "gcp",
+        "gcp-secret-manager",
+        "vault",
+        "hashicorp-vault",
+        "sops",
+        "age",
+    ];
     for name in &valid {
         assert!(
             SecretBackend::from_str(name).is_ok(),
@@ -1014,9 +1028,7 @@ async fn test_ha_backend_detect_primary() {
     use aqueduct_core::live_state::{detect_ha_backend, HaBackend};
 
     let db = aqueduct_testkit::TestDb::new().await.expect("start db");
-    let backend = detect_ha_backend(&db.client)
-        .await
-        .expect("detect backend");
+    let backend = detect_ha_backend(&db.client).await.expect("detect backend");
 
     // A plain Testcontainers Postgres has no Patroni/CNPG GUC, so it should
     // be detected as Primary.
@@ -1071,7 +1083,8 @@ async fn test_destroy_project_dry_run_cli() {
     let diff = aqueduct_core::diff::compute_diff(&desired, &actual);
     let topo = aqueduct_core::dag::topological_sort(&desired).unwrap();
     let plan = aqueduct_core::plan::build_plan("destroy-cli-test", None, 1, &diff, &topo);
-    let executor = aqueduct_core::executor::PlanExecutor::new(&db.client, "destroy-cli-test", "0.6.0", false);
+    let executor =
+        aqueduct_core::executor::PlanExecutor::new(&db.client, "destroy-cli-test", "0.6.0", false);
     executor.execute(&plan).await.unwrap();
 
     let opts = DestroyOptions {
