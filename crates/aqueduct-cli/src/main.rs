@@ -3,7 +3,8 @@ use tracing_subscriber::EnvFilter;
 
 mod commands;
 use commands::{
-    apply, fmt, import, ingest, init, lint, plan, preview, rollback, status, unlock, validate,
+    apply, destroy, fmt, import, ingest, init, lint, plan, preview, promote, rollback, status,
+    unlock, validate,
 };
 
 /// Declarative schema evolution and migration for stream-table DAGs.
@@ -64,6 +65,12 @@ enum Commands {
 
     /// Ingest compiled dbt artefacts into an aqueduct migrations directory.
     Ingest(ingest::IngestArgs),
+
+    /// Promote a validated migrations directory from one environment to another.
+    Promote(promote::PromoteArgs),
+
+    /// Destroy all stream tables, consumer views, and catalog entries for a project.
+    Destroy(destroy::DestroyArgs),
 }
 
 #[tokio::main]
@@ -102,6 +109,8 @@ async fn main() {
         Commands::Fmt(args) => fmt::run(args).await,
         Commands::Lint(args) => lint::run(args).await,
         Commands::Ingest(args) => ingest::run(args).await,
+        Commands::Promote(args) => promote::run(args).await,
+        Commands::Destroy(args) => destroy::run(args).await,
     };
 
     if let Err(e) = result {

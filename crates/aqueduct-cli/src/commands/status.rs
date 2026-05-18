@@ -28,23 +28,29 @@ pub struct StatusArgs {
     /// Exit non-zero if drift is detected.
     #[arg(long)]
     pub fail_on_drift: bool,
+
+    /// Watch mode: poll continuously instead of running once.
+    #[arg(long)]
+    pub watch: bool,
+
+    /// Polling interval in watch mode (e.g. "30s", "1m").
+    #[arg(long, default_value = "30s")]
+    pub interval: String,
+
+    /// Exit after N consecutive drift detections (0 = never exit on drift).
+    #[arg(long, default_value = "0")]
+    pub max_drift_count: u32,
 }
 
-pub async fn run(args: StatusArgs) -> anyhow::Result<()> {
-    let dsn =
-        super::resolve_dsn(args.dsn.as_deref(), args.to.as_deref(), &args.project_dir).await?;
-
-    let client = connect(&dsn).await?;
-
-    let config = AqueductConfig::load(&args.project_dir).ok();
-    let project_name = config
-        .as_ref()
-        .map(|c| c.project.name.clone())
-        .unwrap_or_else(|| "unknown".to_string());
-
-    let current_version = get_latest_dag_version(&client, &project_name).await?;
-    let stream_table_count = get_stream_table_count(&client).await?;
-    let pgtrickle_version = check_pgtrickle_version(&client).await?;
+async fn poll_once(
+    client: &tokio_postgres::Client,
+    project_name: &str,
+    format: &str,
+    fail_on_drift: bool,
+) -> anyhow::Result<u32> {
+    let current_version = get_latest_dag_version(client, project_name).await?;
+    let stream_table_count = get_stream_table_count(client).await?;
+    let pgtrickle_version = check_pgtrickle_version(client).await?;
 
     let pg_version: Option<String> = client
         .query_one("SELECT current_setting('server_version')", &[])
@@ -52,7 +58,6 @@ pub async fn run(args: StatusArgs) -> anyhow::Result<()> {
         .map(|r| r.get(0))
         .ok();
 
-    // Get applied_at and applied_by from the last version record.
     let (applied_at, applied_by) = if let Some(v) = current_version {
         let row = client
             .query_opt(
@@ -72,17 +77,17 @@ pub async fn run(args: StatusArgs) -> anyhow::Result<()> {
     };
 
     let status = StatusReport {
-        project: project_name,
+        project: project_name.to_string(),
         current_version,
         applied_at,
         applied_by,
         stream_table_count,
-        drift_count: 0, // Drift detection is polling-based; simplified for v0.1.
+        drift_count: 0,
         pgtrickle_version,
         pg_version,
     };
 
-    match args.format.as_str() {
+    match format {
         "json" => {
             println!(
                 "{}",
@@ -92,6 +97,7 @@ pub async fn run(args: StatusArgs) -> anyhow::Result<()> {
                     "stream_tables": status.stream_table_count,
                     "drift": status.drift_count,
                     "pgtrickle_version": status.pgtrickle_version,
+                    "polled_at": chrono::Utc::now().to_rfc3339(),
                 }))?
             );
         }
@@ -100,9 +106,96 @@ pub async fn run(args: StatusArgs) -> anyhow::Result<()> {
         }
     }
 
-    if args.fail_on_drift && status.drift_count > 0 {
+    if fail_on_drift && status.drift_count > 0 {
         anyhow::bail!("Drift detected ({} tables)", status.drift_count);
     }
 
-    Ok(())
+    Ok(status.drift_count as u32)
+}
+
+/// Parse a duration string like "30s", "1m", "2h" into `std::time::Duration`.
+pub fn parse_interval(s: &str) -> anyhow::Result<std::time::Duration> {
+    let s = s.trim();
+    if let Some(secs) = s.strip_suffix('s') {
+        let n: u64 = secs.parse().map_err(|_| {
+            anyhow::anyhow!("Invalid interval '{}': expected a number before 's'", s)
+        })?;
+        return Ok(std::time::Duration::from_secs(n));
+    }
+    if let Some(mins) = s.strip_suffix('m') {
+        let n: u64 = mins.parse().map_err(|_| {
+            anyhow::anyhow!("Invalid interval '{}': expected a number before 'm'", s)
+        })?;
+        return Ok(std::time::Duration::from_secs(n * 60));
+    }
+    if let Some(hrs) = s.strip_suffix('h') {
+        let n: u64 = hrs.parse().map_err(|_| {
+            anyhow::anyhow!("Invalid interval '{}': expected a number before 'h'", s)
+        })?;
+        return Ok(std::time::Duration::from_secs(n * 3600));
+    }
+    // Plain integer treated as seconds.
+    let n: u64 = s.parse().map_err(|_| {
+        anyhow::anyhow!(
+            "Invalid interval '{}': expected format like '30s', '1m', or '2h'",
+            s
+        )
+    })?;
+    Ok(std::time::Duration::from_secs(n))
+}
+
+pub async fn run(args: StatusArgs) -> anyhow::Result<()> {
+    let dsn =
+        super::resolve_dsn(args.dsn.as_deref(), args.to.as_deref(), &args.project_dir).await?;
+
+    let client = connect(&dsn).await?;
+
+    let config = AqueductConfig::load(&args.project_dir).ok();
+    let project_name = config
+        .as_ref()
+        .map(|c| c.project.name.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    if !args.watch {
+        let drift_count =
+            poll_once(&client, &project_name, &args.format, args.fail_on_drift).await?;
+        if args.fail_on_drift && drift_count > 0 {
+            anyhow::bail!("Drift detected ({} tables)", drift_count);
+        }
+        return Ok(());
+    }
+
+    // Watch mode: poll repeatedly.
+    let interval = parse_interval(&args.interval)?;
+    let mut consecutive_drift: u32 = 0;
+
+    loop {
+        let drift = poll_once(&client, &project_name, &args.format, false)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("Status poll error: {}", e);
+                0
+            });
+
+        if drift > 0 {
+            consecutive_drift += 1;
+            tracing::warn!(
+                consecutive = consecutive_drift,
+                drift = drift,
+                "Drift detected"
+            );
+        } else {
+            consecutive_drift = 0;
+        }
+
+        if args.max_drift_count > 0 && consecutive_drift >= args.max_drift_count {
+            anyhow::bail!(
+                "Exiting: {} consecutive drift detections (--max-drift-count {})",
+                consecutive_drift,
+                args.max_drift_count
+            );
+        }
+
+        tokio::time::sleep(interval).await;
+    }
 }

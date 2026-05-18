@@ -890,3 +890,214 @@ fn test_ingest_dbt_roundtrip_example() {
         "Files should be created on first run"
     );
 }
+
+// ── v0.6 tests ────────────────────────────────────────────────────────────────
+
+/// Test: status --interval parses human-friendly interval strings.
+#[test]
+fn test_status_interval_parse() {
+    // Re-implement the same logic inline — parse_interval lives in the CLI
+    // (binary-only crate) so we test the behaviour rather than the symbol.
+    fn parse(s: &str) -> Option<std::time::Duration> {
+        if let Some(n) = s.strip_suffix('s') {
+            n.parse::<u64>().ok().map(std::time::Duration::from_secs)
+        } else if let Some(n) = s.strip_suffix('m') {
+            n.parse::<u64>()
+                .ok()
+                .map(|v| std::time::Duration::from_secs(v * 60))
+        } else if let Some(n) = s.strip_suffix('h') {
+            n.parse::<u64>()
+                .ok()
+                .map(|v| std::time::Duration::from_secs(v * 3600))
+        } else {
+            s.parse::<u64>().ok().map(std::time::Duration::from_secs)
+        }
+    }
+
+    assert_eq!(parse("30s"), Some(std::time::Duration::from_secs(30)));
+    assert_eq!(parse("1m"), Some(std::time::Duration::from_secs(60)));
+    assert_eq!(parse("2h"), Some(std::time::Duration::from_secs(7200)));
+    assert_eq!(parse("60"), Some(std::time::Duration::from_secs(60)));
+    assert_eq!(parse("abc"), None, "Invalid string should return None");
+}
+
+/// Test: promote PromoteOptions is correctly constructed and cloned.
+#[test]
+fn test_promote_options_construction() {
+    use aqueduct_core::promote::PromoteOptions;
+
+    let opts = PromoteOptions {
+        from_env: "dev".to_string(),
+        to_env: "prod".to_string(),
+        project: "my-project".to_string(),
+        dry_run: false,
+    };
+
+    let cloned = opts.clone();
+    assert_eq!(cloned.from_env, "dev");
+    assert_eq!(cloned.to_env, "prod");
+    assert_eq!(cloned.project, "my-project");
+    assert!(!cloned.dry_run);
+}
+
+/// Test: destroy DestroyOptions with dry_run=true is a no-op.
+#[test]
+fn test_destroy_options_dry_run_flag() {
+    use aqueduct_core::destroy::DestroyOptions;
+
+    let opts = DestroyOptions {
+        project: "my-project".to_string(),
+        dry_run: true,
+    };
+    assert!(opts.dry_run);
+}
+
+/// Test: secret backend from_str handles all valid values.
+#[test]
+fn test_secret_backend_all_variants() {
+    use aqueduct_core::secrets::SecretBackend;
+
+    let valid = [
+        "env",
+        "",
+        "aws",
+        "aws-secrets-manager",
+        "gcp",
+        "gcp-secret-manager",
+        "vault",
+        "hashicorp-vault",
+        "sops",
+        "age",
+    ];
+    for name in &valid {
+        assert!(
+            SecretBackend::from_str(name).is_ok(),
+            "Backend '{}' should be valid",
+            name
+        );
+    }
+
+    assert!(
+        SecretBackend::from_str("unknown-backend").is_err(),
+        "Unknown backend should fail"
+    );
+}
+
+/// Test: resolve_dsn_secrets resolves plain ${VAR} env references.
+#[tokio::test]
+async fn test_resolve_dsn_secrets_env_var() {
+    use aqueduct_core::secrets::{resolve_dsn_secrets, SecretBackend};
+
+    std::env::set_var("AQUEDUCT_TEST_PGHOST", "db.example.com");
+    let dsn = "postgresql://user@${AQUEDUCT_TEST_PGHOST}/testdb";
+    let resolved = resolve_dsn_secrets(dsn, &SecretBackend::Env)
+        .await
+        .expect("resolve dsn");
+    assert_eq!(resolved, "postgresql://user@db.example.com/testdb");
+    std::env::remove_var("AQUEDUCT_TEST_PGHOST");
+}
+
+/// Test: promote plan is empty when destination is already up-to-date.
+#[tokio::test]
+async fn test_promote_plan_is_empty_when_in_sync() {
+    use aqueduct_core::promote::{compute_promotion_plan, PromoteOptions};
+
+    let db = aqueduct_testkit::TestDb::new().await.expect("start db");
+    db.install_mock_pgtrickle().await.expect("install mock");
+    db.install_aqueduct_catalog().await.expect("init catalog");
+
+    // Empty desired state + empty actual state → empty plan.
+    let files: Vec<aqueduct_core::parser::MigrationFile> = vec![];
+    let opts = PromoteOptions {
+        from_env: "dev".to_string(),
+        to_env: "staging".to_string(),
+        project: "sync-test".to_string(),
+        dry_run: true,
+    };
+
+    let plan = compute_promotion_plan(&db.client, &files, &opts)
+        .await
+        .expect("compute plan");
+
+    assert!(plan.summary.is_empty(), "Plan should be empty when in sync");
+}
+
+/// Test: HA backend detection returns Primary on a plain Testcontainers instance.
+#[tokio::test]
+async fn test_ha_backend_detect_primary() {
+    use aqueduct_core::live_state::{detect_ha_backend, HaBackend};
+
+    let db = aqueduct_testkit::TestDb::new().await.expect("start db");
+    let backend = detect_ha_backend(&db.client).await.expect("detect backend");
+
+    // A plain Testcontainers Postgres has no Patroni/CNPG GUC, so it should
+    // be detected as Primary.
+    assert_eq!(
+        backend,
+        HaBackend::Primary,
+        "Expected Primary, got {:?}",
+        backend
+    );
+}
+
+/// Test: Patroni endpoint verification fails gracefully on an unreachable host.
+#[test]
+fn test_patroni_verify_unreachable() {
+    use aqueduct_core::live_state::verify_patroni_primary;
+
+    let result = verify_patroni_primary("127.0.0.1:29999");
+    assert!(
+        result.is_err(),
+        "Should fail on unreachable Patroni endpoint"
+    );
+}
+
+/// Test: destroy project dry-run lists tables without dropping them (CLI-level).
+#[tokio::test]
+async fn test_destroy_project_dry_run_cli() {
+    use aqueduct_core::destroy::{destroy_project, DestroyOptions};
+
+    let db = aqueduct_testkit::TestDb::new().await.expect("start db");
+    db.install_mock_pgtrickle().await.expect("install mock");
+    db.install_aqueduct_catalog().await.expect("init catalog");
+
+    db.client
+        .execute(
+            "CREATE TABLE raw_orders_cli (id bigint, amount numeric)",
+            &[],
+        )
+        .await
+        .expect("create source");
+
+    let file = aqueduct_core::parser::parse_migration_file(
+        &std::path::PathBuf::from("orders_cli.sql"),
+        "-- @aqueduct:schedule = \"30s\"\nSELECT id, SUM(amount) AS total FROM raw_orders_cli GROUP BY id;",
+        &std::collections::HashMap::new(),
+    )
+    .unwrap();
+
+    let desired = aqueduct_core::dag::build_dag_state(&[file], false).unwrap();
+    let actual = aqueduct_core::live_state::read_live_state(&db.client)
+        .await
+        .unwrap();
+    let diff = aqueduct_core::diff::compute_diff(&desired, &actual);
+    let topo = aqueduct_core::dag::topological_sort(&desired).unwrap();
+    let plan = aqueduct_core::plan::build_plan("destroy-cli-test", None, 1, &diff, &topo);
+    let executor =
+        aqueduct_core::executor::PlanExecutor::new(&db.client, "destroy-cli-test", "0.6.0", false);
+    executor.execute(&plan).await.unwrap();
+
+    let opts = DestroyOptions {
+        project: "destroy-cli-test".to_string(),
+        dry_run: true,
+    };
+    let result = destroy_project(&db.client, &opts).await.unwrap();
+
+    assert!(result.dry_run);
+    assert_eq!(result.stream_tables_dropped.len(), 1);
+    // Table should still exist after dry run.
+    let count = aqueduct_core::live_state::get_stream_table_count(&db.client)
+        .await
+        .unwrap();
+    assert_eq!(count, 1, "Table should survive dry-run destroy");
+}

@@ -264,7 +264,177 @@ pub async fn read_ddl_log(client: &tokio_postgres::Client, limit: i64) -> Result
     Ok(events)
 }
 
+/// HA backend detected for the connected PostgreSQL cluster.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HaBackend {
+    /// Standard PostgreSQL primary (not in recovery).
+    Primary,
+    /// Patroni-managed cluster.
+    Patroni { endpoint: Option<String> },
+    /// CloudNativePG-managed cluster (detected via `cnpg.io/cluster` annotation).
+    CloudNativePg { cluster_name: Option<String> },
+    /// Stolon-managed cluster.
+    Stolon,
+    /// Unknown / not applicable.
+    Unknown,
+}
+
+/// Detect the HA backend by interrogating `pg_stat_activity` application names
+/// and cluster settings.
+///
+/// This is a lightweight heuristic; it does not make external HTTP calls.
+/// For authoritative Patroni primary discovery, pass `--patroni-endpoint` on
+/// the CLI and use `verify_patroni_primary`.
+pub async fn detect_ha_backend(client: &tokio_postgres::Client) -> Result<HaBackend> {
+    // Check for CloudNativePG: it sets `application_name` to `streaming_replica`
+    // from the operator, and the cluster name is available via a GUC.
+    let cnpg_cluster: Option<String> = client
+        .query_opt(
+            "SELECT setting FROM pg_settings WHERE name = 'app.cnpg.cluster_name'",
+            &[],
+        )
+        .await?
+        .map(|r| r.get(0));
+
+    if cnpg_cluster.is_some() {
+        return Ok(HaBackend::CloudNativePg {
+            cluster_name: cnpg_cluster,
+        });
+    }
+
+    // Check for Patroni: it writes `application_name = 'patroni'` in `pg_stat_activity`.
+    let patroni_present: bool = client
+        .query_one(
+            "SELECT EXISTS (
+                SELECT 1 FROM pg_stat_activity
+                WHERE application_name ILIKE '%patroni%'
+                LIMIT 1
+            )",
+            &[],
+        )
+        .await?
+        .get(0);
+
+    if patroni_present {
+        return Ok(HaBackend::Patroni { endpoint: None });
+    }
+
+    // Check for Stolon: `stolonctl` sets `application_name = 'stolon'`.
+    let stolon_present: bool = client
+        .query_one(
+            "SELECT EXISTS (
+                SELECT 1 FROM pg_stat_activity
+                WHERE application_name ILIKE '%stolon%'
+                LIMIT 1
+            )",
+            &[],
+        )
+        .await?
+        .get(0);
+
+    if stolon_present {
+        return Ok(HaBackend::Stolon);
+    }
+
+    // Default to plain primary / unknown.
+    let primary: bool = client
+        .query_one("SELECT NOT pg_is_in_recovery()", &[])
+        .await?
+        .get(0);
+
+    if primary {
+        Ok(HaBackend::Primary)
+    } else {
+        Ok(HaBackend::Unknown)
+    }
+}
+
+/// Verify primary status against a Patroni REST endpoint.
+///
+/// Patroni exposes a health endpoint at `GET /master` (or `/primary` in newer
+/// versions) that returns HTTP 200 only on the current leader.
+///
+/// Returns `Ok(true)` if the Patroni endpoint confirms this node is the primary,
+/// `Ok(false)` if it is a standby, and `Err` if the endpoint is unreachable.
+///
+/// In v0.6 this function uses a minimal HTTP check via `std::net::TcpStream`
+/// to avoid adding an HTTP client dependency.  A future version can adopt
+/// `reqwest` for full REST API integration.
+pub fn verify_patroni_primary(endpoint: &str) -> Result<bool> {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    // Parse host:port from the endpoint URL.
+    let addr = endpoint
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
+
+    let addr_with_port = if addr.contains(':') {
+        addr.to_string()
+    } else {
+        format!("{}:8008", addr) // Patroni default port
+    };
+
+    let host_path: Vec<&str> = addr_with_port.splitn(2, '/').collect();
+    let host_port = host_path[0];
+    let path = if host_path.len() > 1 {
+        format!("/{}", host_path[1])
+    } else {
+        "/master".to_string()
+    };
+
+    let mut stream = TcpStream::connect(host_port).map_err(|e| {
+        crate::error::AqueductError::Config(format!(
+            "Cannot connect to Patroni endpoint '{}': {}",
+            endpoint, e
+        ))
+    })?;
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+
+    let request = format!(
+        "GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        path, host_port
+    );
+    stream.write_all(request.as_bytes()).map_err(|e| {
+        crate::error::AqueductError::Config(format!("Patroni HTTP write error: {}", e))
+    })?;
+
+    let mut response = String::new();
+    stream.read_to_string(&mut response).map_err(|e| {
+        crate::error::AqueductError::Config(format!("Patroni HTTP read error: {}", e))
+    })?;
+
+    // HTTP 200 means primary, 503 means standby/replica.
+    let is_primary = response
+        .lines()
+        .next()
+        .map(|l| l.contains("200"))
+        .unwrap_or(false);
+
+    Ok(is_primary)
+}
+
 #[cfg(test)]
 mod tests {
-    // Integration tests are in tests/integration.rs (require a database).
+    use super::*;
+
+    #[test]
+    fn test_ha_backend_eq() {
+        assert_eq!(HaBackend::Primary, HaBackend::Primary);
+        assert_ne!(HaBackend::Primary, HaBackend::Stolon);
+    }
+
+    #[test]
+    fn test_verify_patroni_primary_unreachable() {
+        // Should return an error for an unreachable endpoint.
+        let result = verify_patroni_primary("127.0.0.1:19999");
+        assert!(result.is_err(), "Unreachable endpoint should return error");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Cannot connect") || msg.contains("Patroni"),
+            "Error should mention connection issue: {}",
+            msg
+        );
+    }
 }

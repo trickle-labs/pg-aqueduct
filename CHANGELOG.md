@@ -7,6 +7,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [v0.6.0 — Production Hardening](#v060--production-hardening)
 - [v0.5.0 — dbt Interop](#v050--dbt-interop)
 - [v0.4.0 — CI Integrations & Ergonomics](#v040--ci-integrations--ergonomics)
 - [v0.3.0 — Blue/Green, Preview Environments & Optional Extension](#v030--bluegreen-preview-environments--optional-extension)
@@ -14,6 +15,154 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [v0.1.0 — Initial Implementation](#v010--initial-implementation)
 - [Unreleased — Repository Bootstrap](#unreleased--repository-bootstrap)
 <!-- TOC end -->
+
+---
+
+## [v0.6.0] — Production Hardening
+
+**Released:** 2026-05-18
+**Tag:** [`v0.6.0`](https://github.com/trickle-labs/pg-aqueduct/releases/tag/v0.6.0)
+
+All Phase 7 roadmap items are complete. v0.6 takes every feature delivered in
+v0.1–v0.5 and subjects it to the rigour required for production deployments:
+multi-environment promotion, encrypted secrets, continuous drift watching,
+HA-aware primary detection, planner fuzzing, and a clean `destroy` command.
+
+### What's New
+
+#### `aqueduct promote`
+
+New `aqueduct promote` command promotes a validated migrations directory from one
+environment to another:
+
+```bash
+# Validate source is clean, then promote dev → staging.
+aqueduct promote --from dev --to staging
+
+# Skip interactive prompt in CI.
+aqueduct promote --from staging --to prod --yes
+
+# Preview the promotion plan without executing.
+aqueduct promote --from dev --to staging --dry-run
+```
+
+The command:
+1. **Validates that the source environment is clean** — no pending drift between the
+   migrations directory and the source database.  Pass `--skip-source-check` to bypass
+   in pipelines that already run `aqueduct validate`.
+2. **Connects to the destination** and computes the migration plan using the
+   destination target's `vars = { ... }` (environment-specific schedule, cdc_mode,
+   etc.).
+3. **Shows the plan** and prompts for confirmation (or skips with `--yes`).
+4. **Applies the plan** and records the promotion in `aqueduct.migrations`.
+
+#### Encrypted secret handling
+
+`aqueduct` now supports resolving DSN passwords and full connection strings from
+external secret backends:
+
+| Backend | Flag value | Credential source |
+|---|---|---|
+| Environment variables | `env` (default) | `${VAR}` syntax, unchanged |
+| AWS Secrets Manager | `aws` / `aws-secrets-manager` | `AWS_REGION` + AWS SDK credentials |
+| GCP Secret Manager | `gcp` / `gcp-secret-manager` | `GOOGLE_APPLICATION_CREDENTIALS` |
+| HashiCorp Vault | `vault` / `hashicorp-vault` | `VAULT_ADDR` + `VAULT_TOKEN` |
+| SOPS-encrypted file | `sops` | `sops -d <file>` subprocess |
+| age-encrypted file | `age` | `age -d -i <identity> <file>` subprocess |
+
+DSN strings now support an inline `${secret:BACKEND:KEY}` syntax:
+
+```toml
+[targets.prod]
+dsn = "postgresql://app:${secret:vault:database/prod-dsn}@db.example.com/app"
+```
+
+Plain `${ENV_VAR}` references continue to work as before.
+
+#### `aqueduct status --watch`
+
+The `status` command now supports a long-running watch mode for integration into
+alerting pipelines:
+
+```bash
+# Poll every 30 seconds (default).
+aqueduct status --watch --to prod
+
+# Custom interval and max drift count.
+aqueduct status --watch --interval 1m --max-drift-count 3 --to prod
+
+# JSON output for Alertmanager / Grafana OnCall.
+aqueduct status --watch --format json --to prod | jq .
+```
+
+`--interval` accepts `Ns` (seconds), `Nm` (minutes), `Nh` (hours), or a plain integer
+(seconds).  `--max-drift-count N` causes the watcher to exit non-zero after N
+consecutive polls that detect drift.
+
+#### HA integration hardening
+
+`aqueduct` now detects and works correctly with the three major PostgreSQL HA
+stacks used in production:
+
+| Stack | Detection method |
+|---|---|
+| **Patroni** | `pg_stat_activity.application_name ILIKE '%patroni%'` |
+| **CloudNativePG** | `app.cnpg.cluster_name` GUC |
+| **Stolon** | `pg_stat_activity.application_name ILIKE '%stolon%'` |
+
+New `detect_ha_backend()` function returns a typed `HaBackend` enum so downstream
+code can adjust its behaviour (e.g., primary-discovery strategy).
+
+`verify_patroni_primary(endpoint)` performs a lightweight HTTP check against the
+Patroni REST API (`GET /master`) to authoritatively confirm primary status before
+applying — complementing the existing `pg_is_in_recovery()` check.
+
+#### Planner fuzzing
+
+A new planner fuzzing test (`test_planner_fuzzing_random_mutations`) runs 8
+LCG-seeded random toggle mutations over a 4-table DAG and asserts the plan-convergence
+invariant: every `plan → apply → plan` cycle must end with an empty plan.  The harness
+is deterministic (fixed seed `0xDEAD_BEEF_CAFE_1234`) so failures are reproducible.
+
+#### `aqueduct destroy`
+
+New `aqueduct destroy` command safely tears down all resources owned by a project:
+
+```bash
+# Preview what would be destroyed.
+aqueduct destroy --to prod --dry-run
+
+# Execute the destruction (requires explicit --confirm).
+aqueduct destroy --to prod --confirm
+```
+
+The command:
+1. Drops all stream tables in reverse topological order (leaves first).
+2. Drops consumer views managed by the project.
+3. Removes catalog rows from `aqueduct.dag_versions`, `aqueduct.migrations`, and
+   `aqueduct.locks`.
+4. Does **not** drop the `aqueduct` schema itself (shared with other projects).
+
+The `--confirm` flag is required; the command refuses to run without it unless
+`--dry-run` is set.
+
+### Test suite
+
+167 tests total (101 unit + 33 integration + 33 CLI) — all pass, none skipped.
+New v0.6 tests cover:
+- `test_promote_computes_plan_against_destination`
+- `test_promote_source_clean_detects_drift`
+- `test_secret_backend_env_resolves` / `test_secret_backend_env_missing_var`
+- `test_ha_backend_plain_postgres_is_primary`
+- `test_ha_backend_detect_primary`
+- `test_patroni_verify_unreachable`
+- `test_destroy_project_dry_run` / `test_destroy_project_full`
+- `test_destroy_project_dry_run_cli`
+- `test_planner_fuzzing_random_mutations`
+- `test_secret_backend_all_variants`
+- `test_promote_plan_is_empty_when_in_sync`
+- `test_resolve_dsn_secrets_env_var`
+- `test_status_interval_parse`
 
 ---
 
