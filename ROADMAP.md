@@ -1000,6 +1000,7 @@ production tool that operators run against their primary database clusters.
 
 ## v0.7 — Documentation & Cookbook
 
+**Status: Complete ✅**
 **Target effort:** ~1 week.
 **Builds on:** v0.6 complete.
 
@@ -1010,22 +1011,22 @@ This version produces all the documentation and worked examples that make
 
 #### Deliverables
 
-**Migration cookbook.** 30 worked examples covering the 30 most common stream-table
-evolution patterns (see list in Phase 7). Every example is verified end-to-end against
-a Testcontainers cluster.
+- [x] **Migration cookbook.** 30 worked examples covering the 30 most common stream-table
+  evolution patterns (see list in Phase 7). Every example is verified end-to-end against
+  a Testcontainers cluster.
 
-**Public benchmark.** Time-to-apply for a 200-node DAG with a 5-node change set vs.
-drop/recreate (the current state of the art), published in `benchmarks/`. Demonstrates
-that `pg_aqueduct` reduces downtime from O(minutes-to-hours) to O(seconds) for
-in-place-eligible changes on large production DAGs.
+- [x] **Public benchmark.** Time-to-apply for a 200-node DAG with a 5-node change set vs.
+  drop/recreate (the current state of the art), published in `benchmarks/`. Demonstrates
+  that `pg_aqueduct` reduces downtime from O(minutes-to-hours) to O(seconds) for
+  in-place-eligible changes on large production DAGs.
 
-**Documentation completeness.** README, ESSENCE.md, cookbook, API reference, security
-guide, and HA operations guide all reviewed, cross-linked, and published.
+- [x] **Documentation completeness.** README, ESSENCE.md, cookbook, API reference, security
+  guide, and HA operations guide all reviewed, cross-linked, and published.
 
 **v0.7 release criteria.**
-- All 30 cookbook patterns written and verified end-to-end.
-- Public documentation complete and reviewed.
-- Benchmark results published in `benchmarks/`.
+- [x] All 30 cookbook patterns written and verified end-to-end.
+- [x] Public documentation complete and reviewed.
+- [x] Benchmark results published in `benchmarks/`.
 
 ---
 
