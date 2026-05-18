@@ -1420,7 +1420,10 @@ async fn test_cookbook_01_change_schedule_faster() {
     assert!(!diff.is_empty());
     let changes = diff.changes();
     assert_eq!(changes.len(), 1);
-    assert_eq!(changes[0].kind, aqueduct_core::diff::DeltaKind::AlterSchedule);
+    assert_eq!(
+        changes[0].kind,
+        aqueduct_core::diff::DeltaKind::AlterSchedule
+    );
 
     let class = aqueduct_core::classifier::classify_delta(changes[0]);
     assert_eq!(class, aqueduct_core::classifier::MigrationClass::Free);
@@ -1458,7 +1461,10 @@ async fn test_cookbook_02_change_schedule_slower() {
 
     assert!(!diff.is_empty());
     let changes = diff.changes();
-    assert_eq!(changes[0].kind, aqueduct_core::diff::DeltaKind::AlterSchedule);
+    assert_eq!(
+        changes[0].kind,
+        aqueduct_core::diff::DeltaKind::AlterSchedule
+    );
     let class = aqueduct_core::classifier::classify_delta(changes[0]);
     assert_eq!(class, aqueduct_core::classifier::MigrationClass::Free);
 
@@ -1503,7 +1509,10 @@ async fn test_cookbook_03_enable_cdc_mode() {
 
     assert!(!diff.is_empty());
     let changes = diff.changes();
-    assert_eq!(changes[0].kind, aqueduct_core::diff::DeltaKind::AlterCdcMode);
+    assert_eq!(
+        changes[0].kind,
+        aqueduct_core::diff::DeltaKind::AlterCdcMode
+    );
     let class = aqueduct_core::classifier::classify_delta(changes[0]);
     assert_eq!(class, aqueduct_core::classifier::MigrationClass::Free);
 }
@@ -1520,10 +1529,7 @@ async fn test_cookbook_04_diff_to_full_refresh() {
     db.install_aqueduct_catalog().await.expect("init catalog");
 
     db.client
-        .execute(
-            "CREATE TABLE raw_c04 (id bigint, amount numeric)",
-            &[],
-        )
+        .execute("CREATE TABLE raw_c04 (id bigint, amount numeric)", &[])
         .await
         .expect("create source");
 
@@ -1630,10 +1636,7 @@ async fn test_cookbook_06_add_count_column() {
     db.install_aqueduct_catalog().await.expect("init catalog");
 
     db.client
-        .execute(
-            "CREATE TABLE raw_c06 (id bigint, value numeric)",
-            &[],
-        )
+        .execute("CREATE TABLE raw_c06 (id bigint, value numeric)", &[])
         .await
         .expect("create source");
 
@@ -2094,10 +2097,7 @@ async fn test_cookbook_18_create_stream_table() {
     db.install_aqueduct_catalog().await.expect("init catalog");
 
     db.client
-        .execute(
-            "CREATE TABLE raw_c18 (id bigint, score numeric)",
-            &[],
-        )
+        .execute("CREATE TABLE raw_c18 (id bigint, score numeric)", &[])
         .await
         .expect("create source");
 
@@ -2129,7 +2129,10 @@ SELECT id, AVG(score) AS avg_score FROM raw_c18 GROUP BY id;
 
     let state_after = read_live_state(&db.client).await.expect("state after");
     assert_eq!(state_after.stream_tables.len(), 1);
-    assert_eq!(state_after.stream_tables[0].qualified_name.name, "c18_scores");
+    assert_eq!(
+        state_after.stream_tables[0].qualified_name.name,
+        "c18_scores"
+    );
 }
 
 // ── Pattern 19: Drop an existing stream table ────────────────────────────────
@@ -2146,13 +2149,7 @@ async fn test_cookbook_19_drop_stream_table() {
     db.client
         .execute(
             "SELECT pgtrickle.create_stream_table($1, $2, $3, $4, $5)",
-            &[
-                &"public",
-                &"c19_orphan",
-                &"SELECT 19 AS v",
-                &"FULL",
-                &"1m",
-            ],
+            &[&"public", &"c19_orphan", &"SELECT 19 AS v", &"FULL", &"1m"],
         )
         .await
         .expect("create stream table");
@@ -2164,10 +2161,7 @@ async fn test_cookbook_19_drop_stream_table() {
 
     assert!(!diff.is_empty());
     assert_eq!(diff.changes().len(), 1);
-    assert_eq!(
-        diff.changes()[0].kind,
-        aqueduct_core::diff::DeltaKind::Drop
-    );
+    assert_eq!(diff.changes()[0].kind, aqueduct_core::diff::DeltaKind::Drop);
 
     let topo = topological_sort(&desired).expect("topo");
     let plan = build_plan("cookbook-19", None, 1, &diff, &topo);
@@ -2185,10 +2179,7 @@ async fn test_cookbook_20_two_node_dag() {
     db.install_aqueduct_catalog().await.expect("init catalog");
 
     db.client
-        .execute(
-            "CREATE TABLE raw_c20 (id bigint, amount numeric)",
-            &[],
-        )
+        .execute("CREATE TABLE raw_c20 (id bigint, amount numeric)", &[])
         .await
         .expect("create source");
 
@@ -2216,7 +2207,10 @@ SELECT COUNT(*) AS num_customers FROM public.c20_totals;
     let names: Vec<&str> = topo.iter().map(|q| q.name.as_str()).collect();
     let totals_pos = names.iter().position(|&n| n == "c20_totals").unwrap();
     let summary_pos = names.iter().position(|&n| n == "c20_summary").unwrap();
-    assert!(totals_pos < summary_pos, "c20_totals must precede c20_summary");
+    assert!(
+        totals_pos < summary_pos,
+        "c20_totals must precede c20_summary"
+    );
 
     let actual = read_live_state(&db.client).await.expect("actual");
     let diff = compute_diff(&desired, &actual);
@@ -2241,10 +2235,7 @@ async fn test_cookbook_21_add_downstream_node() {
     db.install_aqueduct_catalog().await.expect("init catalog");
 
     db.client
-        .execute(
-            "CREATE TABLE raw_c21 (id bigint, amount numeric)",
-            &[],
-        )
+        .execute("CREATE TABLE raw_c21 (id bigint, amount numeric)", &[])
         .await
         .expect("create source");
 
@@ -2282,10 +2273,7 @@ async fn test_cookbook_21_add_downstream_node() {
         diff_v2.changes()[0].kind,
         aqueduct_core::diff::DeltaKind::Create
     );
-    assert_eq!(
-        diff_v2.changes()[0].qualified_name.name,
-        "c21_summary"
-    );
+    assert_eq!(diff_v2.changes()[0].qualified_name.name, "c21_summary");
 }
 
 // ── Pattern 22: Remove a downstream node ─────────────────────────────────────
@@ -2299,10 +2287,7 @@ async fn test_cookbook_22_remove_downstream_node() {
     db.install_aqueduct_catalog().await.expect("init catalog");
 
     db.client
-        .execute(
-            "CREATE TABLE raw_c22 (id bigint, val numeric)",
-            &[],
-        )
+        .execute("CREATE TABLE raw_c22 (id bigint, val numeric)", &[])
         .await
         .expect("create source");
 
@@ -2339,10 +2324,7 @@ async fn test_cookbook_22_remove_downstream_node() {
         diff_v2.changes()[0].kind,
         aqueduct_core::diff::DeltaKind::Drop
     );
-    assert_eq!(
-        diff_v2.changes()[0].qualified_name.name,
-        "c22_downstream"
-    );
+    assert_eq!(diff_v2.changes()[0].qualified_name.name, "c22_downstream");
 }
 
 // ── Pattern 23: Three-level dependency chain ─────────────────────────────────
@@ -2517,7 +2499,9 @@ async fn test_cookbook_26_source_column_cascade() {
     let desired = DagState {
         stream_tables: vec![StreamTableSpec {
             qualified_name: QualifiedName::new("public", "c26_agg"),
-            query: "SELECT id, region, SUM(amount) AS total FROM public.raw_c26 GROUP BY id, region".to_string(),
+            query:
+                "SELECT id, region, SUM(amount) AS total FROM public.raw_c26 GROUP BY id, region"
+                    .to_string(),
             refresh_mode: RefreshMode::Differential,
             schedule: "30s".to_string(),
             cdc_mode: None,
@@ -2528,7 +2512,9 @@ async fn test_cookbook_26_source_column_cascade() {
         sources: vec![SourceSpec {
             qualified_name: source_qname.clone(),
             owned: true,
-            create_sql: Some("CREATE TABLE public.raw_c26 (id bigint, amount numeric, region text)".to_string()),
+            create_sql: Some(
+                "CREATE TABLE public.raw_c26 (id bigint, amount numeric, region text)".to_string(),
+            ),
         }],
         consumers: vec![],
     };
@@ -2567,9 +2553,7 @@ async fn test_cookbook_27_multi_table_schedule_change() {
     for name in &["c27_a", "c27_b", "c27_c"] {
         db.client
             .execute(
-                &format!(
-                    "SELECT pgtrickle.create_stream_table('public', $1, 'SELECT 27 AS v', 'FULL', '1m')"
-                ),
+                "SELECT pgtrickle.create_stream_table('public', $1, 'SELECT 27 AS v', 'FULL', '1m')",
                 &[name],
             )
             .await
@@ -2610,10 +2594,7 @@ async fn test_cookbook_28_import_roundtrip() {
     db.install_mock_pgtrickle().await.expect("install mock");
 
     db.client
-        .execute(
-            "CREATE TABLE raw_c28 (id bigint, val numeric)",
-            &[],
-        )
+        .execute("CREATE TABLE raw_c28 (id bigint, val numeric)", &[])
         .await
         .expect("create source table");
 
@@ -2638,8 +2619,7 @@ async fn test_cookbook_28_import_roundtrip() {
     assert_eq!(count, 1);
 
     // Round-trip: parse the generated files and verify they match live state.
-    let files =
-        aqueduct_core::parser::load_migrations(tmp.path(), &HashMap::new()).expect("load");
+    let files = aqueduct_core::parser::load_migrations(tmp.path(), &HashMap::new()).expect("load");
     assert_eq!(files.len(), 1);
     assert_eq!(files[0].name, "c28_stats");
 
@@ -2664,10 +2644,7 @@ async fn test_cookbook_29_rollback_to_prior_state() {
     db.install_aqueduct_catalog().await.expect("init catalog");
 
     db.client
-        .execute(
-            "CREATE TABLE raw_c29 (id bigint, val numeric)",
-            &[],
-        )
+        .execute("CREATE TABLE raw_c29 (id bigint, val numeric)", &[])
         .await
         .expect("create source");
 
@@ -2706,7 +2683,9 @@ async fn test_cookbook_29_rollback_to_prior_state() {
     assert_eq!(state_v2.stream_tables.len(), 2);
 
     // Rollback: go back to v1 desired.
-    let actual_v3 = read_live_state(&db.client).await.expect("actual for rollback");
+    let actual_v3 = read_live_state(&db.client)
+        .await
+        .expect("actual for rollback");
     let diff_rb = compute_diff(&desired_v1, &actual_v3);
     let topo_rb = topological_sort(&desired_v1).expect("topo rb");
     let plan_rb = build_plan("cookbook-29", Some(2), 3, &diff_rb, &topo_rb);
@@ -2715,7 +2694,10 @@ async fn test_cookbook_29_rollback_to_prior_state() {
 
     let state_after_rb = read_live_state(&db.client).await.expect("state after rb");
     assert_eq!(state_after_rb.stream_tables.len(), 1);
-    assert_eq!(state_after_rb.stream_tables[0].qualified_name.name, "c29_base");
+    assert_eq!(
+        state_after_rb.stream_tables[0].qualified_name.name,
+        "c29_base"
+    );
 
     // Final plan must be empty.
     let diff_final = compute_diff(&desired_v1, &state_after_rb);
@@ -2787,9 +2769,7 @@ SELECT id, SUM(amount) AS total, COUNT(*) AS order_count FROM raw_c30 GROUP BY i
         project: "cookbook-30".to_string(),
         dry_run: false,
     };
-    let result = destroy_project(&db.client, &opts)
-        .await
-        .expect("destroy");
+    let result = destroy_project(&db.client, &opts).await.expect("destroy");
     assert!(!result.dry_run);
     assert_eq!(result.stream_tables_dropped.len(), 1);
 
