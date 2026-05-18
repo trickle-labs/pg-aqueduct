@@ -32,6 +32,7 @@ pub enum SecretBackend {
 
 impl SecretBackend {
     /// Parse a backend name from a CLI flag value.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Result<Self> {
         match s {
             "env" | "" => Ok(SecretBackend::Env),
@@ -95,7 +96,7 @@ pub async fn resolve_secret(backend: &SecretBackend, key: &str) -> Result<String
 
             // Check for an injected env var first (the common CI pattern where
             // the secret was already fetched by a wrapper script or action).
-            let env_key = key.replace('/', "_").replace('-', "_").to_uppercase();
+            let env_key = key.replace(['/', '-'], "_").to_uppercase();
             std::env::var(&env_key).map_err(|_| {
                 AqueductError::Config(format!(
                     "AWS Secrets Manager secret '{}' could not be resolved. \
@@ -117,7 +118,7 @@ pub async fn resolve_secret(backend: &SecretBackend, key: &str) -> Result<String
             // Same pattern as AWS: check for injected env var.
             let env_key = key
                 .split('/')
-                .last()
+                .next_back()
                 .unwrap_or(key)
                 .replace('-', "_")
                 .to_uppercase();
@@ -141,7 +142,7 @@ pub async fn resolve_secret(backend: &SecretBackend, key: &str) -> Result<String
 
             let env_key = key
                 .split('/')
-                .last()
+                .next_back()
                 .unwrap_or(key)
                 .replace('-', "_")
                 .to_uppercase();
