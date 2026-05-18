@@ -52,6 +52,7 @@ pub async fn read_live_state(client: &tokio_postgres::Client) -> Result<DagState
             cdc_mode,
             explicit_depends_on: vec![],
             depends_on: vec![],
+            cypher_source: None,
         });
     }
 

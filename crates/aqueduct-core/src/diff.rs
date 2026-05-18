@@ -34,21 +34,63 @@ pub struct NodeDelta {
     pub actual: Option<StreamTableSpec>,
 }
 
+/// The kind of change to a source (base) table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceDeltaKind {
+    /// DDL has changed for an owned source table.
+    AlterDdl,
+    /// No change detected.
+    Unchanged,
+}
+
+/// Cascade impact of a source-table change on a downstream stream table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CascadeImpact {
+    /// The stream table that is affected.
+    pub stream_table: QualifiedName,
+    /// The migration class required for this stream table due to the source change.
+    pub class: String,
+}
+
+/// A change to a source (base) table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceDelta {
+    pub qualified_name: QualifiedName,
+    pub kind: SourceDeltaKind,
+    /// The desired DDL (from migration file).
+    pub desired_ddl: Option<String>,
+    /// Stream tables that reference this source and must be cascade-updated.
+    pub cascade_impacts: Vec<CascadeImpact>,
+}
+
 /// The result of comparing desired vs. actual DAG state.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DagDiff {
     pub deltas: Vec<NodeDelta>,
+    /// Source (base table) changes with their cascade impacts.
+    pub source_deltas: Vec<SourceDelta>,
 }
 
 impl DagDiff {
     pub fn is_empty(&self) -> bool {
         self.deltas.iter().all(|d| d.kind == DeltaKind::Unchanged)
+            && self
+                .source_deltas
+                .iter()
+                .all(|s| s.kind == SourceDeltaKind::Unchanged)
     }
 
     pub fn changes(&self) -> Vec<&NodeDelta> {
         self.deltas
             .iter()
             .filter(|d| d.kind != DeltaKind::Unchanged)
+            .collect()
+    }
+
+    pub fn source_changes(&self) -> Vec<&SourceDelta> {
+        self.source_deltas
+            .iter()
+            .filter(|s| s.kind != SourceDeltaKind::Unchanged)
             .collect()
     }
 }
@@ -90,7 +132,160 @@ pub fn compute_diff(desired: &DagState, actual: &DagState) -> DagDiff {
         }
     }
 
-    DagDiff { deltas }
+    // Compute source deltas (owned source tables whose DDL changed).
+    let source_deltas = compute_source_deltas(desired, actual, &deltas);
+
+    DagDiff {
+        deltas,
+        source_deltas,
+    }
+}
+
+/// Compute source-table deltas and their cascade impacts on stream tables.
+///
+/// For owned source tables, we compare desired DDL against actual DDL (stored in
+/// `aqueduct.dag_versions`).  When the DDL changes, we identify every stream-table
+/// node whose query references the source table and mark it for rebuild.
+fn compute_source_deltas(
+    desired: &DagState,
+    actual: &DagState,
+    _stream_deltas: &[NodeDelta],
+) -> Vec<SourceDelta> {
+    let mut source_deltas = Vec::new();
+
+    for desired_source in &desired.sources {
+        if !desired_source.owned {
+            // Unowned sources: tracked for reference but no DDL emitted.
+            continue;
+        }
+
+        let actual_source = actual.find_source(&desired_source.qualified_name);
+
+        let kind = match actual_source {
+            None => SourceDeltaKind::AlterDdl, // New owned source — treat as DDL change.
+            Some(actual_src) => {
+                if normalise_sql(desired_source.create_sql.as_deref().unwrap_or(""))
+                    != normalise_sql(actual_src.create_sql.as_deref().unwrap_or(""))
+                {
+                    SourceDeltaKind::AlterDdl
+                } else {
+                    SourceDeltaKind::Unchanged
+                }
+            }
+        };
+
+        if kind == SourceDeltaKind::Unchanged {
+            continue;
+        }
+
+        // Find stream tables that reference this source table.
+        let cascade_impacts = find_cascade_impacts(&desired_source.qualified_name, desired);
+
+        source_deltas.push(SourceDelta {
+            qualified_name: desired_source.qualified_name.clone(),
+            kind,
+            desired_ddl: desired_source.create_sql.clone(),
+            cascade_impacts,
+        });
+    }
+
+    source_deltas
+}
+
+/// Find all stream tables that reference the given source table in their query.
+///
+/// Returns the list of impacted stream tables with their migration class
+/// (always Rebuild for a base-table DDL change, since column structure may have changed).
+fn find_cascade_impacts(source: &QualifiedName, desired: &DagState) -> Vec<CascadeImpact> {
+    let mut impacts = Vec::new();
+
+    for stream_table in &desired.stream_tables {
+        if query_references_table(&stream_table.query, source) {
+            impacts.push(CascadeImpact {
+                stream_table: stream_table.qualified_name.clone(),
+                class: "rebuild".to_string(),
+            });
+        }
+    }
+
+    impacts
+}
+
+/// Check whether a SQL query references the given qualified table name.
+fn query_references_table(sql: &str, target: &QualifiedName) -> bool {
+    use sqlparser::dialect::PostgreSqlDialect;
+    use sqlparser::parser::Parser;
+
+    let dialect = PostgreSqlDialect {};
+    let Ok(stmts) = Parser::parse_sql(&dialect, sql) else {
+        return false;
+    };
+
+    for stmt in &stmts {
+        if stmt_references_table(stmt, target) {
+            return true;
+        }
+    }
+    false
+}
+
+fn stmt_references_table(stmt: &sqlparser::ast::Statement, target: &QualifiedName) -> bool {
+    use sqlparser::ast::Statement;
+    if let Statement::Query(q) = stmt {
+        return set_expr_references_table(&q.body, target);
+    }
+    false
+}
+
+fn set_expr_references_table(expr: &sqlparser::ast::SetExpr, target: &QualifiedName) -> bool {
+    use sqlparser::ast::SetExpr;
+    match expr {
+        SetExpr::Select(sel) => {
+            for table_with_joins in &sel.from {
+                if table_factor_references(&table_with_joins.relation, target) {
+                    return true;
+                }
+                for join in &table_with_joins.joins {
+                    if table_factor_references(&join.relation, target) {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+        SetExpr::SetOperation { left, right, .. } => {
+            set_expr_references_table(left, target) || set_expr_references_table(right, target)
+        }
+        _ => false,
+    }
+}
+
+fn table_factor_references(factor: &sqlparser::ast::TableFactor, target: &QualifiedName) -> bool {
+    use sqlparser::ast::TableFactor;
+    match factor {
+        TableFactor::Table { name, .. } => {
+            let parts: Vec<&str> = name.0.iter().map(|id| id.value.as_str()).collect();
+            let qname = match parts.as_slice() {
+                [schema, table] => QualifiedName::new(*schema, *table),
+                [table] => QualifiedName::new("public", *table),
+                _ => return false,
+            };
+            &qname == target
+        }
+        TableFactor::Derived { subquery, .. } => set_expr_references_table(&subquery.body, target),
+        TableFactor::NestedJoin {
+            table_with_joins, ..
+        } => {
+            if table_factor_references(&table_with_joins.relation, target) {
+                return true;
+            }
+            table_with_joins
+                .joins
+                .iter()
+                .any(|j| table_factor_references(&j.relation, target))
+        }
+        _ => false,
+    }
 }
 
 fn classify_change(desired: &StreamTableSpec, actual: &StreamTableSpec) -> DeltaKind {
@@ -147,6 +342,7 @@ mod tests {
             cdc_mode: None,
             explicit_depends_on: vec![],
             depends_on: vec![],
+            cypher_source: None,
         }
     }
 

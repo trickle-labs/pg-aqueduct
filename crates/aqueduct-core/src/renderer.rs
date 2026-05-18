@@ -1,3 +1,4 @@
+use crate::cost::PlanCost;
 use crate::plan::Plan;
 
 /// Render a plan as human-readable terminal text.
@@ -5,6 +6,25 @@ pub fn render_plan_text(
     plan: &Plan,
     pg_version: Option<&str>,
     pgtrickle_version: Option<&str>,
+) -> String {
+    render_plan_text_inner(plan, pg_version, pgtrickle_version, None)
+}
+
+/// Render a plan with per-step cost estimates.
+pub fn render_plan_text_with_cost(
+    plan: &Plan,
+    pg_version: Option<&str>,
+    pgtrickle_version: Option<&str>,
+    cost: &PlanCost,
+) -> String {
+    render_plan_text_inner(plan, pg_version, pgtrickle_version, Some(cost))
+}
+
+fn render_plan_text_inner(
+    plan: &Plan,
+    pg_version: Option<&str>,
+    pgtrickle_version: Option<&str>,
+    cost: Option<&PlanCost>,
 ) -> String {
     let mut out = String::new();
 
@@ -45,20 +65,49 @@ pub fn render_plan_text(
 
     out.push('\n');
 
-    // Step table.
+    // Step table — show cost estimates when available.
     if !plan.summary.changes.is_empty() {
-        out.push_str(&format!(
-            "  {:<35} {:<15} {:<10}\n",
-            "Step", "Rows (est)", "Class"
-        ));
-        out.push_str(&format!("  {}\n", "─".repeat(65)));
+        if let Some(cost_data) = cost {
+            // Full cost breakdown.
+            out.push_str(&format!(
+                "  {:<35} {:<15} {:<15} {:<10}\n",
+                "Step", "Rows (est)", "Duration (est)", "Class"
+            ));
+            out.push_str(&format!("  {}\n", "─".repeat(80)));
 
-        for change in &plan.summary.changes {
-            let rows = "—";
+            for sc in &cost_data.steps {
+                // Skip housekeeping steps from the cost table.
+                if sc.class == "free"
+                    && (sc.step.starts_with("Acquire")
+                        || sc.step.starts_with("Record")
+                        || sc.step.starts_with("Release")
+                        || sc.step.starts_with("Validate"))
+                {
+                    continue;
+                }
+                let rows = sc
+                    .estimated_rows
+                    .map(|r| format!("{}", r))
+                    .unwrap_or_else(|| "—".to_string());
+                out.push_str(&format!(
+                    "  {:<35} {:<15} {:<15} {:<10}\n",
+                    sc.step, rows, sc.estimated_duration, sc.class
+                ));
+            }
+        } else {
             out.push_str(&format!(
                 "  {:<35} {:<15} {:<10}\n",
-                change.description, rows, change.class
+                "Step", "Rows (est)", "Class"
             ));
+            out.push_str(&format!("  {}\n", "─".repeat(65)));
+
+            for change in &plan.summary.changes {
+                let rows = "—";
+                out.push_str(&format!(
+                    "  {:<35} {:<15} {:<10}\n",
+                    change.description, rows, change.class
+                ));
+            }
         }
     }
 

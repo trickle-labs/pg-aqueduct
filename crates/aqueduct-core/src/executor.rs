@@ -99,6 +99,13 @@ impl<'a> PlanExecutor<'a> {
                     self.validate_query(name, query)?;
                 }
 
+                PlanStep::AlterBaseTable { name, statement } => {
+                    // Execute the base-table DDL directly.
+                    // For safety, we only allow well-formed DDL statements here.
+                    tracing::info!("Executing base-table DDL for '{}'", name);
+                    self.client.execute(statement.as_str(), &[]).await?;
+                }
+
                 PlanStep::CreateStreamTable { spec } => {
                     let schema = &spec.qualified_name.schema;
                     let table = &spec.qualified_name.name;

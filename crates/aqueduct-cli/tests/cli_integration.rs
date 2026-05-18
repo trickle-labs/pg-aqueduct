@@ -226,3 +226,155 @@ async fn test_multi_level_dag() {
     let aggregated_pos = names.iter().position(|&n| n == "aggregated").unwrap();
     assert!(normalized_pos < aggregated_pos);
 }
+
+// ── v0.2 tests ───────────────────────────────────────────────────────────────
+
+/// Test: cypher_source directive is parsed without unknown-key warning.
+#[tokio::test]
+async fn test_cypher_source_no_warning() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write_project(
+        tmp.path(),
+        "cypher-test",
+        &[(
+            "graph_agg",
+            r#"-- @aqueduct:schedule = "30s"
+-- @aqueduct:cypher_source = "queries/graph_agg.cypher"
+SELECT node_id, COUNT(*) AS degree FROM edges GROUP BY node_id;
+"#,
+        )],
+    );
+
+    let files =
+        aqueduct_core::parser::load_migrations(tmp.path(), &std::collections::HashMap::new())
+            .unwrap();
+
+    assert_eq!(files.len(), 1);
+    assert_eq!(
+        files[0].front_matter.cypher_source.as_deref(),
+        Some("queries/graph_agg.cypher")
+    );
+    assert!(
+        files[0].unknown_keys.is_empty(),
+        "cypher_source must not generate unknown-key warning"
+    );
+}
+
+/// Test: in-place plan does not trigger a FULL rebuild.
+#[tokio::test]
+async fn test_in_place_plan_no_full_rebuild() {
+    use aqueduct_core::classifier::{classify_delta, MigrationClass};
+    use aqueduct_core::dag::{
+        build_dag_state, DagState, QualifiedName, RefreshMode, StreamTableSpec,
+    };
+    use aqueduct_core::diff::{compute_diff, DeltaKind};
+
+    // Actual state: order_totals with just `total`.
+    let actual = DagState {
+        stream_tables: vec![StreamTableSpec {
+            qualified_name: QualifiedName::new("public", "order_totals"),
+            query: "SELECT customer_id, SUM(amount) AS total FROM orders GROUP BY customer_id"
+                .to_string(),
+            refresh_mode: RefreshMode::Differential,
+            schedule: "30s".to_string(),
+            cdc_mode: None,
+            explicit_depends_on: vec![],
+            depends_on: vec![],
+            cypher_source: None,
+        }],
+        sources: vec![],
+    };
+
+    // Desired: add COUNT(*) column.
+    let files = vec![aqueduct_core::parser::parse_migration_file(
+        &PathBuf::from("order_totals.sql"),
+        r#"-- @aqueduct:schedule = "30s"
+-- @aqueduct:refresh_mode = "DIFFERENTIAL"
+SELECT customer_id, SUM(amount) AS total, COUNT(*) AS order_count FROM orders GROUP BY customer_id;
+"#,
+        &std::collections::HashMap::new(),
+    )
+    .unwrap()];
+    let desired = build_dag_state(&files, false).unwrap();
+
+    let diff = compute_diff(&desired, &actual);
+    assert!(!diff.is_empty());
+
+    let changes = diff.changes();
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].kind, DeltaKind::AlterQuery);
+
+    let class = classify_delta(changes[0]);
+    assert_eq!(
+        class,
+        MigrationClass::InPlace,
+        "Column addition should be in-place"
+    );
+}
+
+/// Test: FULL→DIFF refresh_mode change produces a rebuild plan.
+#[tokio::test]
+async fn test_full_to_diff_mode_change_classified_rebuild() {
+    use aqueduct_core::classifier::{classify_delta, MigrationClass};
+    use aqueduct_core::dag::{QualifiedName, RefreshMode, StreamTableSpec};
+    use aqueduct_core::diff::{DeltaKind, NodeDelta};
+
+    let make_spec = |mode: RefreshMode| StreamTableSpec {
+        qualified_name: QualifiedName::new("public", "test_agg"),
+        query: "SELECT a, SUM(b) FROM t GROUP BY a".to_string(),
+        refresh_mode: mode,
+        schedule: "30s".to_string(),
+        cdc_mode: None,
+        explicit_depends_on: vec![],
+        depends_on: vec![],
+        cypher_source: None,
+    };
+
+    let delta = NodeDelta {
+        qualified_name: QualifiedName::new("public", "test_agg"),
+        kind: DeltaKind::AlterRefreshMode,
+        desired: Some(make_spec(RefreshMode::Differential)),
+        actual: Some(make_spec(RefreshMode::Full)),
+    };
+
+    assert_eq!(classify_delta(&delta), MigrationClass::Rebuild);
+}
+
+/// Test: explain-cost renders a cost breakdown table.
+#[tokio::test]
+async fn test_plan_renderer_with_cost() {
+    let db = aqueduct_testkit::TestDb::new().await.expect("start db");
+    db.install_mock_pgtrickle().await.expect("install mock");
+    db.install_aqueduct_catalog().await.expect("init catalog");
+
+    db.client
+        .execute(
+            "CREATE TABLE raw_orders (id bigint, customer_id bigint, amount numeric)",
+            &[],
+        )
+        .await
+        .expect("create source");
+
+    let file = aqueduct_core::parser::parse_migration_file(
+        &PathBuf::from("order_totals.sql"),
+        "-- @aqueduct:schedule = \"30s\"\nSELECT customer_id, SUM(amount) AS total FROM raw_orders GROUP BY customer_id;",
+        &std::collections::HashMap::new(),
+    )
+    .unwrap();
+
+    let desired = aqueduct_core::dag::build_dag_state(&[file], false).unwrap();
+    let actual = aqueduct_core::live_state::read_live_state(&db.client)
+        .await
+        .unwrap();
+    let diff = aqueduct_core::diff::compute_diff(&desired, &actual);
+    let topo = aqueduct_core::dag::topological_sort(&desired).unwrap();
+    let plan = aqueduct_core::plan::build_plan("cost-render-test", None, 1, &diff, &topo);
+
+    let cost = aqueduct_core::cost::estimate_plan_cost(&db.client, &plan, None)
+        .await
+        .unwrap();
+
+    let text = aqueduct_core::renderer::render_plan_text_with_cost(&plan, None, None, &cost);
+    assert!(text.contains("cost-render-test"));
+    assert!(text.contains("Duration (est)"));
+}

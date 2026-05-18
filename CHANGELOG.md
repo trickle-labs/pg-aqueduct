@@ -7,9 +7,90 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [v0.2.0 — Online Schema Evolution](#v020--online-schema-evolution)
 - [v0.1.0 — Initial Implementation](#v010--initial-implementation)
 - [Unreleased — Repository Bootstrap](#unreleased--repository-bootstrap)
 <!-- TOC end -->
+
+---
+
+## [v0.2.0] — Online Schema Evolution
+
+**Released:** 2026-05-18
+**Tag:** [`v0.2.0`](https://github.com/trickle-labs/pg-aqueduct/releases/tag/v0.2.0)
+
+All Phase 3 roadmap items are complete. Column additions, column removals, and
+DIFF→FULL refresh-mode changes are now recognised as zero-rebuild (in-place)
+operations. Base-table DDL changes cascade automatically to downstream stream tables.
+Per-step cost estimates are available via `aqueduct plan --explain-cost`.
+
+### What's New
+
+#### Full Migration Classifier
+
+The migration classifier now implements the complete v0.2 decision tree:
+
+| Change | Class |
+|---|---|
+| Schedule, `cdc_mode`, `refresh_mode` DIFF→FULL | Free |
+| Add a passthrough or aggregate column | In-place |
+| Drop a column from SELECT | In-place |
+| Rename a column | Rebuild |
+| Change `GROUP BY` keys | Rebuild |
+| Change a JOIN condition or add/remove a JOIN | Rebuild |
+| Change a `WHERE` predicate | Rebuild |
+| Switch `refresh_mode` FULL→DIFF | Rebuild (establishes delta state) |
+| Topology change (split or merge nodes) | Blue/green |
+
+Previously, any query change defaulted to Rebuild.  With v0.2, column additions and
+removals on structurally-unchanged queries are correctly identified as in-place
+migrations — preserving materialized state and avoiding a full table scan.
+
+#### `pg_eddy` Cypher Source Handling
+
+Stream tables backed by `pg_eddy` Cypher queries now use the
+`@aqueduct:cypher_source` front-matter directive to point to the `.cypher` source
+file.  The directive is recognised by the parser and stored on `StreamTableSpec`
+without generating unknown-key lint warnings.
+
+#### ALTER TABLE Cascade Analysis (Tier 1)
+
+When an owned source table's DDL changes, `aqueduct plan` now:
+1. Emits an `AlterBaseTable` plan step to execute the DDL.
+2. Automatically identifies every stream-table node whose query references the altered
+   table (via `sqlparser`-based query analysis).
+3. Schedules a coordinated Rebuild cascade for all impacted stream tables in the same
+   plan.
+
+This replaces the previous manual workflow of updating source DDL and then separately
+planning the stream-table changes.
+
+#### `aqueduct plan --explain-cost`
+
+The new `--explain-cost` flag adds per-step cost estimates to the plan output:
+
+```
+Step                          Rows (est)    Duration (est)    Class
+───────────────────────────────────────────────────────────────────────────────
+ALTER stream order_totals       —             < 1s            rebuild
+BACKFILL order_totals           1.2M          ~45s            rebuild
+ALTER stream customer_summary   —             < 1s            in-place
+BACKFILL customer_summary       340K          ~12s            in-place
+```
+
+Row counts are obtained via `EXPLAIN (FORMAT JSON)` and duration is estimated from
+`rows × 200 bytes / write_throughput` (default 50 MB/s, calibrated per-cluster by
+`aqueduct init`).
+
+#### Testing
+
+- **16 classifier unit tests** covering every decision-tree entry.
+- **7 new integration tests** covering: in-place column addition, in-place column
+  removal, FULL→DIFF rebuild, `cypher_source` parsing, source DDL cascade analysis,
+  `AlterBaseTable` plan step, and `--explain-cost` cost estimation.
+- **4 new CLI integration tests** covering: `cypher_source` no-warning, in-place
+  plan detection, FULL→DIFF rebuild classification, and cost renderer.
+- **Total: 85 tests; none skipped.**
 
 ---
 
