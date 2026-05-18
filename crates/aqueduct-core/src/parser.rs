@@ -62,6 +62,12 @@ pub struct FrontMatter {
     /// Schema in which the stream table should live (default: "public").
     pub schema: Option<String>,
 
+    /// Path to a `.cypher` source file for `pg_eddy`-backed stream tables.
+    /// When set, the SQL body in this migration file was compiled from the Cypher
+    /// query at this path.  `aqueduct plan` translates the current Cypher via
+    /// `pg_eddy.cypher_to_sql()` before running IVM pre-validation.
+    pub cypher_source: Option<String>,
+
     /// Unknown / forward-compatible keys (stored for lint warnings).
     #[serde(flatten)]
     pub unknown_keys: HashMap<String, serde_json::Value>,
@@ -198,6 +204,7 @@ fn parse_front_matter(filename: &str, lines: &[String]) -> Result<(FrontMatter, 
     let mut refresh_mode: Option<String> = None;
     let mut cdc_mode: Option<String> = None;
     let mut schema: Option<String> = None;
+    let mut cypher_source: Option<String> = None;
     let mut unknown_keys: Vec<String> = Vec::new();
     let mut known_key_values: HashMap<String, serde_json::Value> = HashMap::new();
 
@@ -231,6 +238,9 @@ fn parse_front_matter(filename: &str, lines: &[String]) -> Result<(FrontMatter, 
                 "schema" => {
                     schema = Some(strip_string_quotes(raw_value).to_string());
                 }
+                "cypher_source" => {
+                    cypher_source = Some(strip_string_quotes(raw_value).to_string());
+                }
                 other => {
                     unknown_keys.push(other.to_string());
                     // Store for forward-compat.
@@ -251,6 +261,7 @@ fn parse_front_matter(filename: &str, lines: &[String]) -> Result<(FrontMatter, 
         refresh_mode,
         cdc_mode,
         schema,
+        cypher_source,
         unknown_keys: known_key_values,
     };
 

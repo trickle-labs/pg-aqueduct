@@ -78,6 +78,9 @@ pub struct StreamTableSpec {
     pub explicit_depends_on: Vec<QualifiedName>,
     /// All dependencies (explicit + inferred from SQL).
     pub depends_on: Vec<QualifiedName>,
+    /// Path to the `.cypher` source file for pg_eddy-backed stream tables.
+    /// When set, the SQL body was compiled from this Cypher query.
+    pub cypher_source: Option<String>,
 }
 
 /// A source (base table) tracked for cascade analysis.
@@ -169,6 +172,7 @@ pub fn build_dag_state(files: &[MigrationFile], infer_deps: bool) -> Result<DagS
                     cdc_mode: file.front_matter.cdc_mode.clone(),
                     explicit_depends_on,
                     depends_on: all_deps,
+                    cypher_source: file.front_matter.cypher_source.clone(),
                 });
             }
             MigrationKind::Source => {

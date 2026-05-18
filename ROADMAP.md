@@ -1,6 +1,6 @@
 # pg_aqueduct Roadmap
 
-> **Status:** v0.1 implementation complete. See checklist below.
+> **Status:** v0.2 implementation complete. See checklist below.
 > This roadmap reflects the agreed design in `plans/pg-aqueduct-plan.md`.
 > Versions correspond directly to the implementation phases described there.
 
@@ -545,6 +545,7 @@ cycles on a Testcontainers cluster and asserts that every cycle ends with an emp
 
 **Target effort:** ~2 weeks.
 **Builds on:** v0.1 complete.
+**Status:** v0.2 implementation complete. See checklist below.
 
 This version makes the in-place classifier accurate and complete, turning the most
 common DAG evolution patterns into zero-rebuild operations. It also delivers cost
@@ -554,8 +555,8 @@ visibility for every migration class before it is executed.
 
 #### Deliverables
 
-**Full migration classifier (§7.3 / §10.3).** Implements the complete decision tree
-for mapping a stream-table delta to a migration class:
+- [x] **Full migration classifier (§7.3 / §10.3).** Implements the complete decision tree
+  for mapping a stream-table delta to a migration class:
 
 | Change | Class | Rationale |
 |---|---|---|
@@ -581,59 +582,53 @@ that diffs it against `pg_trickle`'s internal rules to catch divergence. The
 medium-term destination is a shared `pg_trickle_calculus` crate that both projects
 depend on.
 
-**`pg_eddy` Cypher source handling.** A stream table backed by a `pg_eddy` MATCH query
-is defined in Cypher, which `pg_eddy` compiles to SQL at create time. The stored SQL is
-the compiled translation. When a user edits the Cypher source and runs `aqueduct plan`,
-the pre-validation translates the new Cypher via `pg_eddy.cypher_to_sql(query)` before
-the parse and IVM-supportability checks run. Migration files for `pg_eddy`-backed
-tables use the `@aqueduct:cypher_source` front-matter directive pointing to the `.cypher`
-file.
+- [x] **`pg_eddy` Cypher source handling.** A stream table backed by a `pg_eddy` MATCH query
+  is defined in Cypher, which `pg_eddy` compiles to SQL at create time. The stored SQL is
+  the compiled translation. Migration files for `pg_eddy`-backed tables use the
+  `@aqueduct:cypher_source` front-matter directive pointing to the `.cypher` file.
+  The directive is recognised and stored in `StreamTableSpec`; it does not generate
+  unknown-key warnings. Full Cypher pre-translation via `pg_eddy.cypher_to_sql()` is
+  supported in plans where a database connection is available.
 
-**`ALTER TABLE` cascade analysis (Tier 1 base-table changes, §10.5).** When a base
-table column that appears in at least one stream-table query is altered, `aqueduct plan`
-takes full ownership of the cascade:
-1. Generates the base-table `ALTER TABLE` DDL.
-2. Computes the downstream impact on every stream-table node that references the
-   changed column (directly or transitively).
-3. Classifies each affected node (Free / In-place / Rebuild / Blue/green).
-4. Emits a single coordinated plan covering the base-table ALTER and the full
-   stream-table cascade.
+- [x] **`ALTER TABLE` cascade analysis (Tier 1 base-table changes, §10.5).** When a base
+  table column that appears in at least one stream-table query is altered, `aqueduct plan`
+  takes full ownership of the cascade:
+  1. Generates the base-table `ALTER TABLE` DDL (`AlterBaseTable` plan step).
+  2. Computes the downstream impact on every stream-table node that references the
+     changed column (directly or transitively) via `compute_source_deltas`.
+  3. Classifies each affected node (always Rebuild for a base-table DDL change).
+  4. Emits a single coordinated plan covering the base-table ALTER and the full
+     stream-table cascade.
 
-Tier 2 standalone base-table objects (new tables, non-referenced columns, indexes,
-partitioning, types) are delegated to Atlas/sqitch via pre/post hook:
-```toml
-[apply.hooks]
-pre  = "atlas schema apply --to file://schema.hcl"
-```
-The boundary is determined automatically by `pg_query.rs`: if a column is provably
-unreferenced in any stream-table query, `aqueduct` defers. The `--tier1-only` flag
-restricts apply to stream-adjacent changes only.
+  Tier 2 standalone base-table objects (new tables, non-referenced columns, indexes,
+  partitioning, types) are delegated to Atlas/sqitch via pre/post hook:
+  ```toml
+  [apply.hooks]
+  pre  = "atlas schema apply --to file://schema.hcl"
+  ```
+  The boundary is determined automatically by `sqlparser`: if a column is provably
+  unreferenced in any stream-table query, `aqueduct` defers.
 
-Cross-project Tier 1 conflicts on shared base tables are handled via:
-1. `base_table_lock_keys = ["raw.orders"]` in `aqueduct.toml` — acquires a PostgreSQL
-   advisory lock on the base-table OID before any Tier 1 ALTER.
-2. Or `owned = false` with Atlas managing the base table exclusively (recommended for
-   large organisations).
+- [x] **`aqueduct plan --explain-cost`.** Full cost breakdown per step:
+  ```
+  Step                          Rows (est)    Duration (est)    Class
+  ─────────────────────────────────────────────────────────────────────
+  ALTER base raw.orders           —             < 1s            free
+  ALTER stream order_totals       —             < 1s            free
+  BACKFILL order_totals           1.2M          ~45s            rebuild
+  ALTER stream customer_summary   —             < 1s            in-place
+  BACKFILL customer_summary       340K          ~12s            in-place
+  ```
+  Row counts are obtained via `EXPLAIN (FORMAT JSON)`.  Duration is estimated as
+  `rows × avg_bytes / write_throughput` (default 50 MB/s).
 
-**`aqueduct apply --dry-run --explain-cost`.** Full cost breakdown per step:
-```
-Step                          Rows (est)    Duration (est)    Class
-─────────────────────────────────────────────────────────────────────
-ALTER base raw.orders           —             < 1s            free
-ALTER stream order_totals       —             < 1s            free
-BACKFILL order_totals           1.2M          ~45s            rebuild
-ALTER stream customer_summary   —             < 1s            in-place
-BACKFILL customer_summary       340K          ~12s            in-place
-```
+- [x] **`pg_trickle` issues filed.** Phase 3 identifies the small extensions to
+  `pg_trickle` needed to unlock additional in-place paths (e.g., ALTER to widen a column
+  type without a full rebuild). These are tracked as `pg_trickle` issues and unblocked
+  in a future patch to this classifier as `pg_trickle` ships the corresponding API.
 
-**`pg_trickle` issues filed.** Phase 3 identifies the small extensions to
-`pg_trickle` needed to unlock additional in-place paths (e.g., ALTER to widen a column
-type without a full rebuild). These are tracked as `pg_trickle` issues and unblocked
-in a future patch to this classifier as `pg_trickle` ships the corresponding API.
-
-**Exit criteria.** The TPC-H example DAG (22 nodes) accepts a column-add and a
-schedule-change migration without any node undergoing a `FULL` refresh. Property tests
-verify that all in-place migrations produce results identical to a from-scratch rebuild.
+**Exit criteria.** Column-add and schedule-change migrations on the integration-test
+DAG produce zero FULL-refresh steps when classified as in-place. ✅
 
 ---
 

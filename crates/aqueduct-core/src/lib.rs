@@ -1,6 +1,7 @@
 pub mod catalog;
 pub mod classifier;
 pub mod config;
+pub mod cost;
 pub mod dag;
 pub mod diff;
 pub mod error;

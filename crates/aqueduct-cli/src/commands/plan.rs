@@ -1,10 +1,13 @@
 use aqueduct_core::{
     config::AqueductConfig,
+    cost::estimate_plan_cost,
     dag::{build_dag_state, topological_sort},
     diff::compute_diff,
     live_state::{check_pgtrickle_version, read_live_state},
     plan::build_plan,
-    renderer::{render_plan_json, render_plan_markdown, render_plan_text},
+    renderer::{
+        render_plan_json, render_plan_markdown, render_plan_text, render_plan_text_with_cost,
+    },
 };
 use clap::Args;
 
@@ -35,6 +38,10 @@ pub struct PlanArgs {
     /// Check IVM supportability of all queries.
     #[arg(long, default_value = "true")]
     pub validate_ivm: bool,
+
+    /// Show per-step cost estimates (row count, estimated duration).
+    #[arg(long)]
+    pub explain_cost: bool,
 }
 
 pub async fn run(args: PlanArgs) -> anyhow::Result<()> {
@@ -103,7 +110,19 @@ pub async fn run(args: PlanArgs) -> anyhow::Result<()> {
     let output = match args.format.as_str() {
         "json" => render_plan_json(&plan),
         "markdown" | "md" => render_plan_markdown(&plan),
-        _ => render_plan_text(&plan, pg_version.as_deref(), pgtrickle_version.as_deref()),
+        _ => {
+            if args.explain_cost {
+                let cost = estimate_plan_cost(&client, &plan, None).await?;
+                render_plan_text_with_cost(
+                    &plan,
+                    pg_version.as_deref(),
+                    pgtrickle_version.as_deref(),
+                    &cost,
+                )
+            } else {
+                render_plan_text(&plan, pg_version.as_deref(), pgtrickle_version.as_deref())
+            }
+        }
     };
 
     println!("{}", output);

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::classifier::MigrationClass;
 use crate::dag::{QualifiedName, StreamTableSpec};
-use crate::diff::{DagDiff, DeltaKind, NodeDelta};
+use crate::diff::{DagDiff, DeltaKind, NodeDelta, SourceDeltaKind};
 
 /// A single migration step in a plan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16,6 +16,11 @@ pub enum PlanStep {
     ValidateQuery {
         name: String,
         query: String,
+    },
+    /// Base-table DDL for Tier 1 stream-adjacent columns.
+    AlterBaseTable {
+        name: QualifiedName,
+        statement: String,
     },
     CreateStreamTable {
         spec: StreamTableSpec,
@@ -51,6 +56,9 @@ impl PlanStep {
             }
             PlanStep::ValidateQuery { name, .. } => {
                 format!("Validate query for '{}'", name)
+            }
+            PlanStep::AlterBaseTable { name, .. } => {
+                format!("ALTER base table '{}'", name)
             }
             PlanStep::CreateStreamTable { spec } => {
                 format!("CREATE stream table '{}'", spec.qualified_name)
@@ -131,11 +139,84 @@ pub fn build_plan(
         ttl: "30s".to_string(),
     });
 
+    // ── Source (base table) changes come first so the cascade steps see the
+    // already-altered schema when they execute. ─────────────────────────────
+    for source_delta in diff.source_changes() {
+        if source_delta.kind == SourceDeltaKind::Unchanged {
+            continue;
+        }
+
+        if let Some(ddl) = &source_delta.desired_ddl {
+            steps.push(PlanStep::AlterBaseTable {
+                name: source_delta.qualified_name.clone(),
+                statement: ddl.clone(),
+            });
+
+            summary.alters += 1;
+            summary.rebuild_count += source_delta.cascade_impacts.len();
+            summary.changes.push(PlanChange {
+                symbol: "~".to_string(),
+                name: source_delta.qualified_name.to_string(),
+                class: "rebuild".to_string(),
+                description: format!(
+                    "base table DDL changed; {} stream table{} affected",
+                    source_delta.cascade_impacts.len(),
+                    if source_delta.cascade_impacts.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ),
+            });
+
+            // Emit cascade rebuild for each impacted stream table.
+            for impact in &source_delta.cascade_impacts {
+                // Find the desired spec so we can recreate it correctly.
+                if let Some(stream_desired) = topo_order
+                    .iter()
+                    .find(|n| **n == impact.stream_table)
+                    .and_then(|name| {
+                        diff.deltas
+                            .iter()
+                            .find(|d| d.qualified_name == *name)
+                            .and_then(|d| d.desired.as_ref())
+                    })
+                {
+                    steps.push(PlanStep::ValidateQuery {
+                        name: stream_desired.qualified_name.to_string(),
+                        query: stream_desired.query.clone(),
+                    });
+                    steps.push(PlanStep::DropStreamTable {
+                        name: stream_desired.qualified_name.clone(),
+                        cascade: false,
+                    });
+                    steps.push(PlanStep::CreateStreamTable {
+                        spec: stream_desired.clone(),
+                    });
+                    steps.push(PlanStep::Backfill {
+                        name: stream_desired.qualified_name.clone(),
+                        mode: "FULL".to_string(),
+                    });
+                }
+            }
+        }
+    }
+
     // Sort deltas by topological order.
     let ordered_deltas = order_deltas(diff, topo_order);
 
     for delta in &ordered_deltas {
         if delta.kind == DeltaKind::Unchanged {
+            continue;
+        }
+
+        // Skip stream tables that were already handled as cascade impacts.
+        let already_cascaded = diff.source_changes().iter().any(|s| {
+            s.cascade_impacts
+                .iter()
+                .any(|i| i.stream_table == delta.qualified_name)
+        });
+        if already_cascaded {
             continue;
         }
 
@@ -195,28 +276,52 @@ pub fn build_plan(
                 let desired = delta.desired.as_ref().unwrap();
                 let actual = delta.actual.as_ref().unwrap();
 
-                steps.push(PlanStep::AlterStreamTable {
-                    name: delta.qualified_name.clone(),
-                    schedule: if desired.schedule != actual.schedule {
-                        Some(desired.schedule.clone())
-                    } else {
-                        None
-                    },
-                    refresh_mode: if desired.refresh_mode != actual.refresh_mode {
-                        Some(desired.refresh_mode.to_string())
-                    } else {
-                        None
-                    },
-                    cdc_mode: if desired.cdc_mode != actual.cdc_mode {
-                        desired.cdc_mode.clone()
-                    } else {
-                        None
-                    },
-                    new_query: None,
-                });
+                // For FULL→DIFF refresh_mode change, the classifier returns Rebuild.
+                if class == MigrationClass::Rebuild {
+                    // Must drop + recreate to establish delta-tracking state.
+                    if !desired.query.is_empty() {
+                        steps.push(PlanStep::ValidateQuery {
+                            name: delta.qualified_name.to_string(),
+                            query: desired.query.clone(),
+                        });
+                    }
+                    steps.push(PlanStep::DropStreamTable {
+                        name: delta.qualified_name.clone(),
+                        cascade: false,
+                    });
+                    steps.push(PlanStep::CreateStreamTable {
+                        spec: desired.clone(),
+                    });
+                    steps.push(PlanStep::Backfill {
+                        name: delta.qualified_name.clone(),
+                        mode: "FULL".to_string(),
+                    });
+                    summary.alters += 1;
+                    summary.rebuild_count += 1;
+                } else {
+                    steps.push(PlanStep::AlterStreamTable {
+                        name: delta.qualified_name.clone(),
+                        schedule: if desired.schedule != actual.schedule {
+                            Some(desired.schedule.clone())
+                        } else {
+                            None
+                        },
+                        refresh_mode: if desired.refresh_mode != actual.refresh_mode {
+                            Some(desired.refresh_mode.to_string())
+                        } else {
+                            None
+                        },
+                        cdc_mode: if desired.cdc_mode != actual.cdc_mode {
+                            desired.cdc_mode.clone()
+                        } else {
+                            None
+                        },
+                        new_query: None,
+                    });
+                    summary.alters += 1;
+                    summary.free_count += 1;
+                }
 
-                summary.alters += 1;
-                summary.free_count += 1;
                 summary.changes.push(PlanChange {
                     symbol: change_symbol.to_string(),
                     name: delta.qualified_name.to_string(),
@@ -338,6 +443,7 @@ mod tests {
                 cdc_mode: None,
                 explicit_depends_on: vec![],
                 depends_on: vec![],
+                cypher_source: None,
             }),
             actual: None,
         }
@@ -347,6 +453,7 @@ mod tests {
     fn test_build_plan_create() {
         let diff = DagDiff {
             deltas: vec![make_create_delta("order_totals")],
+            source_deltas: vec![],
         };
         let topo = vec![QualifiedName::new("public", "order_totals")];
         let plan = build_plan("test-project", Some(0), 1, &diff, &topo);
