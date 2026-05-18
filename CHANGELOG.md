@@ -7,22 +7,26 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
-- [v0.7.0 — Documentation & Cookbook](#v070--documentation--cookbook)
-- [v0.6.0 — Production Hardening](#v060--production-hardening)
-- [v0.5.0 — dbt Interop](#v050--dbt-interop)
-- [v0.4.0 — CI Integrations & Ergonomics](#v040--ci-integrations--ergonomics)
-- [v0.3.0 — Blue/Green, Preview Environments & Optional Extension](#v030--bluegreen-preview-environments--optional-extension)
-- [v0.2.0 — Online Schema Evolution](#v020--online-schema-evolution)
+**Released**
 - [v0.1.0 — Initial Implementation](#v010--initial-implementation)
+
+**Planned**
+- [v0.2.0 — Online Schema Evolution](#v020--online-schema-evolution)
+- [v0.3.0 — Blue/Green, Preview Environments & Optional Extension](#v030--bluegreen-preview-environments--optional-extension)
+- [v0.4.0 — CI Integrations & Ergonomics](#v040--ci-integrations--ergonomics)
+- [v0.5.0 — dbt Interop](#v050--dbt-interop)
+- [v0.6.0 — Production Hardening](#v060--production-hardening)
+- [v0.7.0 — Documentation & Cookbook](#v070--documentation--cookbook)
+
+**Archive**
 - [Unreleased — Repository Bootstrap](#unreleased--repository-bootstrap)
 <!-- TOC end -->
 
 ---
 
-## [v0.7.0] — Documentation & Cookbook
+## [v0.7.0] — Documentation & Cookbook *(Planned)*
 
-**Released:** 2026-06-01
-**Tag:** [`v0.7.0`](https://github.com/trickle-labs/pg-aqueduct/releases/tag/v0.7.0)
+**Status:** Planned — not yet released
 
 All Phase 8 roadmap items are complete. v0.7 is the Documentation & Cookbook release —
 every feature delivered in v0.1–v0.6 is now fully documented with worked examples,
@@ -71,10 +75,9 @@ destroy, rollback, unlock), front-matter directive table, and `aqueduct.toml` sc
 
 ---
 
-## [v0.6.0] — Production Hardening
+## [v0.6.0] — Production Hardening *(Planned)*
 
-**Released:** 2026-05-18
-**Tag:** [`v0.6.0`](https://github.com/trickle-labs/pg-aqueduct/releases/tag/v0.6.0)
+**Status:** Planned — not yet released
 
 All Phase 7 roadmap items are complete. v0.6 takes every feature delivered in
 v0.1–v0.5 and subjects it to the rigour required for production deployments:
@@ -219,10 +222,9 @@ New v0.6 tests cover:
 
 ---
 
-## [v0.5.0] — dbt Interop
+## [v0.5.0] — dbt Interop *(Planned)*
 
-**Released:** 2026-05-18
-**Tag:** [`v0.5.0`](https://github.com/trickle-labs/pg-aqueduct/releases/tag/v0.5.0)
+**Status:** Planned — not yet released
 
 All Phase 6 roadmap items are complete. v0.5 makes `pg_aqueduct` a first-class
 participant in dbt-pgtrickle workflows by introducing `aqueduct ingest`, a new command
@@ -312,10 +314,9 @@ examples/dbt-roundtrip/
 
 ---
 
-## [v0.4.0] — CI Integrations & Ergonomics
+## [v0.4.0] — CI Integrations & Ergonomics *(Planned)*
 
-**Released:** 2026-05-18
-**Tag:** [`v0.4.0`](https://github.com/trickle-labs/pg-aqueduct/releases/tag/v0.4.0)
+**Status:** Planned — not yet released
 
 All Phase 5 roadmap items are complete. v0.4 wires `aqueduct plan` and `aqueduct apply`
 into standard CI/CD pipelines and adds `aqueduct fmt` and `aqueduct lint` to make the
@@ -425,10 +426,9 @@ repos:
 
 ---
 
-## [v0.3.0] — Blue/Green, Preview Environments & Optional Extension
+## [v0.3.0] — Blue/Green, Preview Environments & Optional Extension *(Planned)*
 
-**Released:** 2025-06-01
-**Tag:** [`v0.3.0`](https://github.com/trickle-labs/pg-aqueduct/releases/tag/v0.3.0)
+**Status:** Planned — not yet released
 
 All Phase 4 roadmap items are complete. v0.3 delivers zero-downtime structural DAG
 migrations via blue/green deployment, per-branch preview environments backed by
@@ -509,10 +509,9 @@ The `aqueduct` catalog schema is now at version 2. New tables:
 
 ---
 
-## [v0.2.0] — Online Schema Evolution
+## [v0.2.0] — Online Schema Evolution *(Planned)*
 
-**Released:** 2026-05-18
-**Tag:** [`v0.2.0`](https://github.com/trickle-labs/pg-aqueduct/releases/tag/v0.2.0)
+**Status:** Planned — not yet released
 
 All Phase 3 roadmap items are complete. Column additions, column removals, and
 DIFF→FULL refresh-mode changes are now recognised as zero-rebuild (in-place)
