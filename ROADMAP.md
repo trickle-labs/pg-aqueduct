@@ -32,7 +32,8 @@ versions build on earlier ones without breaking the established CLI surface.
 | [v0.4](#v04--ci-integrations--ergonomics) | CI integrations & ergonomics | 5 | 1 week |
 | [v0.5](#v05--dbt-interop) | dbt interop | 6 | 1 week |
 | [v0.6](#v06--production-hardening) | Production hardening | 7 | 3 weeks |
-| [v1.0](#v10--release-polish) | Release polish | 8 | 1 week |
+| [v0.7](#v07--documentation--cookbook) | Documentation & cookbook | 8 | 1 week |
+| [v1.0](#v10--release-engineering) | Release engineering | 9 | 1 week |
 | [v1.1](#v11--consumer-layer-management) | Consumer layer management | — | TBD |
 | [v2.0](#v20--multi-executor-support) | Multi-executor support | — | TBD |
 
@@ -976,22 +977,21 @@ nodes, base-table changes, topology restructuring) and asserts that:
 
 ---
 
-## v1.0 — Release Polish
+## v0.7 — Documentation & Cookbook
 
 **Target effort:** ~1 week.
 **Builds on:** v0.6 complete.
-**Milestone:** Public 1.0 release.
 
-This version completes the documentation, cookbook, and release engineering artefacts
-needed to call `pg_aqueduct` production-ready for the broader community.
+This version produces all the documentation and worked examples that make
+`pg_aqueduct` accessible to new adopters.
 
-### Phase 8 — Polish to v1.0 (1 week)
+### Phase 8 — Documentation & Cookbook (1 week)
 
 #### Deliverables
 
 **Migration cookbook.** 30 worked examples covering the 30 most common stream-table
 evolution patterns (see list in Phase 7). Every example is verified end-to-end against
-a Testcontainers cluster as part of the release gate.
+a Testcontainers cluster.
 
 **Public benchmark.** Time-to-apply for a 200-node DAG with a 5-node change set vs.
 drop/recreate (the current state of the art), published in `benchmarks/`. Demonstrates
@@ -1001,15 +1001,35 @@ in-place-eligible changes on large production DAGs.
 **Documentation completeness.** README, ESSENCE.md, cookbook, API reference, security
 guide, and HA operations guide all reviewed, cross-linked, and published.
 
+**v0.7 release criteria.**
+- All 30 cookbook patterns written and verified end-to-end.
+- Public documentation complete and reviewed.
+- Benchmark results published in `benchmarks/`.
+
+---
+
+## v1.0 — Release Engineering
+
+**Target effort:** ~1 week.
+**Builds on:** v0.7 complete.
+**Milestone:** Public 1.0 release.
+
+This version produces the release artefacts and performs the final gate checks needed
+for the public 1.0 announcement.
+
+### Phase 9 — Release Engineering (1 week)
+
+#### Deliverables
+
 **Reproducible release builds.** SHA256-verified binaries for Linux (x86_64, aarch64),
 macOS (x86_64, aarch64), and a Docker image. Build provenance attestation via
 `slsa-github-generator`.
 
 **v1.0 release criteria.**
-- All 30 cookbook patterns verified end-to-end.
-- Public documentation complete and reviewed.
+- Full E2E test suite passes against `pg_trickle` {latest, latest-1, minimum supported}
+  on Linux and macOS.
 - Reproducible release builds published with SHA256 checksums.
-- `aqueduct plan` + `aqueduct apply` roundtrip verified against all cookbook patterns.
+- `aqueduct plan` + `aqueduct apply` roundtrip verified against all 30 cookbook patterns.
 - No known data-loss bugs.
 
 ---
