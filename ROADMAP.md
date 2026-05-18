@@ -31,7 +31,8 @@ versions build on earlier ones without breaking the established CLI surface.
 | [v0.3](#v03--bluegreen-preview-environments--optional-extension) | Blue/green, preview environments, optional extension | 4 | 3 weeks |
 | [v0.4](#v04--ci-integrations--ergonomics) | CI integrations & ergonomics | 5 | 1 week |
 | [v0.5](#v05--dbt-interop) | dbt interop | 6 | 1 week |
-| [v1.0](#v10--production-hardening) | Production hardening | 7 | 3 weeks |
+| [v0.6](#v06--production-hardening) | Production hardening | 7 | 3 weeks |
+| [v1.0](#v10--release-polish) | Release polish | 8 | 1 week |
 | [v1.1](#v11--consumer-layer-management) | Consumer layer management | — | TBD |
 | [v2.0](#v20--multi-executor-support) | Multi-executor support | — | TBD |
 
@@ -899,16 +900,15 @@ twice produces no changes on the second run. ✅
 
 ---
 
-## v1.0 — Production Hardening
+## v0.6 — Production Hardening
 
 **Target effort:** ~3 weeks.
 **Builds on:** v0.5 complete.
-**Milestone:** Full production readiness. 14–22 weeks total from project start.
 
 This version takes all of v0.1–v0.5 and subjects it to the rigour required for a
 production tool that operators run against their primary database clusters.
 
-### Phase 7 — Hardening to v1.0 (3 weeks)
+### Phase 7 — Hardening to v0.6 (3 weeks)
 
 #### Deliverables
 
@@ -959,44 +959,6 @@ nodes, base-table changes, topology restructuring) and asserts that:
 - No plan leaves the database in an inconsistent state on simulated crash.
 - `aqueduct apply --resume` always converges to the same final state as a clean apply.
 
-**Migration cookbook.** 30 worked examples covering the 30 most common stream-table
-evolution patterns:
-1. Add a column to a GROUP BY aggregate
-2. Rename a stream table
-3. Split one stream table into two
-4. Merge two stream tables into one
-5. Change a stream table's aggregate key
-6. Switch a stream table from FULL to DIFFERENTIAL refresh
-7. Switch a stream table from DIFFERENTIAL to FULL refresh
-8. Add a new JOIN to a stream table
-9. Remove a JOIN from a stream table
-10. Add a base table column that flows into stream tables
-11. Drop a base table column referenced by stream tables
-12. Rename a base table column referenced by stream tables
-13. Change a CDC mode from `trigger` to `wal`
-14. Add a new stream table to the middle of a DAG
-15. Remove a stream table from the middle of a DAG
-16. Add a `pg_tide` outbox attachment to a stream table
-17. Remove a `pg_tide` outbox attachment from a stream table
-18. Change a stream table's schedule
-19. Enable `allow_full_refresh = false` on an existing project
-20. Migrate a diamond group (all members atomically)
-21. Blue/green migration of a 10-node sub-DAG
-22. Rollback after a failed Rebuild migration
-23. Rollback after a blue/green deployment
-24. Promote a migration from dev → staging → prod
-25. Import an existing `pg_trickle` deployment
-26. Import a `riverbank` IVM deployment (excluding `_riverbank.*`)
-27. Import a `pg_ripple` deployment (excluding `_pg_ripple.*`)
-28. Handle an IMMEDIATE stream table in a Rebuild migration
-29. Cross-environment parameterisation (different schedules per environment)
-30. Emergency `aqueduct unlock` after a crashed migration
-
-**Public benchmark.** Time-to-apply for a 200-node DAG with a 5-node change set vs.
-drop/recreate (the current state of the art), published in `benchmarks/`. Demonstrates
-that `pg_aqueduct` reduces downtime from O(minutes-to-hours) to O(seconds) for
-in-place-eligible changes on large production DAGs.
-
 **`aqueduct destroy`.** `aqueduct destroy --project <name> --to <target>`:
 1. Drops all stream tables owned by the project in reverse topological order.
 2. Drops consumer views managed by the project.
@@ -1005,15 +967,50 @@ in-place-eligible changes on large production DAGs.
 4. Does **not** drop the `aqueduct.` schema itself (other projects may share it).
 5. Requires `--confirm` flag or interactive prompt — irreversible and destructive.
 
-**v1.0 release criteria.**
+**v0.6 release criteria.**
 - Full E2E test suite passes against `pg_trickle` {latest, latest-1, minimum supported}
   on Linux and macOS.
 - No known data-loss bugs in the planner, executor, or rollback logic.
-- `aqueduct plan` + `aqueduct apply` roundtrip verified against all 30 cookbook patterns.
-- Public documentation complete: README, ESSENCE.md, cookbook, API reference, security
-  guide, and HA operations guide.
-- Reproducible release builds with SHA256-verified binaries for Linux (x86_64, aarch64),
-  macOS (x86_64, aarch64), and a Docker image.
+- All HA scenarios (Patroni, CloudNativePG, Stolon) verified end-to-end.
+- Planner fuzzing harness runs 10,000 random DAG mutations without inconsistency.
+
+---
+
+## v1.0 — Release Polish
+
+**Target effort:** ~1 week.
+**Builds on:** v0.6 complete.
+**Milestone:** Public 1.0 release.
+
+This version completes the documentation, cookbook, and release engineering artefacts
+needed to call `pg_aqueduct` production-ready for the broader community.
+
+### Phase 8 — Polish to v1.0 (1 week)
+
+#### Deliverables
+
+**Migration cookbook.** 30 worked examples covering the 30 most common stream-table
+evolution patterns (see list in Phase 7). Every example is verified end-to-end against
+a Testcontainers cluster as part of the release gate.
+
+**Public benchmark.** Time-to-apply for a 200-node DAG with a 5-node change set vs.
+drop/recreate (the current state of the art), published in `benchmarks/`. Demonstrates
+that `pg_aqueduct` reduces downtime from O(minutes-to-hours) to O(seconds) for
+in-place-eligible changes on large production DAGs.
+
+**Documentation completeness.** README, ESSENCE.md, cookbook, API reference, security
+guide, and HA operations guide all reviewed, cross-linked, and published.
+
+**Reproducible release builds.** SHA256-verified binaries for Linux (x86_64, aarch64),
+macOS (x86_64, aarch64), and a Docker image. Build provenance attestation via
+`slsa-github-generator`.
+
+**v1.0 release criteria.**
+- All 30 cookbook patterns verified end-to-end.
+- Public documentation complete and reviewed.
+- Reproducible release builds published with SHA256 checksums.
+- `aqueduct plan` + `aqueduct apply` roundtrip verified against all cookbook patterns.
+- No known data-loss bugs.
 
 ---
 
