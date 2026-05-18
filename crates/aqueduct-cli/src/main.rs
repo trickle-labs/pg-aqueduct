@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 mod commands;
-use commands::{apply, import, init, plan, preview, rollback, status, unlock, validate};
+use commands::{apply, fmt, import, init, lint, plan, preview, rollback, status, unlock, validate};
 
 /// Declarative schema evolution and migration for stream-table DAGs.
 #[derive(Debug, Parser)]
@@ -53,6 +53,12 @@ enum Commands {
 
     /// Create, inspect, or tear down a preview environment for a candidate change.
     Preview(preview::PreviewArgs),
+
+    /// Canonicalise the SQL body and front-matter directives in migration files.
+    Fmt(fmt::FmtArgs),
+
+    /// Check migration files for risky or non-optimal patterns.
+    Lint(lint::LintArgs),
 }
 
 #[tokio::main]
@@ -88,6 +94,8 @@ async fn main() {
         Commands::Import(args) => import::run(args).await,
         Commands::Unlock(args) => unlock::run(args).await,
         Commands::Preview(args) => preview::run(args).await,
+        Commands::Fmt(args) => fmt::run(args).await,
+        Commands::Lint(args) => lint::run(args).await,
     };
 
     if let Err(e) = result {

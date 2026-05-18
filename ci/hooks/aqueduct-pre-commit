@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# aqueduct-pre-commit — pre-commit hook wrapper.
+#
+# Runs `aqueduct fmt --check` and `aqueduct validate` on every commit that
+# touches files under migrations/ or aqueduct.toml.
+#
+# Installation (manual):
+#   cp ci/hooks/aqueduct-pre-commit .git/hooks/pre-commit
+#   chmod +x .git/hooks/pre-commit
+#
+# Installation (pre-commit framework):
+#   Add the following to .pre-commit-config.yaml:
+#
+#   repos:
+#     - repo: https://github.com/trickle-labs/pg-aqueduct
+#       rev: v0.4.0
+#       hooks:
+#         - id: aqueduct-fmt
+#         - id: aqueduct-validate
+#
+# The pre-commit framework hooks are defined in .pre-commit-hooks.yaml at the
+# root of this repository.
+
+set -euo pipefail
+
+# ── Locate the aqueduct binary ───────────────────────────────────────────────
+
+if ! command -v aqueduct &>/dev/null; then
+  echo "aqueduct-pre-commit: 'aqueduct' not found on PATH." >&2
+  echo "Install it from https://github.com/trickle-labs/pg-aqueduct/releases" >&2
+  exit 1
+fi
+
+# ── Determine the project directory ─────────────────────────────────────────
+# Walk up from $GIT_DIR to find aqueduct.toml.
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+PROJECT_DIR="$REPO_ROOT"
+
+if [ ! -f "${PROJECT_DIR}/aqueduct.toml" ]; then
+  # No aqueduct.toml found; nothing to check.
+  exit 0
+fi
+
+# ── Check if any relevant files are staged ──────────────────────────────────
+
+STAGED="$(git diff --cached --name-only -- migrations/ aqueduct.toml 2>/dev/null || true)"
+if [ -z "$STAGED" ]; then
+  # No migration files staged; skip the hook.
+  exit 0
+fi
+
+echo "aqueduct-pre-commit: checking staged migration files..."
+
+FAILED=0
+
+# Run fmt --check: exit non-zero if any file is not in canonical format.
+if ! aqueduct fmt --check --project-dir "$PROJECT_DIR"; then
+  echo ""
+  echo "aqueduct-pre-commit: some migration files are not in canonical format."
+  echo "Run 'aqueduct fmt' to fix, then re-stage the files."
+  FAILED=1
+fi
+
+# Run validate: offline syntax + cycle check.
+if ! aqueduct validate --project-dir "$PROJECT_DIR"; then
+  echo ""
+  echo "aqueduct-pre-commit: validation failed. Fix the errors before committing."
+  FAILED=1
+fi
+
+exit $FAILED

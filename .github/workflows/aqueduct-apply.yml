@@ -1,0 +1,37 @@
+# Example GitHub Actions workflow: apply migrations on merge to main.
+#
+# Copy this file to .github/workflows/aqueduct-apply.yml in your repository.
+# Adjust the `target` input to match your aqueduct.toml [targets.*] name.
+
+name: aqueduct apply
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'migrations/**'
+      - 'aqueduct.toml'
+
+permissions:
+  contents: read
+  id-token: write   # needed for OIDC credential injection
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    environment: production   # optional: require manual approval in GitHub Environments
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply migrations
+        uses: trickle-labs/pg-aqueduct/.github/actions/apply@v0.4.0
+        with:
+          version: '0.4.0'
+          target: prod
+          project-dir: .
+          # --resume makes the apply idempotent: safe to re-run on failure.
+          resume: true
+          # Pass the name of a GitHub secret containing your DSN.
+          dsn-secret: AQUEDUCT_PROD_DSN
+          # Uncomment to use AWS OIDC credential injection instead of a static secret:
+          # aws-role-arn: arn:aws:iam::123456789:role/my-aqueduct-role

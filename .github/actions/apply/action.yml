@@ -1,0 +1,169 @@
+name: aqueduct apply
+description: >
+  Run `aqueduct apply` in CI with resume support, secret masking, and OIDC-based
+  secret injection for AWS, GCP, and Azure.
+
+inputs:
+  version:
+    description: 'aqueduct CLI version to install (e.g. "0.4.0" or "latest")'
+    required: false
+    default: 'latest'
+
+  checksum:
+    description: 'Expected SHA-256 checksum of the downloaded binary'
+    required: false
+    default: ''
+
+  target:
+    description: 'Target name from aqueduct.toml (--to flag)'
+    required: true
+
+  project-dir:
+    description: 'Path to the aqueduct project directory'
+    required: false
+    default: '.'
+
+  resume:
+    description: 'Pass --resume to skip already-completed steps after an interrupted run'
+    required: false
+    default: 'false'
+
+  dry-run:
+    description: 'Pass --dry-run to show what would be done without executing'
+    required: false
+    default: 'false'
+
+  strategy:
+    description: 'Migration strategy: default or blue-green'
+    required: false
+    default: 'default'
+
+  dsn-secret:
+    description: 'Name of the secret that holds the PostgreSQL DSN (injected as AQUEDUCT_DSN)'
+    required: false
+    default: ''
+
+  aws-role-arn:
+    description: 'AWS IAM role ARN for OIDC-based credential injection'
+    required: false
+    default: ''
+
+  gcp-workload-identity-provider:
+    description: 'GCP Workload Identity Provider for OIDC-based credential injection'
+    required: false
+    default: ''
+
+  gcp-service-account:
+    description: 'GCP service account email for OIDC-based credential injection'
+    required: false
+    default: ''
+
+outputs:
+  migration-id:
+    description: 'The migration ID recorded in aqueduct.migrations'
+    value: ${{ steps.run-apply.outputs.migration_id }}
+
+  from-version:
+    description: 'The DAG version before the migration'
+    value: ${{ steps.run-apply.outputs.from_version }}
+
+  to-version:
+    description: 'The DAG version after the migration'
+    value: ${{ steps.run-apply.outputs.to_version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install aqueduct
+      shell: bash
+      run: |
+        set -euo pipefail
+        VERSION="${{ inputs.version }}"
+        OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+        ARCH="$(uname -m)"
+        case "$ARCH" in
+          x86_64)  ARCH="x86_64" ;;
+          aarch64) ARCH="aarch64" ;;
+          arm64)   ARCH="aarch64" ;;
+          *)
+            echo "Unsupported architecture: $ARCH" >&2
+            exit 1
+            ;;
+        esac
+
+        if [ "$VERSION" = "latest" ]; then
+          VERSION="$(curl -fsSL https://api.github.com/repos/trickle-labs/pg-aqueduct/releases/latest | grep '"tag_name"' | sed 's/.*"v\([^"]*\)".*/\1/')"
+        fi
+
+        BINARY_NAME="aqueduct-${OS}-${ARCH}"
+        DOWNLOAD_URL="https://github.com/trickle-labs/pg-aqueduct/releases/download/v${VERSION}/${BINARY_NAME}"
+        INSTALL_DIR="${RUNNER_TOOL_CACHE:-$HOME/.local/bin}"
+        mkdir -p "$INSTALL_DIR"
+
+        echo "Downloading aqueduct v${VERSION} for ${OS}/${ARCH}..."
+        curl -fsSL -o "${INSTALL_DIR}/aqueduct" "$DOWNLOAD_URL"
+        chmod +x "${INSTALL_DIR}/aqueduct"
+
+        if [ -n "${{ inputs.checksum }}" ]; then
+          echo "${{ inputs.checksum }}  ${INSTALL_DIR}/aqueduct" | sha256sum --check
+        fi
+
+        echo "${INSTALL_DIR}" >> "$GITHUB_PATH"
+
+    - name: Configure AWS credentials (OIDC)
+      if: inputs.aws-role-arn != ''
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ inputs.aws-role-arn }}
+        aws-region: us-east-1
+
+    - name: Configure GCP credentials (OIDC)
+      if: inputs.gcp-workload-identity-provider != ''
+      uses: google-github-actions/auth@v2
+      with:
+        workload_identity_provider: ${{ inputs.gcp-workload-identity-provider }}
+        service_account: ${{ inputs.gcp-service-account }}
+
+    - name: Run aqueduct apply
+      id: run-apply
+      shell: bash
+      env:
+        AQUEDUCT_DSN: ${{ inputs.dsn-secret != '' && secrets[inputs.dsn-secret] || '' }}
+      run: |
+        set -euo pipefail
+
+        EXTRA_FLAGS=""
+        if [ "${{ inputs.resume }}" = "true" ]; then
+          EXTRA_FLAGS="$EXTRA_FLAGS --resume"
+        fi
+        if [ "${{ inputs.dry-run }}" = "true" ]; then
+          EXTRA_FLAGS="$EXTRA_FLAGS --dry-run"
+        fi
+        if [ "${{ inputs.strategy }}" = "blue-green" ]; then
+          EXTRA_FLAGS="$EXTRA_FLAGS --strategy blue-green"
+        fi
+
+        DSN_FLAG=""
+        if [ -n "${AQUEDUCT_DSN:-}" ]; then
+          # Mask the DSN so it is never printed in logs.
+          echo "::add-mask::${AQUEDUCT_DSN}"
+          DSN_FLAG="--dsn ${AQUEDUCT_DSN}"
+        fi
+
+        aqueduct apply \
+          --to "${{ inputs.target }}" \
+          --project-dir "${{ inputs.project-dir }}" \
+          --log-format json \
+          $DSN_FLAG \
+          $EXTRA_FLAGS | tee /tmp/aqueduct-apply-output.json
+
+        # Extract migration metadata from the last JSON log line.
+        LAST_LINE="$(tail -1 /tmp/aqueduct-apply-output.json)"
+        if echo "$LAST_LINE" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('migration_id',''))" 2>/dev/null; then
+          MIG_ID="$(echo "$LAST_LINE" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('migration_id',''))" 2>/dev/null || echo '')"
+          FROM_VER="$(echo "$LAST_LINE" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('from_version',''))" 2>/dev/null || echo '')"
+          TO_VER="$(echo "$LAST_LINE" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('to_version',''))" 2>/dev/null || echo '')"
+          echo "migration_id=${MIG_ID}" >> "$GITHUB_OUTPUT"
+          echo "from_version=${FROM_VER}" >> "$GITHUB_OUTPUT"
+          echo "to_version=${TO_VER}" >> "$GITHUB_OUTPUT"
+        fi
