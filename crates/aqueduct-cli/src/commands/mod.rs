@@ -2,6 +2,7 @@ pub mod apply;
 pub mod import;
 pub mod init;
 pub mod plan;
+pub mod preview;
 pub mod rollback;
 pub mod status;
 pub mod unlock;

@@ -2,8 +2,19 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::classifier::MigrationClass;
-use crate::dag::{QualifiedName, StreamTableSpec};
-use crate::diff::{DagDiff, DeltaKind, NodeDelta, SourceDeltaKind};
+use crate::dag::{ConsumerSpec, QualifiedName, StreamTableSpec};
+use crate::diff::{ConsumerDeltaKind, DagDiff, DeltaKind, NodeDelta, SourceDeltaKind};
+
+/// A view assignment for a blue/green consumer view swap.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewAssignment {
+    /// The stable consumer view name (e.g., `public.api_orders`).
+    pub view_name: QualifiedName,
+    /// The new target table in the green schema.
+    pub target_table: QualifiedName,
+    /// Optional SQL projection/filter (None = SELECT *).
+    pub sql_body: Option<String>,
+}
 
 /// A single migration step in a plan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +57,45 @@ pub enum PlanStep {
     UnlockDag {
         force: bool,
     },
+
+    // ── v0.3: Blue/Green steps ────────────────────────────────────────────────
+    /// Create the green versioned schema (`{project}__v{version}`).
+    CreateGreenSchema {
+        schema: String,
+    },
+    /// Create a stream table node inside the green schema.
+    /// The spec's qualified_name.schema already points to the green schema.
+    CreateStreamTableInGreen {
+        spec: StreamTableSpec,
+        green_schema: String,
+    },
+    /// Wait for the green DAG nodes to converge (data lag within threshold).
+    WaitForConvergence {
+        green_schema: String,
+        node_names: Vec<String>,
+        /// Maximum seconds to wait before failing.
+        max_wait_secs: u64,
+    },
+    /// Atomically swap all consumer views from blue to green schema.
+    SwapConsumerViews {
+        assignments: Vec<ViewAssignment>,
+        blue_schema: String,
+        green_schema: String,
+    },
+    /// Schedule the blue schema for retirement after a TTL.
+    RetireBlueSchema {
+        schema: String,
+        /// Seconds to retain the blue schema before dropping.
+        retain_secs: u64,
+    },
+
+    // ── v0.3: Consumer view steps ──────────────────────────────────────────────
+    /// Create or replace a consumer view.
+    ManageConsumerView {
+        spec: ConsumerSpec,
+        /// "create", "alter", or "drop".
+        action: String,
+    },
 }
 
 impl PlanStep {
@@ -76,6 +126,35 @@ impl PlanStep {
                 format!("Record DAG version {}", version)
             }
             PlanStep::UnlockDag { .. } => "Release lock".to_string(),
+            PlanStep::CreateGreenSchema { schema } => {
+                format!("CREATE SCHEMA '{}' (green)", schema)
+            }
+            PlanStep::CreateStreamTableInGreen { spec, green_schema } => {
+                format!(
+                    "CREATE stream table '{}' in green schema '{}'",
+                    spec.qualified_name, green_schema
+                )
+            }
+            PlanStep::WaitForConvergence { green_schema, .. } => {
+                format!("Wait for green schema '{}' to converge", green_schema)
+            }
+            PlanStep::SwapConsumerViews { green_schema, .. } => {
+                format!("Swap consumer views → '{}'", green_schema)
+            }
+            PlanStep::RetireBlueSchema {
+                schema,
+                retain_secs,
+            } => {
+                format!("Retire blue schema '{}' (after {}s)", schema, retain_secs)
+            }
+            PlanStep::ManageConsumerView { spec, action } => {
+                format!(
+                    "{} consumer view '{}' → '{}'",
+                    action.to_uppercase(),
+                    spec.expose_as,
+                    spec.source
+                )
+            }
         }
     }
 }
@@ -391,6 +470,64 @@ pub fn build_plan(
     });
     steps.push(PlanStep::UnlockDag { force: false });
 
+    // ── Consumer view steps (after stream table steps, before snapshot) ──────
+    // Insert consumer view steps just before RecordSnapshot.
+    let unlock_idx = steps.len() - 1;
+    let snapshot_idx = steps.len() - 2;
+
+    let mut consumer_steps: Vec<PlanStep> = Vec::new();
+    for consumer_delta in diff.consumer_changes() {
+        let action = match consumer_delta.kind {
+            ConsumerDeltaKind::Create => "create",
+            ConsumerDeltaKind::Alter => "alter",
+            ConsumerDeltaKind::Drop => "drop",
+            ConsumerDeltaKind::Unchanged => continue,
+        };
+        if let Some(spec) = &consumer_delta.desired {
+            consumer_steps.push(PlanStep::ManageConsumerView {
+                spec: spec.clone(),
+                action: action.to_string(),
+            });
+            summary.changes.push(PlanChange {
+                symbol: match action {
+                    "create" => "+",
+                    "drop" => "-",
+                    _ => "~",
+                }
+                .to_string(),
+                name: consumer_delta.expose_as.to_string(),
+                class: "consumer-view".to_string(),
+                description: format!("{} consumer view", action),
+            });
+        } else if action == "drop" {
+            // Drop: no desired spec, build a placeholder.
+            consumer_steps.push(PlanStep::ManageConsumerView {
+                spec: crate::dag::ConsumerSpec {
+                    name: consumer_delta.expose_as.name.clone(),
+                    source: consumer_delta
+                        .actual_source
+                        .clone()
+                        .unwrap_or_else(|| consumer_delta.expose_as.clone()),
+                    expose_as: consumer_delta.expose_as.clone(),
+                    sql_body: None,
+                },
+                action: "drop".to_string(),
+            });
+            summary.changes.push(PlanChange {
+                symbol: "-".to_string(),
+                name: consumer_delta.expose_as.to_string(),
+                class: "consumer-view".to_string(),
+                description: "drop consumer view".to_string(),
+            });
+        }
+    }
+
+    // Insert consumer steps before RecordSnapshot.
+    let insert_at = snapshot_idx.min(unlock_idx);
+    for (i, cs) in consumer_steps.into_iter().enumerate() {
+        steps.insert(insert_at + i, cs);
+    }
+
     Plan {
         project: project.to_string(),
         from_version,
@@ -454,6 +591,7 @@ mod tests {
         let diff = DagDiff {
             deltas: vec![make_create_delta("order_totals")],
             source_deltas: vec![],
+            consumer_deltas: vec![],
         };
         let topo = vec![QualifiedName::new("public", "order_totals")];
         let plan = build_plan("test-project", Some(0), 1, &diff, &topo);

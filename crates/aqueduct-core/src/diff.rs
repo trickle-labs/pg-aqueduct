@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::dag::{DagState, QualifiedName, StreamTableSpec};
+use crate::dag::{ConsumerSpec, DagState, QualifiedName, StreamTableSpec};
 
 /// The kind of change for a single stream table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,12 +63,39 @@ pub struct SourceDelta {
     pub cascade_impacts: Vec<CascadeImpact>,
 }
 
+/// The kind of change to a consumer view.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConsumerDeltaKind {
+    /// New consumer view not present in live state.
+    Create,
+    /// Consumer view present in live state but not in desired state.
+    Drop,
+    /// Consumer view definition changed.
+    Alter,
+    /// No change.
+    Unchanged,
+}
+
+/// A change to a consumer view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsumerDelta {
+    /// The view name being managed (expose_as).
+    pub expose_as: QualifiedName,
+    pub kind: ConsumerDeltaKind,
+    /// The desired spec (None for drops).
+    pub desired: Option<ConsumerSpec>,
+    /// The actual source the view currently points to (None for creates).
+    pub actual_source: Option<QualifiedName>,
+}
+
 /// The result of comparing desired vs. actual DAG state.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DagDiff {
     pub deltas: Vec<NodeDelta>,
     /// Source (base table) changes with their cascade impacts.
     pub source_deltas: Vec<SourceDelta>,
+    /// Consumer view changes.
+    pub consumer_deltas: Vec<ConsumerDelta>,
 }
 
 impl DagDiff {
@@ -78,6 +105,10 @@ impl DagDiff {
                 .source_deltas
                 .iter()
                 .all(|s| s.kind == SourceDeltaKind::Unchanged)
+            && self
+                .consumer_deltas
+                .iter()
+                .all(|c| c.kind == ConsumerDeltaKind::Unchanged)
     }
 
     pub fn changes(&self) -> Vec<&NodeDelta> {
@@ -91,6 +122,13 @@ impl DagDiff {
         self.source_deltas
             .iter()
             .filter(|s| s.kind != SourceDeltaKind::Unchanged)
+            .collect()
+    }
+
+    pub fn consumer_changes(&self) -> Vec<&ConsumerDelta> {
+        self.consumer_deltas
+            .iter()
+            .filter(|c| c.kind != ConsumerDeltaKind::Unchanged)
             .collect()
     }
 }
@@ -135,9 +173,13 @@ pub fn compute_diff(desired: &DagState, actual: &DagState) -> DagDiff {
     // Compute source deltas (owned source tables whose DDL changed).
     let source_deltas = compute_source_deltas(desired, actual, &deltas);
 
+    // Compute consumer view deltas.
+    let consumer_deltas = compute_consumer_deltas(desired, actual);
+
     DagDiff {
         deltas,
         source_deltas,
+        consumer_deltas,
     }
 }
 
@@ -328,6 +370,66 @@ fn normalise_sql(sql: &str) -> String {
     s.trim_end_matches(';').trim().to_string()
 }
 
+/// Compute consumer-view deltas between desired and actual state.
+///
+/// The "actual" consumer state is always read from the live DB (or provided externally).
+/// When called from `compute_diff`, the actual `DagState` carries the live consumer list
+/// (populated by `read_live_state`). When the actual state has no consumers (e.g., first
+/// deployment), all desired consumers are emitted as Create deltas.
+fn compute_consumer_deltas(desired: &DagState, actual: &DagState) -> Vec<ConsumerDelta> {
+    let mut consumer_deltas = Vec::new();
+
+    // Find creates and alters.
+    for desired_consumer in &desired.consumers {
+        let actual_consumer = actual
+            .consumers
+            .iter()
+            .find(|c| c.expose_as == desired_consumer.expose_as);
+
+        let kind = match actual_consumer {
+            None => ConsumerDeltaKind::Create,
+            Some(ac) => {
+                // Compare source and SQL body.
+                if ac.source != desired_consumer.source || ac.sql_body != desired_consumer.sql_body
+                {
+                    ConsumerDeltaKind::Alter
+                } else {
+                    ConsumerDeltaKind::Unchanged
+                }
+            }
+        };
+
+        if kind == ConsumerDeltaKind::Unchanged {
+            continue;
+        }
+
+        consumer_deltas.push(ConsumerDelta {
+            expose_as: desired_consumer.expose_as.clone(),
+            kind,
+            desired: Some(desired_consumer.clone()),
+            actual_source: actual_consumer.map(|ac| ac.source.clone()),
+        });
+    }
+
+    // Find drops: consumer views in actual but not in desired.
+    for actual_consumer in &actual.consumers {
+        let in_desired = desired
+            .consumers
+            .iter()
+            .any(|c| c.expose_as == actual_consumer.expose_as);
+        if !in_desired {
+            consumer_deltas.push(ConsumerDelta {
+                expose_as: actual_consumer.expose_as.clone(),
+                kind: ConsumerDeltaKind::Drop,
+                desired: None,
+                actual_source: Some(actual_consumer.source.clone()),
+            });
+        }
+    }
+
+    consumer_deltas
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,6 +453,7 @@ mod tests {
         let desired = DagState {
             stream_tables: vec![make_spec("t1", "SELECT 1", "30s")],
             sources: vec![],
+            consumers: vec![],
         };
         let actual = DagState::default();
         let diff = compute_diff(&desired, &actual);
@@ -364,6 +467,7 @@ mod tests {
         let actual = DagState {
             stream_tables: vec![make_spec("t1", "SELECT 1", "30s")],
             sources: vec![],
+            consumers: vec![],
         };
         let diff = compute_diff(&desired, &actual);
         assert_eq!(diff.deltas[0].kind, DeltaKind::Drop);
@@ -375,10 +479,12 @@ mod tests {
         let desired = DagState {
             stream_tables: tables.clone(),
             sources: vec![],
+            consumers: vec![],
         };
         let actual = DagState {
             stream_tables: tables,
             sources: vec![],
+            consumers: vec![],
         };
         let diff = compute_diff(&desired, &actual);
         assert_eq!(diff.deltas[0].kind, DeltaKind::Unchanged);
@@ -390,10 +496,12 @@ mod tests {
         let desired = DagState {
             stream_tables: vec![make_spec("t1", "SELECT 1", "1m")],
             sources: vec![],
+            consumers: vec![],
         };
         let actual = DagState {
             stream_tables: vec![make_spec("t1", "SELECT 1", "30s")],
             sources: vec![],
+            consumers: vec![],
         };
         let diff = compute_diff(&desired, &actual);
         assert_eq!(diff.deltas[0].kind, DeltaKind::AlterSchedule);
@@ -404,10 +512,12 @@ mod tests {
         let desired = DagState {
             stream_tables: vec![make_spec("t1", "SELECT 2", "30s")],
             sources: vec![],
+            consumers: vec![],
         };
         let actual = DagState {
             stream_tables: vec![make_spec("t1", "SELECT 1", "30s")],
             sources: vec![],
+            consumers: vec![],
         };
         let diff = compute_diff(&desired, &actual);
         assert_eq!(diff.deltas[0].kind, DeltaKind::AlterQuery);

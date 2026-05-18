@@ -73,8 +73,8 @@ impl TestDb {
 }
 
 fn aqueduct_catalog_sql() -> &'static str {
-    // This is inlined from aqueduct-core::catalog::CATALOG_INIT_SQL but we
-    // duplicate it here to avoid a circular dependency.
+    // v2 catalog schema — keeps parity with aqueduct-core::catalog::CATALOG_INIT_V2_SQL.
+    // Inlined here to avoid a circular crate dependency.
     r#"
 CREATE SCHEMA IF NOT EXISTS aqueduct;
 
@@ -117,8 +117,46 @@ CREATE TABLE IF NOT EXISTS aqueduct.cluster_profile (
     measured_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS aqueduct.ddl_log (
+    id           bigserial PRIMARY KEY,
+    object_type  text      NOT NULL,
+    schema_name  text      NOT NULL,
+    object_name  text      NOT NULL,
+    command_tag  text      NOT NULL,
+    command_text text,
+    recorded_at  timestamptz NOT NULL DEFAULT now(),
+    pg_role      text      NOT NULL DEFAULT current_role
+);
+
+CREATE TABLE IF NOT EXISTS aqueduct.consumer_views (
+    id          bigserial PRIMARY KEY,
+    project     text      NOT NULL,
+    name        text      NOT NULL,
+    expose_as   text      NOT NULL,
+    source      text      NOT NULL,
+    sql_body    text,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    updated_at  timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (project, name)
+);
+
+CREATE TABLE IF NOT EXISTS aqueduct.blue_green_deployments (
+    id             bigserial PRIMARY KEY,
+    project        text      NOT NULL,
+    from_version   bigint    REFERENCES aqueduct.dag_versions(version),
+    to_version     bigint    REFERENCES aqueduct.dag_versions(version),
+    blue_schema    text      NOT NULL,
+    green_schema   text      NOT NULL,
+    status         text      NOT NULL DEFAULT 'active',
+    started_at     timestamptz NOT NULL DEFAULT now(),
+    swapped_at     timestamptz,
+    retired_at     timestamptz,
+    retire_at      timestamptz,
+    CONSTRAINT bg_status_check CHECK (status IN ('active', 'swapped', 'retired', 'failed'))
+);
+
 INSERT INTO aqueduct.cluster_profile (key, value_jsonb, measured_at)
-VALUES ('catalog_schema_version', '1'::jsonb, now())
+VALUES ('catalog_schema_version', '2'::jsonb, now())
 ON CONFLICT (key) DO NOTHING;
 "#
 }

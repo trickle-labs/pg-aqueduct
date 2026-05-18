@@ -7,10 +7,95 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [v0.3.0 — Blue/Green, Preview Environments & Optional Extension](#v030--bluegreen-preview-environments--optional-extension)
 - [v0.2.0 — Online Schema Evolution](#v020--online-schema-evolution)
 - [v0.1.0 — Initial Implementation](#v010--initial-implementation)
 - [Unreleased — Repository Bootstrap](#unreleased--repository-bootstrap)
 <!-- TOC end -->
+
+---
+
+## [v0.3.0] — Blue/Green, Preview Environments & Optional Extension
+
+**Released:** 2025-06-01
+**Tag:** [`v0.3.0`](https://github.com/trickle-labs/pg-aqueduct/releases/tag/v0.3.0)
+
+All Phase 4 roadmap items are complete. v0.3 delivers zero-downtime structural DAG
+migrations via blue/green deployment, per-branch preview environments backed by
+`TABLESAMPLE`-sampled data, consumer view management, and CLI-side support for the
+optional `pg_aqueduct` companion extension.
+
+### What's New
+
+#### Blue/Green Deployer
+
+New plan step variants orchestrate a zero-downtime structural migration:
+
+- **`CreateGreenSchema`** — creates a parallel versioned schema for the new DAG
+- **`CreateStreamTableInGreen`** — builds stream tables in the green schema
+- **`WaitForConvergence`** — waits until the green DAG catches up with live data
+- **`SwapConsumerViews`** — atomically redirects all consumer views to the green schema
+- **`RetireBlueSchema`** — drops the old blue schema after the configured TTL
+
+#### Consumer View Management
+
+Stream tables can now be consumed through stable view indirection, enabling zero-
+downtime blue/green cutover without breaking downstream consumers.
+
+Declare consumer views in `migrations/consumers/`:
+
+```sql
+-- migrations/consumers/api_orders.sql
+-- @aqueduct:kind = consumer
+-- @aqueduct:source = public.order_totals
+-- @aqueduct:expose_as = reporting.orders
+SELECT customer_id, total FROM public.order_totals WHERE total > 0;
+```
+
+New types: `ConsumerSpec`, `ConsumerDelta`, `ConsumerDeltaKind`.  
+New plan step: `ManageConsumerView { spec, action }` (create / alter / drop).  
+New catalog table: `aqueduct.consumer_views` (catalog schema version bumped to 2).
+
+#### Preview Environments
+
+`aqueduct preview --branch <name>` creates a throwaway copy of the DAG in a scratch
+schema with `TABLESAMPLE`-sampled base data:
+
+```
+aqueduct preview --branch feat/new-aggregates --sample 10
+aqueduct preview --list
+aqueduct preview --branch feat/new-aggregates --cleanup
+```
+
+Three backends:
+- **Native** (default) — scratch schema in the same database, zero infrastructure
+- **CloudNativePG** — stub implementation (full support in a future release)
+- **Neon** — stub implementation (full support in a future release)
+
+Preview schema names are always `aqueduct_preview_{sanitised_branch_name}` and are
+dropped automatically on cleanup.
+
+#### Optional Companion Extension Support
+
+The CLI now detects and uses the optional `pg_aqueduct` companion extension when
+present:
+
+- `aqueduct.ddl_log` table tracks DDL events from the extension's event trigger
+- `detect_extension_installed()` — returns `true` when the DDL event trigger exists
+- `read_ddl_log()` — reads recent DDL events for drift detection
+
+When the extension is absent, the CLI operates in fallback mode with no loss of core
+functionality.
+
+#### Catalog Schema v2
+
+The `aqueduct` catalog schema is now at version 2. New tables:
+
+| Table | Purpose |
+|---|---|
+| `aqueduct.ddl_log` | DDL event log (populated by companion extension) |
+| `aqueduct.consumer_views` | Consumer view registry |
+| `aqueduct.blue_green_deployments` | Blue/green deployment tracking |
 
 ---
 
