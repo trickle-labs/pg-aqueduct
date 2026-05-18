@@ -1,0 +1,42 @@
+## pre-commit hook definitions for pg-aqueduct.
+##
+## Reference these hooks from your .pre-commit-config.yaml:
+##
+##   repos:
+##     - repo: https://github.com/trickle-labs/pg-aqueduct
+##       rev: v0.4.0
+##       hooks:
+##         - id: aqueduct-fmt
+##         - id: aqueduct-validate
+##         - id: aqueduct-lint
+##
+## Requirements: the `aqueduct` binary must be installed and on PATH.
+## Install from: https://github.com/trickle-labs/pg-aqueduct/releases
+
+- id: aqueduct-fmt
+  name: aqueduct fmt
+  description: Canonicalise SQL body and front-matter directives in migration files.
+  entry: aqueduct fmt --check
+  language: system
+  types: [sql]
+  pass_filenames: false
+  # Only run when migration files or aqueduct.toml are changed.
+  files: ^(migrations/|aqueduct\.toml)
+
+- id: aqueduct-validate
+  name: aqueduct validate
+  description: Offline syntax and cycle validation for migration files.
+  entry: aqueduct validate
+  language: system
+  types: [sql]
+  pass_filenames: false
+  files: ^(migrations/|aqueduct\.toml)
+
+- id: aqueduct-lint
+  name: aqueduct lint
+  description: Lint migration files for risky or non-optimal patterns.
+  entry: aqueduct lint
+  language: system
+  types: [sql]
+  pass_filenames: false
+  files: ^(migrations/|aqueduct\.toml)

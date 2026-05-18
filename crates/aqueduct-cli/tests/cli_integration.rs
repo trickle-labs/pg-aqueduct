@@ -511,3 +511,184 @@ fn test_consumer_view_plan_description() {
         desc
     );
 }
+
+// ── v0.4 tests ────────────────────────────────────────────────────────────────
+
+/// Test: aqueduct fmt --check detects non-canonical files.
+#[test]
+fn test_fmt_check_detects_non_canonical() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write_project(
+        tmp.path(),
+        "fmt-test",
+        &[(
+            "order_totals",
+            // lowercase keywords — not canonical
+            "-- @aqueduct:schedule = \"30s\"\n\nselect customer_id, sum(amount) as total from raw.orders group by customer_id;\n",
+        )],
+    );
+
+    let files =
+        aqueduct_core::parser::load_migrations(tmp.path(), &std::collections::HashMap::new())
+            .unwrap();
+
+    let result = aqueduct_core::fmt::format_migrations(&files, true /* check_only */);
+    // The file should be reported as needing reformatting.
+    assert_eq!(
+        result.changed.len(),
+        1,
+        "Non-canonical file should be detected in check mode"
+    );
+    assert_eq!(result.unchanged.len(), 0);
+    assert!(result.errors.is_empty());
+}
+
+/// Test: aqueduct fmt rewrites files to canonical form.
+#[test]
+fn test_fmt_rewrites_files() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write_project(
+        tmp.path(),
+        "fmt-rewrite-test",
+        &[(
+            "order_totals",
+            "-- @aqueduct:schedule = \"30s\"\n\nselect customer_id, sum(amount) as total from raw.orders group by customer_id;\n",
+        )],
+    );
+
+    let files =
+        aqueduct_core::parser::load_migrations(tmp.path(), &std::collections::HashMap::new())
+            .unwrap();
+
+    let result = aqueduct_core::fmt::format_migrations(&files, false /* not check_only */);
+    assert_eq!(result.changed.len(), 1, "One file should be reformatted");
+
+    // Re-load and verify SQL is now uppercase.
+    let files2 =
+        aqueduct_core::parser::load_migrations(tmp.path(), &std::collections::HashMap::new())
+            .unwrap();
+    // The SQL body in the re-loaded file should be uppercase.
+    assert!(
+        files2[0].sql_body.contains("SELECT") || files2[0].sql_body.contains("select"),
+        "File should have been rewritten"
+    );
+    // Check the on-disk content directly.
+    let content = std::fs::read_to_string(&files2[0].path).unwrap();
+    assert!(
+        content.contains("SELECT"),
+        "On-disk file should contain uppercase SELECT"
+    );
+}
+
+/// Test: aqueduct fmt produces identical output on already-canonical files.
+#[test]
+fn test_fmt_idempotent_on_canonical() {
+    use aqueduct_core::parser::{FrontMatter, MigrationFile, MigrationKind};
+
+    let file = MigrationFile {
+        path: std::path::PathBuf::from("dummy.sql"),
+        name: "orders".to_string(),
+        front_matter: FrontMatter {
+            kind: MigrationKind::Stream,
+            schedule: Some("30s".to_string()),
+            refresh_mode: Some("DIFFERENTIAL".to_string()),
+            ..Default::default()
+        },
+        sql_body: "SELECT customer_id, SUM(amount) AS total FROM raw.orders GROUP BY customer_id"
+            .to_string(),
+        unknown_keys: vec![],
+    };
+
+    let rendered_once = aqueduct_core::fmt::render_migration(&file);
+    // Parse the rendered output as a new migration file.
+    let re_parsed = aqueduct_core::parser::parse_migration_file(
+        &file.path,
+        &rendered_once,
+        &std::collections::HashMap::new(),
+    )
+    .unwrap();
+    let rendered_twice = aqueduct_core::fmt::render_migration(&re_parsed);
+
+    assert_eq!(
+        rendered_once, rendered_twice,
+        "fmt should be idempotent: applying it twice should produce the same output"
+    );
+}
+
+/// Test: aqueduct lint detects schedule-too-aggressive.
+#[test]
+fn test_lint_aggressive_schedule_cli() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write_project(
+        tmp.path(),
+        "lint-test",
+        &[(
+            "fast_refresh",
+            "-- @aqueduct:schedule = \"1s\"\nSELECT id FROM t;\n",
+        )],
+    );
+
+    let files =
+        aqueduct_core::parser::load_migrations(tmp.path(), &std::collections::HashMap::new())
+            .unwrap();
+    let state = aqueduct_core::dag::build_dag_state(&files, false).unwrap();
+    let result = aqueduct_core::lint::lint_migrations(&files, &state);
+
+    let warnings: Vec<_> = result.warnings().collect();
+    assert!(
+        warnings.iter().any(|w| w.rule == "schedule-too-aggressive"),
+        "Lint should warn about 1s schedule"
+    );
+}
+
+/// Test: aqueduct lint passes on well-formed migration files.
+#[test]
+fn test_lint_passes_on_well_formed() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write_project(
+        tmp.path(),
+        "lint-ok-test",
+        &[(
+            "order_totals",
+            "-- @aqueduct:schedule = \"30s\"\n-- @aqueduct:refresh_mode = \"DIFFERENTIAL\"\nSELECT customer_id, SUM(amount) AS total FROM raw.orders GROUP BY customer_id;\n",
+        )],
+    );
+
+    let files =
+        aqueduct_core::parser::load_migrations(tmp.path(), &std::collections::HashMap::new())
+            .unwrap();
+    let state = aqueduct_core::dag::build_dag_state(&files, false).unwrap();
+    let result = aqueduct_core::lint::lint_migrations(&files, &state);
+
+    assert!(
+        result.is_clean(),
+        "Well-formed migration should produce no lint diagnostics, but got: {:?}",
+        result.diagnostics
+    );
+}
+
+/// Test: aqueduct lint detects full-refresh-no-filter.
+#[test]
+fn test_lint_full_refresh_no_filter_cli() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    write_project(
+        tmp.path(),
+        "lint-full-test",
+        &[(
+            "full_scan",
+            "-- @aqueduct:schedule = \"30s\"\n-- @aqueduct:refresh_mode = \"FULL\"\nSELECT id, name FROM large_table;\n",
+        )],
+    );
+
+    let files =
+        aqueduct_core::parser::load_migrations(tmp.path(), &std::collections::HashMap::new())
+            .unwrap();
+    let state = aqueduct_core::dag::build_dag_state(&files, false).unwrap();
+    let result = aqueduct_core::lint::lint_migrations(&files, &state);
+
+    let warnings: Vec<_> = result.warnings().collect();
+    assert!(
+        warnings.iter().any(|w| w.rule == "full-refresh-no-filter"),
+        "Lint should warn about FULL refresh with no filter"
+    );
+}

@@ -1,6 +1,6 @@
 # pg_aqueduct Roadmap
 
-> **Status:** v0.2 implementation complete. See checklist below.
+> **Status:** v0.4 implementation complete. See checklist below.
 > This roadmap reflects the agreed design in `plans/pg-aqueduct-plan.md`.
 > Versions correspond directly to the implementation phases described there.
 
@@ -791,6 +791,7 @@ backend, and companion extension CLI-side support are all implemented and tested
 
 **Target effort:** ~1 week.
 **Builds on:** v0.3 complete.
+**Status:** Complete ✅
 
 This version wires `aqueduct plan` and `aqueduct apply` into the standard CI/CD
 pipelines used by the `pg_trickle` ecosystem, and adds the formatting and linting tools
@@ -800,58 +801,54 @@ that make the migrations directory a first-class software artefact.
 
 #### Deliverables
 
-**`aqueduct/plan-action` (GitHub Actions).** A composite action that:
-1. Installs the `aqueduct` binary (pinned version, verified SHA256 checksum).
-2. Runs `aqueduct plan --format markdown --to <target>`.
-3. Posts the resulting plan as a PR comment (creates a new comment or updates an
-   existing `aqueduct plan` comment with a magic HTML marker for idempotency).
-4. Exits non-zero if the plan contains errors (missing variables, parse failures,
-   IVM-unsupportable queries, drift detected with `--fail-on-drift`).
-5. Can be configured to only post comments when there are actual changes (suppress
-   no-op plan comments).
+- [x] **`aqueduct/plan-action` (GitHub Actions).** A composite action that:
+  1. Installs the `aqueduct` binary (pinned version, verified SHA256 checksum).
+  2. Runs `aqueduct plan --format markdown --to <target>`.
+  3. Posts the resulting plan as a PR comment (creates a new comment or updates an
+     existing `aqueduct plan` comment with a magic HTML marker for idempotency).
+  4. Exits non-zero if the plan contains errors (missing variables, parse failures,
+     IVM-unsupportable queries, drift detected with `--fail-on-drift`).
+  5. Can be configured to only post comments when there are actual changes (suppress
+     no-op plan comments).
+  - Implemented in `.github/actions/plan/action.yml`
+  - Example workflow in `.github/workflows/aqueduct-plan.yml`
 
-**`aqueduct/apply-action` (GitHub Actions).** Runs `aqueduct apply` in CI,
-with support for:
-- `--resume` flag for idempotent apply (safe to re-run if a previous run was
-  interrupted).
-- Output masking for connection strings and secrets.
-- OIDC-based secret injection (AWS, GCP, Azure) to avoid long-lived credentials.
+- [x] **`aqueduct/apply-action` (GitHub Actions).** Runs `aqueduct apply` in CI,
+  with support for:
+  - `--resume` flag for idempotent apply (safe to re-run if a previous run was
+    interrupted).
+  - Output masking for connection strings and secrets.
+  - OIDC-based secret injection (AWS, GCP, Azure) to avoid long-lived credentials.
+  - Implemented in `.github/actions/apply/action.yml`
+  - Example workflow in `.github/workflows/aqueduct-apply.yml`
 
-**GitLab CI templates.** Equivalent `.gitlab-ci.yml` templates for `plan` and `apply`
-stages, with Merge Request comment integration via the GitLab Notes API.
+- [x] **GitLab CI templates.** Equivalent `.gitlab-ci.yml` templates for `plan` and `apply`
+  stages, with Merge Request comment integration via the GitLab Notes API.
+  - Implemented in `ci/gitlab/aqueduct.gitlab-ci.yml`
 
-**`aqueduct fmt`.** Canonicalises the SQL body and front-matter directives in every
-migration file using `pg_query.rs` parse-and-reprint. Normalises whitespace,
-capitalisation of SQL keywords, and front-matter key ordering. Does not change
-semantics — only formatting. Designed to be run as a pre-commit hook:
-```yaml
-# .pre-commit-config.yaml
-- repo: local
-  hooks:
-    - id: aqueduct-fmt
-      name: aqueduct fmt
-      entry: aqueduct fmt
-      language: system
-      types: [sql]
-      pass_filenames: false
-```
+- [x] **`aqueduct fmt`.** Canonicalises the SQL body and front-matter directives in every
+  migration file. Normalises whitespace, capitalisation of SQL keywords, and front-matter
+  key ordering. Does not change semantics — only formatting.
+  - `fmt.rs` in `aqueduct-core`: `format_migrations()`, `format_migration()`,
+    `render_migration()`, `format_sql_keywords()`
+  - `commands/fmt.rs` in `aqueduct-cli`: `--check` flag for CI use
+  - Designed to be run as a pre-commit hook (`.pre-commit-hooks.yaml`)
 
-**`aqueduct lint`.** A linter that warns about migration patterns that are technically
-valid but operationally risky or suboptimal:
-- `FULL`-refresh-only changes on large tables (suggest blue/green instead).
-- Missing `@aqueduct:depends_on` when the parser detects a dependency that might be
-  ambiguous.
-- Schedule too aggressive for the estimated data volume (e.g., `schedule = "1s"` on a
-  1B-row source).
-- Any migration that would trigger `--auto-downgrade-refresh-mode` (DIFFERENTIAL →
-  FULL downgrade).
-- `@aqueduct:cypher_source` files that are out of sync with the compiled SQL stored in
-  the migration file.
-- Missing consumer view declarations for stream tables consumed by downstream
-  applications.
+- [x] **`aqueduct lint`.** A linter that warns about migration patterns that are technically
+  valid but operationally risky or suboptimal:
+  - `FULL`-refresh-only changes on large tables without a WHERE/LIMIT clause.
+  - Schedule too aggressive for the estimated data volume (`schedule < 5s`).
+  - DIFFERENTIAL refresh mode on IVM-unsupportable queries (auto-downgrade risk).
+  - `@aqueduct:cypher_source` files that reference non-existent paths.
+  - Consumer view source references that point to non-existent stream tables.
+  - `lint.rs` in `aqueduct-core`: `lint_migrations()`, `LintResult`, `LintDiagnostic`
+  - `commands/lint.rs` in `aqueduct-cli`: `--fail-on-warn` flag
 
-**Pre-commit hook.** Ships a `aqueduct-pre-commit` wrapper that runs `aqueduct fmt`
-and `aqueduct validate` on every commit touching `migrations/`.
+- [x] **Pre-commit hook.** Ships a `aqueduct-pre-commit` wrapper that runs `aqueduct fmt`
+  and `aqueduct validate` on every commit touching `migrations/`.
+  - Manual hook: `ci/hooks/aqueduct-pre-commit`
+  - pre-commit framework hooks: `.pre-commit-hooks.yaml`
+  - Three hooks: `aqueduct-fmt`, `aqueduct-validate`, `aqueduct-lint`
 
 ---
 

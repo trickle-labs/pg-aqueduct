@@ -1,6 +1,8 @@
 pub mod apply;
+pub mod fmt;
 pub mod import;
 pub mod init;
+pub mod lint;
 pub mod plan;
 pub mod preview;
 pub mod rollback;

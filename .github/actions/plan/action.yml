@@ -1,0 +1,193 @@
+name: aqueduct plan
+description: >
+  Run `aqueduct plan` and post the migration plan as a pull request comment.
+  Creates a new comment or updates an existing one (idempotent via HTML marker).
+
+inputs:
+  version:
+    description: 'aqueduct CLI version to install (e.g. "0.4.0" or "latest")'
+    required: false
+    default: 'latest'
+
+  checksum:
+    description: 'Expected SHA-256 checksum of the downloaded binary (optional; recommended for pinned versions)'
+    required: false
+    default: ''
+
+  target:
+    description: 'Target name from aqueduct.toml (--to flag)'
+    required: true
+
+  project-dir:
+    description: 'Path to the aqueduct project directory'
+    required: false
+    default: '.'
+
+  format:
+    description: 'Output format posted to the PR comment: markdown (default) or text'
+    required: false
+    default: 'markdown'
+
+  fail-on-drift:
+    description: 'Exit non-zero if drift is detected'
+    required: false
+    default: 'false'
+
+  fail-if-changed:
+    description: 'Exit non-zero if the plan is non-empty (blocks merges with pending migrations)'
+    required: false
+    default: 'false'
+
+  suppress-no-op:
+    description: 'Do not post a PR comment when the plan is a no-op (empty)'
+    required: false
+    default: 'false'
+
+  github-token:
+    description: 'GitHub token used to post the PR comment (defaults to GITHUB_TOKEN)'
+    required: false
+    default: ${{ github.token }}
+
+  dsn-secret:
+    description: >
+      Name of the secret that holds the PostgreSQL DSN.
+      The DSN is injected as the AQUEDUCT_DSN environment variable.
+      If not set, the connection string must be available via aqueduct.toml target.
+    required: false
+    default: ''
+
+outputs:
+  plan:
+    description: 'The full plan output (markdown)'
+    value: ${{ steps.run-plan.outputs.plan }}
+
+  is-empty:
+    description: '"true" if the plan is a no-op (no changes)'
+    value: ${{ steps.run-plan.outputs.is_empty }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install aqueduct
+      shell: bash
+      run: |
+        set -euo pipefail
+        VERSION="${{ inputs.version }}"
+        OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+        ARCH="$(uname -m)"
+        case "$ARCH" in
+          x86_64)  ARCH="x86_64" ;;
+          aarch64) ARCH="aarch64" ;;
+          arm64)   ARCH="aarch64" ;;
+          *)
+            echo "Unsupported architecture: $ARCH" >&2
+            exit 1
+            ;;
+        esac
+
+        if [ "$VERSION" = "latest" ]; then
+          VERSION="$(curl -fsSL https://api.github.com/repos/trickle-labs/pg-aqueduct/releases/latest | grep '"tag_name"' | sed 's/.*"v\([^"]*\)".*/\1/')"
+        fi
+
+        BINARY_NAME="aqueduct-${OS}-${ARCH}"
+        DOWNLOAD_URL="https://github.com/trickle-labs/pg-aqueduct/releases/download/v${VERSION}/${BINARY_NAME}"
+        INSTALL_DIR="${RUNNER_TOOL_CACHE:-$HOME/.local/bin}"
+        mkdir -p "$INSTALL_DIR"
+
+        echo "Downloading aqueduct v${VERSION} for ${OS}/${ARCH}..."
+        curl -fsSL -o "${INSTALL_DIR}/aqueduct" "$DOWNLOAD_URL"
+        chmod +x "${INSTALL_DIR}/aqueduct"
+
+        # Verify checksum if provided.
+        if [ -n "${{ inputs.checksum }}" ]; then
+          echo "${{ inputs.checksum }}  ${INSTALL_DIR}/aqueduct" | sha256sum --check
+        fi
+
+        echo "${INSTALL_DIR}" >> "$GITHUB_PATH"
+        echo "Installed aqueduct $(${INSTALL_DIR}/aqueduct --version)"
+
+    - name: Run aqueduct plan
+      id: run-plan
+      shell: bash
+      env:
+        AQUEDUCT_DSN: ${{ inputs.dsn-secret != '' && secrets[inputs.dsn-secret] || '' }}
+      run: |
+        set -euo pipefail
+        EXTRA_FLAGS=""
+        if [ "${{ inputs.fail-on-drift }}" = "true" ]; then
+          EXTRA_FLAGS="$EXTRA_FLAGS --fail-on-drift"
+        fi
+        if [ "${{ inputs.fail-if-changed }}" = "true" ]; then
+          EXTRA_FLAGS="$EXTRA_FLAGS --fail-if-changed"
+        fi
+
+        DSN_FLAG=""
+        if [ -n "${AQUEDUCT_DSN:-}" ]; then
+          DSN_FLAG="--dsn $AQUEDUCT_DSN"
+        fi
+
+        PLAN_OUTPUT="$(aqueduct plan \
+          --format "${{ inputs.format }}" \
+          --to "${{ inputs.target }}" \
+          --project-dir "${{ inputs.project-dir }}" \
+          $DSN_FLAG \
+          $EXTRA_FLAGS 2>&1)" || EXIT_CODE=$?
+
+        echo "plan<<EOF" >> "$GITHUB_OUTPUT"
+        echo "$PLAN_OUTPUT" >> "$GITHUB_OUTPUT"
+        echo "EOF" >> "$GITHUB_OUTPUT"
+
+        # Detect whether the plan is a no-op.
+        if echo "$PLAN_OUTPUT" | grep -q "No changes"; then
+          echo "is_empty=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "is_empty=false" >> "$GITHUB_OUTPUT"
+        fi
+
+        exit "${EXIT_CODE:-0}"
+
+    - name: Post plan comment to PR
+      if: github.event_name == 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        PLAN="${{ steps.run-plan.outputs.plan }}"
+        IS_EMPTY="${{ steps.run-plan.outputs.is_empty }}"
+
+        if [ "$IS_EMPTY" = "true" ] && [ "${{ inputs.suppress-no-op }}" = "true" ]; then
+          echo "Plan is empty and suppress-no-op is set. Skipping PR comment."
+          exit 0
+        fi
+
+        MARKER="<!-- aqueduct-plan-comment -->"
+        BODY="${MARKER}
+        ## aqueduct plan — \`${{ inputs.target }}\`
+
+        \`\`\`
+        ${PLAN}
+        \`\`\`
+
+        _Generated by [pg-aqueduct](https://github.com/trickle-labs/pg-aqueduct) on commit \`${{ github.sha }}\`_"
+
+        PR_NUMBER="${{ github.event.pull_request.number }}"
+        REPO="${{ github.repository }}"
+
+        # Find existing comment.
+        COMMENT_ID="$(gh api \
+          "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+          --jq ".[] | select(.body | contains(\"${MARKER}\")) | .id" \
+          | head -1)"
+
+        if [ -n "$COMMENT_ID" ]; then
+          gh api --method PATCH \
+            "repos/${REPO}/issues/comments/${COMMENT_ID}" \
+            -f body="$BODY"
+          echo "Updated existing plan comment (id: ${COMMENT_ID})."
+        else
+          gh api --method POST \
+            "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+            -f body="$BODY"
+          echo "Created new plan comment."
+        fi

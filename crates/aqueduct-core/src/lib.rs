@@ -6,6 +6,8 @@ pub mod dag;
 pub mod diff;
 pub mod error;
 pub mod executor;
+pub mod fmt;
+pub mod lint;
 pub mod live_state;
 pub mod parser;
 pub mod plan;

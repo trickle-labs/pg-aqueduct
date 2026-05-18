@@ -7,11 +7,125 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [v0.4.0 — CI Integrations & Ergonomics](#v040--ci-integrations--ergonomics)
 - [v0.3.0 — Blue/Green, Preview Environments & Optional Extension](#v030--bluegreen-preview-environments--optional-extension)
 - [v0.2.0 — Online Schema Evolution](#v020--online-schema-evolution)
 - [v0.1.0 — Initial Implementation](#v010--initial-implementation)
 - [Unreleased — Repository Bootstrap](#unreleased--repository-bootstrap)
 <!-- TOC end -->
+
+---
+
+## [v0.4.0] — CI Integrations & Ergonomics
+
+**Released:** 2026-05-18
+**Tag:** [`v0.4.0`](https://github.com/trickle-labs/pg-aqueduct/releases/tag/v0.4.0)
+
+All Phase 5 roadmap items are complete. v0.4 wires `aqueduct plan` and `aqueduct apply`
+into standard CI/CD pipelines and adds `aqueduct fmt` and `aqueduct lint` to make the
+migrations directory a first-class software artefact.
+
+### What's New
+
+#### `aqueduct fmt`
+
+New `aqueduct fmt` command canonicalises every migration file:
+
+- **SQL keywords** are upper-cased (`select` → `SELECT`, `group by` → `GROUP BY`).
+- **Front-matter directives** are emitted in a stable canonical order
+  (`kind`, `owned`, `schema`, `depends_on`, `schedule`, `refresh_mode`, `cdc_mode`,
+  `cypher_source`, `source`, `expose_as`).
+- **Trailing whitespace** is stripped from every line.
+- A single blank line separates front-matter from the SQL body.
+
+`aqueduct fmt --check` exits non-zero if any file is not in canonical format — ideal
+for CI gatekeeping.
+
+```bash
+# Fix all files in place:
+aqueduct fmt
+
+# Check-only mode (CI):
+aqueduct fmt --check
+```
+
+#### `aqueduct lint`
+
+New `aqueduct lint` command checks migration files for risky patterns:
+
+| Rule | Level | Description |
+|---|---|---|
+| `schedule-too-aggressive` | warning | Schedule faster than 5 seconds |
+| `full-refresh-no-filter` | warning | FULL refresh mode with no WHERE/LIMIT clause |
+| `differential-ivm-unsupportable` | warning | DIFFERENTIAL query contains constructs that may trigger auto-downgrade to FULL |
+| `cypher-source-missing` | error | `@aqueduct:cypher_source` points to a non-existent file |
+| `consumer-source-not-found` | error | Consumer view references a stream table that does not exist |
+
+```bash
+aqueduct lint
+aqueduct lint --fail-on-warn   # treat warnings as errors (CI strict mode)
+aqueduct lint --format json    # machine-readable output
+```
+
+#### GitHub Actions
+
+Two new composite actions ship in `.github/actions/`:
+
+**`trickle-labs/pg-aqueduct/.github/actions/plan@v0.4.0`**
+- Installs the `aqueduct` binary (pinned version, optional SHA256 checksum).
+- Runs `aqueduct plan --format markdown`.
+- Posts the plan as a PR comment (creates or updates via idempotent HTML marker).
+- Supports `fail-on-drift`, `fail-if-changed`, `suppress-no-op`, and OIDC-free secret
+  injection via a named secret.
+
+**`trickle-labs/pg-aqueduct/.github/actions/apply@v0.4.0`**
+- Runs `aqueduct apply` with `--resume` support for idempotent CI runs.
+- Masks DSN secrets from logs via `::add-mask::`.
+- Supports OIDC credential injection for AWS (via `aws-actions/configure-aws-credentials`)
+  and GCP (via `google-github-actions/auth`).
+
+Example workflows are provided in `.github/workflows/`:
+- `aqueduct-plan.yml` — runs on PRs touching `migrations/` or `aqueduct.toml`
+- `aqueduct-apply.yml` — runs on push to `main`
+
+#### GitLab CI Templates
+
+`ci/gitlab/aqueduct.gitlab-ci.yml` provides includable templates for GitLab CI:
+
+```yaml
+include:
+  - project: 'trickle-labs/pg-aqueduct'
+    ref: v0.4.0
+    file: 'ci/gitlab/aqueduct.gitlab-ci.yml'
+```
+
+Two jobs: `aqueduct:plan` (posts plan as an MR note via GitLab Notes API) and
+`aqueduct:apply` (runs on default branch push).
+
+#### Pre-commit Hooks
+
+`ci/hooks/aqueduct-pre-commit` is a drop-in git pre-commit hook that runs
+`aqueduct fmt --check` and `aqueduct validate` on every commit that touches `migrations/`.
+
+`.pre-commit-hooks.yaml` defines three hooks for the
+[pre-commit](https://pre-commit.com/) framework:
+
+```yaml
+repos:
+  - repo: https://github.com/trickle-labs/pg-aqueduct
+    rev: v0.4.0
+    hooks:
+      - id: aqueduct-fmt
+      - id: aqueduct-validate
+      - id: aqueduct-lint
+```
+
+### Test Coverage
+
+- 20 CLI integration tests (up from 14 in v0.3)
+- 73 unit tests (up from 60 in v0.3)
+- 25 database-backed integration tests (unchanged)
+- **118 total** — all pass, none skipped
 
 ---
 
