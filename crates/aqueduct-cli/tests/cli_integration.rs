@@ -692,3 +692,201 @@ fn test_lint_full_refresh_no_filter_cli() {
         "Lint should warn about FULL refresh with no filter"
     );
 }
+
+// ── v0.5 tests ────────────────────────────────────────────────────────────────
+
+/// Test: ingest from dbt-target generates stream migration files.
+#[test]
+fn test_ingest_dbt_generates_stream_files() {
+    use aqueduct_core::ingest::{ingest_from_dbt, IngestChangeKind};
+    use std::fs;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dbt_dir = tmp.path().join("target");
+    let out_dir = tmp.path().join("project");
+    fs::create_dir_all(&dbt_dir).unwrap();
+
+    // Write manifest.json
+    let manifest = r#"{
+  "nodes": {
+    "model.analytics.order_totals": {
+      "resource_type": "model",
+      "name": "order_totals",
+      "config": {
+        "materialized": "stream_table",
+        "schedule": "30s",
+        "refresh_mode": "DIFFERENTIAL"
+      },
+      "depends_on": { "nodes": [] },
+      "compiled_path": "compiled/analytics/models/order_totals.sql",
+      "original_file_path": "models/order_totals.sql"
+    }
+  },
+  "sources": {}
+}"#;
+    fs::write(dbt_dir.join("manifest.json"), manifest).unwrap();
+
+    // Write compiled SQL
+    let compiled_dir = dbt_dir.join("compiled").join("analytics").join("models");
+    fs::create_dir_all(&compiled_dir).unwrap();
+    fs::write(
+        compiled_dir.join("order_totals.sql"),
+        "SELECT customer_id, SUM(amount) AS total FROM raw.orders GROUP BY customer_id",
+    )
+    .unwrap();
+
+    let result = ingest_from_dbt(&dbt_dir, &out_dir).unwrap();
+
+    assert_eq!(result.streams_total, 1, "Should find 1 stream model");
+    assert_eq!(result.streams_changed, 1, "Should create 1 file");
+    assert_eq!(result.changes[0].kind, IngestChangeKind::Created);
+
+    let stream_file = out_dir
+        .join("migrations")
+        .join("streams")
+        .join("order_totals.sql");
+    assert!(
+        stream_file.exists(),
+        "Stream migration file should be created"
+    );
+
+    let content = fs::read_to_string(&stream_file).unwrap();
+    assert!(
+        content.contains("@aqueduct:schedule"),
+        "Should have schedule directive"
+    );
+    assert!(content.contains("30s"), "Should have 30s schedule");
+    assert!(content.contains("DIFFERENTIAL"), "Should have refresh mode");
+    assert!(content.contains("SELECT"), "Should have SQL body");
+}
+
+/// Test: ingest generates source files for referenced dbt sources.
+#[test]
+fn test_ingest_dbt_generates_source_files() {
+    use aqueduct_core::ingest::ingest_from_dbt;
+    use std::fs;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dbt_dir = tmp.path().join("target");
+    let out_dir = tmp.path().join("project");
+    fs::create_dir_all(&dbt_dir).unwrap();
+
+    let manifest = r#"{
+  "nodes": {
+    "model.analytics.totals": {
+      "resource_type": "model",
+      "name": "totals",
+      "config": {
+        "materialized": "stream_table",
+        "schedule": "1m"
+      },
+      "depends_on": { "nodes": ["source.analytics.warehouse.orders"] },
+      "compiled_path": "compiled/analytics/models/totals.sql",
+      "original_file_path": "models/totals.sql"
+    }
+  },
+  "sources": {
+    "source.analytics.warehouse.orders": {
+      "resource_type": "source",
+      "name": "orders",
+      "schema": "raw",
+      "source_name": "warehouse",
+      "identifier": null
+    }
+  }
+}"#;
+    fs::write(dbt_dir.join("manifest.json"), manifest).unwrap();
+
+    let compiled_dir = dbt_dir.join("compiled").join("analytics").join("models");
+    fs::create_dir_all(&compiled_dir).unwrap();
+    fs::write(
+        compiled_dir.join("totals.sql"),
+        "SELECT customer_id, COUNT(*) AS cnt FROM raw.orders GROUP BY customer_id",
+    )
+    .unwrap();
+
+    let result = ingest_from_dbt(&dbt_dir, &out_dir).unwrap();
+
+    assert_eq!(result.sources_total, 1, "Should generate 1 source file");
+
+    let source_file = out_dir
+        .join("migrations")
+        .join("sources")
+        .join("raw_orders.sql");
+    assert!(
+        source_file.exists(),
+        "Source migration file should be created"
+    );
+
+    let content = fs::read_to_string(&source_file).unwrap();
+    assert!(content.contains("kind"), "Source file should declare kind");
+    assert!(content.contains("source"), "Source file should say source");
+    assert!(
+        content.contains("owned = false"),
+        "Source should be owned = false"
+    );
+}
+
+/// Test: ingest is idempotent — running twice produces no changes on second run.
+#[test]
+fn test_ingest_dbt_idempotent() {
+    use aqueduct_core::ingest::{ingest_from_dbt, IngestChangeKind};
+    use std::fs;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dbt_dir = tmp.path().join("target");
+    let out_dir = tmp.path().join("project");
+    fs::create_dir_all(&dbt_dir).unwrap();
+
+    let manifest = r#"{
+  "nodes": {
+    "model.p.my_stream": {
+      "resource_type": "model",
+      "name": "my_stream",
+      "config": { "materialized": "stream_table", "schedule": "30s" },
+      "depends_on": { "nodes": [] },
+      "compiled_path": "compiled/p/models/my_stream.sql",
+      "original_file_path": "models/my_stream.sql"
+    }
+  },
+  "sources": {}
+}"#;
+    fs::write(dbt_dir.join("manifest.json"), manifest).unwrap();
+
+    let compiled_dir = dbt_dir.join("compiled").join("p").join("models");
+    fs::create_dir_all(&compiled_dir).unwrap();
+    fs::write(compiled_dir.join("my_stream.sql"), "SELECT 1 AS val").unwrap();
+
+    let r1 = ingest_from_dbt(&dbt_dir, &out_dir).unwrap();
+    assert_eq!(r1.streams_changed, 1);
+
+    let r2 = ingest_from_dbt(&dbt_dir, &out_dir).unwrap();
+    assert_eq!(r2.streams_changed, 0, "Second run should be a no-op");
+    assert_eq!(r2.changes[0].kind, IngestChangeKind::Unchanged);
+}
+
+/// Test: ingest from dbt target using the example's pre-compiled manifest.
+#[test]
+fn test_ingest_dbt_roundtrip_example() {
+    use aqueduct_core::ingest::ingest_from_dbt;
+
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let example_dir = workspace_root.join("examples").join("dbt-roundtrip");
+    let dbt_target = example_dir.join("target");
+
+    // Use a temp dir as the output to avoid polluting the example.
+    let tmp = tempfile::TempDir::new().unwrap();
+
+    let result = ingest_from_dbt(&dbt_target, tmp.path()).unwrap();
+
+    assert_eq!(result.streams_total, 3, "Example has 3 stream_table models");
+    assert_eq!(result.sources_total, 2, "Example has 2 referenced sources");
+    assert!(
+        result.streams_changed > 0,
+        "Files should be created on first run"
+    );
+}

@@ -1,0 +1,16 @@
+name: analytics
+version: "1.0.0"
+config-version: 2
+
+profile: analytics
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+target-path: "../target"
+clean-targets: ["../target"]
+
+models:
+  analytics:
+    +materialized: table
+    stream_tables:
+      +materialized: stream_table

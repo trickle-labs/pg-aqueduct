@@ -7,6 +7,7 @@ pub mod diff;
 pub mod error;
 pub mod executor;
 pub mod fmt;
+pub mod ingest;
 pub mod lint;
 pub mod live_state;
 pub mod parser;

@@ -1,6 +1,6 @@
 # pg_aqueduct Roadmap
 
-> **Status:** v0.4 implementation complete. See checklist below.
+> **Status:** v0.5 implementation complete. See checklist below.
 > This roadmap reflects the agreed design in `plans/pg-aqueduct-plan.md`.
 > Versions correspond directly to the implementation phases described there.
 
@@ -856,6 +856,7 @@ that make the migrations directory a first-class software artefact.
 
 **Target effort:** ~1 week.
 **Builds on:** v0.4 complete.
+**Status:** Complete ✅
 
 This version makes `pg_aqueduct` a first-class participant in dbt-pgtrickle workflows:
 teams that author stream tables as dbt models can use `aqueduct ingest` to import
@@ -866,34 +867,35 @@ lifecycle from there.
 
 #### Deliverables
 
-**`aqueduct ingest --from dbt-target target/`.** Reads dbt's compiled `manifest.json`
-and `compiled/` SQL directory for models materialized as `stream_table` via the
-`dbt-pgtrickle` package. For each such model:
-1. Generates a `migrations/streams/{model_name}.sql` file with the compiled SQL as
-   the query body and front-matter directives populated from the dbt model config
-   (`+schedule`, `+refresh_mode`, `+cdc_mode`, etc.).
-2. Generates `migrations/sources/*.sql` for each dbt source referenced by a
-   stream-table model (`owned = false`).
-3. Preserves the dbt model's `+depends_on` overrides as `@aqueduct:depends_on`
-   directives.
-4. Produces a diff report of what changed since the last ingest.
+- [x] **`aqueduct ingest --from dbt-target target/`.** Reads dbt's compiled `manifest.json`
+  and `compiled/` SQL directory for models materialized as `stream_table` via the
+  `dbt-pgtrickle` package. For each such model:
+  1. Generates a `migrations/streams/{model_name}.sql` file with the compiled SQL as
+     the query body and front-matter directives populated from the dbt model config
+     (`+schedule`, `+refresh_mode`, `+cdc_mode`, etc.).
+  2. Generates `migrations/sources/*.sql` for each dbt source referenced by a
+     stream-table model (`owned = false`).
+  3. Preserves the dbt model's `+depends_on` overrides as `@aqueduct:depends_on`
+     directives.
+  4. Produces a diff report of what changed since the last ingest.
+  - `ingest.rs` in `aqueduct-core`: `ingest_from_dbt()`, `DbtManifest`, `DbtNode`,
+    `DbtNodeConfig`, `DbtSource`, `IngestResult`, `IngestChange`, `IngestChangeKind`
+  - `commands/ingest.rs` in `aqueduct-cli`: `--from dbt-target`, `--target`, `--format`
+  - Command is idempotent: running it again with no dbt changes writes nothing
+  - `--format json` for machine-readable output
 
-The workflow composition is:
-- dbt generates the SQL (authoring tool for analytics engineers).
-- `aqueduct ingest` translates the compiled artefacts into an `aqueduct` migrations
-  directory (one-time or periodic).
-- `aqueduct plan` / `aqueduct apply` manages the migration lifecycle (platform team
-  tool).
+- [x] **Round-trip example.** A worked example in `examples/dbt-roundtrip/` demonstrates:
+  1. A dbt project with three `stream_table` models (`order_totals`, `promo_summary`,
+     `customer_ltv`).
+  2. A pre-compiled `target/` directory (manifest.json + compiled SQL).
+  3. Step-by-step README showing `ingest` → `validate` → `plan` → `apply` → `rollback`.
+  - `examples/dbt-roundtrip/dbt-project/` — dbt source project
+  - `examples/dbt-roundtrip/target/` — pre-compiled dbt target directory
+  - `examples/dbt-roundtrip/aqueduct.toml` — project config
 
-The two tools compose cleanly; neither replaces the other. dbt-pgtrickle generates
-the SQL; `aqueduct plan` reads the dbt-compiled artefacts and produces a migration.
-
-**Round-trip example.** A worked example in `examples/dbt-roundtrip/` demonstrates:
-1. A dbt project with three `stream_table` models.
-2. `aqueduct ingest` producing the migrations directory.
-3. `aqueduct plan` detecting a column-add in a dbt model.
-4. `aqueduct apply` executing the in-place migration.
-5. `aqueduct rollback` reverting the change.
+**Exit criteria.** `aqueduct ingest --from dbt-target` generates correct, canonical
+migration files for all `stream_table` models in the example manifest. Running it
+twice produces no changes on the second run. ✅
 
 ---
 

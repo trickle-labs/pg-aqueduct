@@ -7,12 +7,106 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [v0.5.0 — dbt Interop](#v050--dbt-interop)
 - [v0.4.0 — CI Integrations & Ergonomics](#v040--ci-integrations--ergonomics)
 - [v0.3.0 — Blue/Green, Preview Environments & Optional Extension](#v030--bluegreen-preview-environments--optional-extension)
 - [v0.2.0 — Online Schema Evolution](#v020--online-schema-evolution)
 - [v0.1.0 — Initial Implementation](#v010--initial-implementation)
 - [Unreleased — Repository Bootstrap](#unreleased--repository-bootstrap)
 <!-- TOC end -->
+
+---
+
+## [v0.5.0] — dbt Interop
+
+**Released:** 2026-05-18
+**Tag:** [`v0.5.0`](https://github.com/trickle-labs/pg-aqueduct/releases/tag/v0.5.0)
+
+All Phase 6 roadmap items are complete. v0.5 makes `pg_aqueduct` a first-class
+participant in dbt-pgtrickle workflows by introducing `aqueduct ingest`, a new command
+that reads compiled dbt artefacts and generates a canonical aqueduct migrations
+directory automatically.
+
+### What's New
+
+#### `aqueduct ingest --from dbt-target`
+
+New `aqueduct ingest` command ingests compiled dbt artefacts into an aqueduct
+migrations directory:
+
+```bash
+# After running `dbt compile`:
+aqueduct ingest \
+  --from dbt-target \
+  --target ./target \
+  --project-dir .
+```
+
+For each model materialised as `stream_table` via the `dbt-pgtrickle` package, the
+command:
+
+1. **Reads the compiled SQL** from `target/compiled/` (the output of `dbt compile`).
+2. **Generates `migrations/streams/{model_name}.sql`** with the compiled SQL as the
+   query body and front-matter directives populated from the dbt model config:
+   - `+schedule` → `@aqueduct:schedule`
+   - `+refresh_mode` → `@aqueduct:refresh_mode`
+   - `+cdc_mode` → `@aqueduct:cdc_mode`
+   - `+schema` → `@aqueduct:schema`
+   - `+depends_on` → `@aqueduct:depends_on` (overrides auto-derived dependencies)
+3. **Generates `migrations/sources/{name}.sql`** for each dbt source referenced by a
+   stream-table model (`owned = false`).
+4. **Produces a diff report** of what was created, updated, or left unchanged.
+
+The command is **idempotent**: running it again when nothing has changed in the dbt
+project writes nothing and exits cleanly.
+
+Output formats:
+
+```bash
+aqueduct ingest --from dbt-target --target ./target           # human-readable text
+aqueduct ingest --from dbt-target --target ./target --format json  # machine-readable
+```
+
+#### Workflow composition
+
+The two tools compose cleanly; neither replaces the other:
+
+- **dbt** generates the SQL (authoring tool for analytics engineers).
+- **`aqueduct ingest`** translates the compiled artefacts into a migrations directory
+  (one-time or periodic sync).
+- **`aqueduct plan` / `aqueduct apply`** manages the migration lifecycle (platform
+  team tool).
+
+Once the migrations directory is in place, teams can run `aqueduct plan` to see
+precisely what migration class each dbt model change requires — without any full
+rebuilds that aren't strictly necessary.
+
+#### `examples/dbt-roundtrip/`
+
+A new worked example in `examples/dbt-roundtrip/` demonstrates the full round-trip:
+
+1. A dbt project with three `stream_table` models (`order_totals`, `promo_summary`,
+   `customer_ltv`).
+2. A pre-compiled `target/` directory (the output of `dbt compile`).
+3. Step-by-step README showing `ingest` → `validate` → `plan` → `apply` → `rollback`.
+
+```
+examples/dbt-roundtrip/
+  dbt-project/           dbt source project
+    models/
+      order_totals.sql
+      promo_summary.sql
+      customer_ltv.sql
+    dbt_project.yml
+  target/                pre-compiled dbt target directory
+    manifest.json
+    compiled/analytics/models/
+      order_totals.sql
+      promo_summary.sql
+      customer_ltv.sql
+  aqueduct.toml
+  README.md
+```
 
 ---
 
