@@ -1,0 +1,9 @@
+[project]
+name = "dbt-roundtrip"
+
+[targets.dev]
+dsn = "${AQUEDUCT_DEV_DSN}"
+
+[apply]
+lock_timeout = "30s"
+allow_full_refresh = true

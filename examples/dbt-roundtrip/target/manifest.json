@@ -1,0 +1,82 @@
+{
+  "metadata": {
+    "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v11/manifest.json",
+    "dbt_version": "1.8.0",
+    "generated_at": "2026-05-18T00:00:00.000000Z",
+    "invocation_id": "a0000000-0000-0000-0000-000000000001",
+    "env": {}
+  },
+  "nodes": {
+    "model.analytics.order_totals": {
+      "resource_type": "model",
+      "name": "order_totals",
+      "unique_id": "model.analytics.order_totals",
+      "fqn": ["analytics", "stream_tables", "order_totals"],
+      "schema": "public",
+      "config": {
+        "materialized": "stream_table",
+        "schedule": "30s",
+        "refresh_mode": "DIFFERENTIAL"
+      },
+      "depends_on": {
+        "nodes": ["source.analytics.warehouse.orders"]
+      },
+      "compiled_path": "compiled/analytics/models/order_totals.sql",
+      "original_file_path": "models/order_totals.sql"
+    },
+    "model.analytics.promo_summary": {
+      "resource_type": "model",
+      "name": "promo_summary",
+      "unique_id": "model.analytics.promo_summary",
+      "fqn": ["analytics", "stream_tables", "promo_summary"],
+      "schema": "public",
+      "config": {
+        "materialized": "stream_table",
+        "schedule": "1m",
+        "refresh_mode": "FULL"
+      },
+      "depends_on": {
+        "nodes": ["source.analytics.warehouse.promos"]
+      },
+      "compiled_path": "compiled/analytics/models/promo_summary.sql",
+      "original_file_path": "models/promo_summary.sql"
+    },
+    "model.analytics.customer_ltv": {
+      "resource_type": "model",
+      "name": "customer_ltv",
+      "unique_id": "model.analytics.customer_ltv",
+      "fqn": ["analytics", "stream_tables", "customer_ltv"],
+      "schema": "public",
+      "config": {
+        "materialized": "stream_table",
+        "schedule": "5m",
+        "refresh_mode": "DIFFERENTIAL"
+      },
+      "depends_on": {
+        "nodes": ["model.analytics.order_totals"]
+      },
+      "compiled_path": "compiled/analytics/models/customer_ltv.sql",
+      "original_file_path": "models/customer_ltv.sql"
+    }
+  },
+  "sources": {
+    "source.analytics.warehouse.orders": {
+      "resource_type": "source",
+      "name": "orders",
+      "schema": "raw",
+      "source_name": "warehouse",
+      "identifier": null,
+      "unique_id": "source.analytics.warehouse.orders",
+      "fqn": ["analytics", "warehouse", "orders"]
+    },
+    "source.analytics.warehouse.promos": {
+      "resource_type": "source",
+      "name": "promos",
+      "schema": "raw",
+      "source_name": "warehouse",
+      "identifier": null,
+      "unique_id": "source.analytics.warehouse.promos",
+      "fqn": ["analytics", "warehouse", "promos"]
+    }
+  }
+}
