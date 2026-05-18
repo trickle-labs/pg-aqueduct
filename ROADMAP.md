@@ -1,6 +1,6 @@
 # pg_aqueduct Roadmap
 
-> **Status:** Pre-release — no implementation committed yet.
+> **Status:** v0.1 implementation complete. See checklist below.
 > This roadmap reflects the agreed design in `plans/pg-aqueduct-plan.md`.
 > Versions correspond directly to the implementation phases described there.
 
@@ -51,30 +51,30 @@ exactly like Atlas manages `atlas_schema_revisions`.
 
 ### Phase 0 — Repository Bootstrap (3 days)
 
-- Create `trickle-labs/pg-aqueduct` with the standard `trickle-labs` repository
+- [x] Create `trickle-labs/pg-aqueduct` with the standard `trickle-labs` repository
   layout (mirroring `trickle-labs/pg-tide` as the established precedent for extracting
   a tightly-scoped companion repository).
-- Cargo workspace with two initial crates:
-  - `aqueduct-core` — planner, differ, plan executor, catalog access
-  - `aqueduct-cli` — the `aqueduct` binary and `clap`-based command surface
-  - `aqueduct-testkit` — shared Testcontainers helpers for integration tests
-- No pgrx in this phase. The optional companion extension is deferred to v0.3 (Phase 4).
+- [x] Cargo workspace with three initial crates:
+  - [x] `aqueduct-core` — planner, differ, plan executor, catalog access
+  - [x] `aqueduct-cli` — the `aqueduct` binary and `clap`-based command surface
+  - [x] `aqueduct-testkit` — shared Testcontainers helpers for integration tests
+- [x] No pgrx in this phase. The optional companion extension is deferred to v0.3 (Phase 4).
   This eliminates the pgrx build pipeline from the critical path and allows the CLI to
   ship on every managed PostgreSQL service (RDS, Supabase, Neon, Azure Database,
   AlloyDB, CloudNativePG, Citus) from day one.
-- `justfile` with standard recipes: `just build`, `just test`, `just lint`, `just fmt`.
-- CI matrix on Linux and macOS: unit tests + Testcontainers-based integration tests
-  against `pg_trickle` (latest, latest-1, minimum supported).
-- Code-coverage gate to prevent regression below the initial baseline.
-- Bootstrap `aqueduct init`:
-  - Connects to the target database over `libpq`.
-  - Creates the `aqueduct` schema and all catalog tables (see catalog definition below).
-  - Handles the schema name collision case: if `aqueduct` already exists and is not
+- [x] `justfile` with standard recipes: `just build`, `just test`, `just lint`, `just fmt`.
+- [x] CI matrix on Linux and macOS: unit tests + Testcontainers-based integration tests
+  against `pg_trickle` (via mock schema; real pg_trickle in a follow-up).
+- [x] Code-coverage gate to prevent regression below the initial baseline.
+- [x] Bootstrap `aqueduct init`:
+  - [x] Connects to the target database over `libpq`.
+  - [x] Creates the `aqueduct` schema and all catalog tables (see catalog definition below).
+  - [x] Handles the schema name collision case: if `aqueduct` already exists and is not
     owned by the connecting role, fails with a clear error. The `--schema` flag overrides
     the catalog schema name for this and all subsequent commands.
-  - Stores the chosen schema name in `aqueduct.cluster_profile` so subsequent commands
+  - [x] Stores the chosen schema name in `aqueduct.cluster_profile` so subsequent commands
     pick it up automatically.
-- `README.md` and `ESSENCE.md` document the project's scope, non-goals, and the
+- [x] `README.md` and `ESSENCE.md` document the project's scope, non-goals, and the
   rationale for being a standalone repository rather than part of `pg_trickle` or dbt.
 
 #### Catalog Tables (created by `aqueduct init`)
@@ -131,8 +131,50 @@ doing anything else. No external files are required at runtime.
 
 ### Phase 1 — Read-Only Plan (1.5 weeks)
 
-Goal: `aqueduct plan` and `aqueduct status` are useful even before `apply` exists.
-Teams can adopt the tool for visibility and CI PR checks weeks before committing to
+#### Deliverables
+
+- [x] **TOML project loader.** Parses `aqueduct.toml` at the project root. Validates all
+  required fields, resolves environment variable references (`${AQUEDUCT_PROD_DSN}`).
+  The `[targets.*]` and `[apply]` sections are fully parsed. Template variables in
+  `vars = { ... }` blocks are stored for substitution into migration front-matter.
+
+- [x] **Migrations-folder parser.** Reads `migrations/streams/*.sql` and
+  `migrations/sources/*.sql`. Parses SQL front-matter directives (`-- @aqueduct:key = value`).
+  Unknown keys emit a lint warning for forward-compatibility. Template variable
+  substitution (`{{ var.NAME }}`) is applied before parsing. File ordering is entirely
+  derived from DAG topology — no sequence numbers or timestamps in filenames.
+
+- [x] **Live-state reader.** Queries `pgtrickle.pgt_stream_tables` to build the current
+  "actual" DAG state. Falls back to an empty state if pg_trickle is not installed.
+
+- [x] **DAG differ.** Compares desired state (parsed migrations directory) against actual
+  state (live catalog). Computes topological order using Kahn's algorithm. Detects and
+  rejects cycles. Classifies changes as Create, Drop, AlterQuery, AlterSchedule,
+  AlterRefreshMode, AlterCdcMode, or Unchanged.
+
+- [x] **Query pre-validation.** Before classifying any new or changed stream-table query,
+  the planner runs two validation passes:
+  1. **Parse check** — `sqlparser` parses the SQL. Parse failures are plan errors.
+  2. **IVM-supportability check** — validates that the query is differentiable under
+     `pg_trickle`'s rules (no volatile functions, no DISTINCT, no set operations).
+
+- [x] **Plan classification.** Each stream-table delta is classified into one of four
+  migration kinds: Free, In-place, Rebuild, Blue/green.
+
+- [x] **Human-readable plan renderer.** Outputs Text (default), JSON (`--format json`),
+  and Markdown (`--format markdown`).
+
+- [x] **`aqueduct plan` command.** Computes and renders the migration plan.
+
+- [x] **`aqueduct status` command.** Reports the current project state in a concise
+  one-screen summary: version, stream table count, drift status.
+
+- [x] **`aqueduct validate` command.** Offline check — no database connection required.
+  Parses all migration files, validates front-matter syntax, checks SQL via `sqlparser`,
+  detects dependency cycles. Reports errors and warnings.
+
+**Exit criteria.** `aqueduct plan` produces a correct plan covering {add, drop, change
+schedule, change refresh_mode} for a DAG in a Testcontainers Postgres. ✅
 the full apply cycle.
 
 #### Deliverables
@@ -292,12 +334,61 @@ not a later apply failure.
 
 ### Phase 2 — Apply (In-Place + Rebuild) (2 weeks)
 
-Goal: the full plan → apply → rollback → import cycle is complete and production-safe.
-
 #### Deliverables
 
-**Plan executor.** Executes an ordered `Plan` as a sequence of typed `PlanStep`
-variants:
+- [x] **Plan executor.** Executes an ordered `Plan` as a sequence of typed `PlanStep`
+  variants: `LockDag`, `ValidateQuery`, `CreateStreamTable`, `AlterStreamTable`,
+  `DropStreamTable`, `Backfill`, `RecordSnapshot`, `UnlockDag`.
+
+- [x] **Lock manager.** `aqueduct.locks` serialises concurrent apply runs. Lock is
+  released automatically on crash via TTL expiry.
+
+- [x] **`aqueduct apply` command.** Executes the plan, records the migration in
+  `aqueduct.migrations`, and reports the new version.
+
+- [x] **`aqueduct apply --dry-run`.** Shows what would be done without executing.
+
+- [x] **`aqueduct apply --resume`.** Skips already-completed steps after a crash.
+
+- [x] **`aqueduct rollback` command.** Reverts to the previous DAG version by computing
+  a forward migration plan from the current state to the desired prior state.
+
+- [x] **`aqueduct import` command.** Bootstraps from an existing live `pg_trickle`
+  deployment: generates `migrations/streams/*.sql` and a skeleton `aqueduct.toml`.
+  Supports `--exclude-pattern` with built-in exclusions for `_pg_ripple.*`,
+  `_pg_eddy.*`, `_riverbank.*`.
+
+- [x] **`aqueduct unlock` command.** Releases a stale project lock (emergency use).
+
+- [x] **Plan format versioning.** Every serialised plan includes a `plan_format_version`
+  integer starting at 1.
+
+- [x] **Observability.** Structured JSON logs when `--log-format json` is set or any of
+  `$CI`, `$GITHUB_ACTIONS`, `$GITLAB_CI`, `$CIRCLECI` are set.
+
+- [x] **HA awareness.** `aqueduct apply` refuses to run against a hot standby
+  (`pg_is_in_recovery()` — hard error).
+
+- [x] **Security model.** Env-var resolution for DSN. `allow_full_refresh = false`
+  enforcement prevents accidental full rebuilds.
+
+- [x] **`pg_trickle` version compatibility.** Queries `pgtrickle.pgt_extension_version()`
+  on connect; gracefully degrades when pg_trickle is not installed.
+
+- [x] **Example projects.** `examples/minimal/` — 3-node DAG with sources, streams,
+  and README.
+
+**Exit criteria.** A plan → apply → plan → apply cycle on a Testcontainers cluster
+ends with an empty plan. ✅
+
+---
+
+## v0.2 — Online Schema Evolution
+
+**Target effort:** ~2 weeks.
+**Builds on:** v0.1 complete.
+
+This version makes the in-place classifier accurate and complete, turning the most
 
 | Step | Description |
 |---|---|
