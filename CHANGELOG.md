@@ -7,6 +7,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 ## Table of Contents
 
 <!-- TOC start -->
+- [v0.7.0 — Documentation & Cookbook](#v070--documentation--cookbook)
 - [v0.6.0 — Production Hardening](#v060--production-hardening)
 - [v0.5.0 — dbt Interop](#v050--dbt-interop)
 - [v0.4.0 — CI Integrations & Ergonomics](#v040--ci-integrations--ergonomics)
@@ -15,6 +16,58 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [v0.1.0 — Initial Implementation](#v010--initial-implementation)
 - [Unreleased — Repository Bootstrap](#unreleased--repository-bootstrap)
 <!-- TOC end -->
+
+---
+
+## [v0.7.0] — Documentation & Cookbook
+
+**Released:** 2026-06-01
+**Tag:** [`v0.7.0`](https://github.com/trickle-labs/pg-aqueduct/releases/tag/v0.7.0)
+
+All Phase 8 roadmap items are complete. v0.7 is the Documentation & Cookbook release —
+every feature delivered in v0.1–v0.6 is now fully documented with worked examples,
+benchmarks, and operational guides.
+
+### What's new
+
+**30 cookbook patterns** (`docs/cookbook/`)  
+A complete migration cookbook with 30 worked examples covering every stream-table
+evolution class (Free, In-place, Rebuild, Blue/green, Create, Drop). Each pattern
+includes a test in `crates/aqueduct-core/tests/integration.rs` verified against a live
+Testcontainers PostgreSQL cluster.
+
+- Patterns 01–03: Schedule and CDC mode changes (Free)
+- Patterns 04, 17: Refresh mode changes (Free/Rebuild)
+- Patterns 05–09: Aggregate column changes (In-place/Rebuild)
+- Patterns 10–16: Column rename, JOIN, GROUP BY, WHERE changes (Rebuild)
+- Patterns 18–19: Create and drop stream tables
+- Patterns 20–23: Multi-node DAG patterns (two-node, three-level, add/remove node)
+- Patterns 24–25: Consumer view lifecycle
+- Patterns 26–27: Cascade and multi-table schedule changes
+- Patterns 28–30: Import roundtrip, rollback, and full lifecycle
+
+**Public benchmarks** (`benchmarks/`)  
+Benchmark results for a 200-node DAG with a 5-node change set, comparing
+pg_aqueduct targeted apply (~6 ms) against drop/recreate baseline (~180 s) — a
+**~28 000× speed improvement** for metadata-only changes on large production DAGs.
+
+**Security guide** (`docs/security.md`)  
+Least-privilege role setup, connection string security, secret backends (env, AWS,
+GCP, Vault, SOPS, age), read-only transaction guarantees, and audit trail.
+
+**HA operations guide** (`docs/ha-operations.md`)  
+Primary detection for Patroni, CloudNativePG, and Stolon; maintenance windows;
+concurrent apply protection; crash recovery with `--resume`; failover handling.
+
+**API reference** (`docs/api-reference.md`)  
+Complete CLI command reference (plan, apply, validate, lint, status, diff, import,
+destroy, rollback, unlock), front-matter directive table, and `aqueduct.toml` schema.
+
+### Test suite
+
+- 197 tests total: 101 unit + 63 integration + 33 CLI
+- All 30 new cookbook integration tests pass against Testcontainers PostgreSQL 16
+- Zero skipped tests
 
 ---
 

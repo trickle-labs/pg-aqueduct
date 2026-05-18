@@ -1,0 +1,63 @@
+name: docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'book.toml'
+      - 'CHANGELOG.md'
+      - 'ROADMAP.md'
+      - 'README.md'
+  workflow_dispatch:
+
+# Only one deployment at a time; cancel in-progress runs on new pushes.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pages:    write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install mdBook
+        env:
+          MDBOOK_VERSION: "0.4.44"
+        run: |
+          curl -sSL \
+            "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C ~/.cargo/bin
+
+      - name: Stage root files into docs/ for mdBook
+        run: |
+          cp CHANGELOG.md docs/changelog.md
+          cp ROADMAP.md   docs/roadmap.md
+
+      - name: Build documentation
+        run: mdbook build
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v6
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: book
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
