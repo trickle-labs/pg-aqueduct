@@ -1,4 +1,5 @@
 pub mod apply;
+pub mod destroy;
 pub mod fmt;
 pub mod import;
 pub mod ingest;
@@ -6,6 +7,7 @@ pub mod init;
 pub mod lint;
 pub mod plan;
 pub mod preview;
+pub mod promote;
 pub mod rollback;
 pub mod status;
 pub mod unlock;

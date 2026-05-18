@@ -1045,3 +1045,329 @@ async fn test_blue_green_plan_steps() {
     let plan = build_plan("bg-test", None, 1, &diff, &topo);
     assert!(!plan.steps.is_empty(), "Plan should not be empty");
 }
+
+// ── v0.6 tests ────────────────────────────────────────────────────────────────
+
+/// Test: promote compute_promotion_plan returns a non-empty plan when destination
+/// is behind.
+#[tokio::test]
+async fn test_promote_computes_plan_against_destination() {
+    use aqueduct_core::promote::{compute_promotion_plan, PromoteOptions};
+
+    let db = TestDb::new().await.expect("start test db");
+    db.install_mock_pgtrickle().await.expect("install mock");
+    db.install_aqueduct_catalog().await.expect("init catalog");
+
+    // Create the source table.
+    db.client
+        .execute(
+            "CREATE TABLE raw_orders (id bigint, customer_id bigint, amount numeric)",
+            &[],
+        )
+        .await
+        .expect("create source");
+
+    let files = vec![parse_file(
+        "order_totals",
+        r#"-- @aqueduct:schedule = "30s"
+SELECT customer_id, SUM(amount) AS total FROM raw_orders GROUP BY customer_id;
+"#,
+    )];
+
+    let opts = PromoteOptions {
+        from_env: "dev".to_string(),
+        to_env: "staging".to_string(),
+        project: "promote-test".to_string(),
+        dry_run: true,
+    };
+
+    // The destination (db) is empty, so the plan should contain a Create step.
+    let plan = compute_promotion_plan(&db.client, &files, &opts)
+        .await
+        .expect("compute promotion plan");
+
+    assert_eq!(plan.summary.creates, 1, "Plan should create 1 stream table");
+}
+
+/// Test: validate_source_clean returns error when source has pending drift.
+#[tokio::test]
+async fn test_promote_source_clean_detects_drift() {
+    use aqueduct_core::promote::validate_source_clean;
+
+    let db = TestDb::new().await.expect("start test db");
+    db.install_mock_pgtrickle().await.expect("install mock");
+    db.install_aqueduct_catalog().await.expect("init catalog");
+
+    // files describe a desired state that doesn't exist in the DB → drift.
+    let files = vec![parse_file(
+        "order_totals",
+        "-- @aqueduct:schedule = \"30s\"\nSELECT 1 AS val;",
+    )];
+
+    let result = validate_source_clean(&db.client, &files, "test-project").await;
+    // Should fail because the catalog has no version recorded.
+    assert!(
+        result.is_err(),
+        "validate_source_clean should fail when catalog is uninitialised"
+    );
+}
+
+/// Test: secret backend env resolves existing environment variables.
+#[tokio::test]
+async fn test_secret_backend_env_resolves() {
+    use aqueduct_core::secrets::{resolve_secret, SecretBackend};
+
+    std::env::set_var("AQUEDUCT_INTEGRATION_SECRET", "my-test-value");
+    let value = resolve_secret(&SecretBackend::Env, "AQUEDUCT_INTEGRATION_SECRET")
+        .await
+        .expect("resolve secret");
+    assert_eq!(value, "my-test-value");
+    std::env::remove_var("AQUEDUCT_INTEGRATION_SECRET");
+}
+
+/// Test: secret backend env returns error for missing variable.
+#[tokio::test]
+async fn test_secret_backend_env_missing_var() {
+    use aqueduct_core::secrets::{resolve_secret, SecretBackend};
+
+    std::env::remove_var("AQUEDUCT_NONEXISTENT_SECRET_XYZ");
+    let err = resolve_secret(&SecretBackend::Env, "AQUEDUCT_NONEXISTENT_SECRET_XYZ")
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("not set"),
+        "Error should mention the variable is not set: {}",
+        err
+    );
+}
+
+/// Test: detect_ha_backend returns Primary on a plain PostgreSQL instance.
+#[tokio::test]
+async fn test_ha_backend_plain_postgres_is_primary() {
+    use aqueduct_core::live_state::{detect_ha_backend, HaBackend};
+
+    let db = TestDb::new().await.expect("start test db");
+
+    let backend = detect_ha_backend(&db.client)
+        .await
+        .expect("detect HA backend");
+
+    assert_eq!(
+        backend,
+        HaBackend::Primary,
+        "A plain PostgreSQL testcontainer should be detected as Primary"
+    );
+}
+
+/// Test: destroy_project dry-run returns the list of tables without dropping them.
+#[tokio::test]
+async fn test_destroy_project_dry_run() {
+    use aqueduct_core::destroy::{destroy_project, DestroyOptions};
+
+    let db = TestDb::new().await.expect("start test db");
+    db.install_mock_pgtrickle().await.expect("install mock");
+    db.install_aqueduct_catalog().await.expect("init catalog");
+
+    // Create a stream table in the mock pg_trickle.
+    db.client
+        .execute(
+            "CREATE TABLE raw_orders (id bigint, customer_id bigint, amount numeric)",
+            &[],
+        )
+        .await
+        .expect("create source");
+
+    let files = vec![parse_file(
+        "order_totals",
+        "-- @aqueduct:schedule = \"30s\"\nSELECT customer_id, SUM(amount) AS total FROM raw_orders GROUP BY customer_id;",
+    )];
+    let desired = build_dag_state(&files, false).expect("desired");
+    let actual = read_live_state(&db.client).await.expect("actual");
+    let diff = compute_diff(&desired, &actual);
+    let topo = topological_sort(&desired).expect("topo");
+    let plan = build_plan("destroy-dry-run-test", None, 1, &diff, &topo);
+    let executor = PlanExecutor::new(&db.client, "destroy-dry-run-test", "0.6.0", false);
+    executor.execute(&plan).await.expect("apply plan");
+
+    // Dry-run destroy.
+    let opts = DestroyOptions {
+        project: "destroy-dry-run-test".to_string(),
+        dry_run: true,
+    };
+    let result = destroy_project(&db.client, &opts)
+        .await
+        .expect("dry-run destroy");
+
+    assert!(result.dry_run, "Result should indicate dry run");
+    assert!(
+        !result.stream_tables_dropped.is_empty(),
+        "Dry run should list the table that would be dropped"
+    );
+
+    // The table should still exist after dry run.
+    let count = aqueduct_core::live_state::get_stream_table_count(&db.client)
+        .await
+        .expect("count");
+    assert_eq!(count, 1, "Table should still exist after dry run");
+}
+
+/// Test: destroy_project removes all stream tables and catalog entries.
+#[tokio::test]
+async fn test_destroy_project_full() {
+    use aqueduct_core::destroy::{destroy_project, DestroyOptions};
+
+    let db = TestDb::new().await.expect("start test db");
+    db.install_mock_pgtrickle().await.expect("install mock");
+    db.install_aqueduct_catalog().await.expect("init catalog");
+
+    db.client
+        .execute(
+            "CREATE TABLE raw_orders2 (id bigint, customer_id bigint, amount numeric)",
+            &[],
+        )
+        .await
+        .expect("create source");
+
+    let files = vec![parse_file(
+        "order_totals2",
+        "-- @aqueduct:schedule = \"30s\"\nSELECT customer_id, SUM(amount) AS total FROM raw_orders2 GROUP BY customer_id;",
+    )];
+    let desired = build_dag_state(&files, false).expect("desired");
+    let actual = read_live_state(&db.client).await.expect("actual");
+    let diff = compute_diff(&desired, &actual);
+    let topo = topological_sort(&desired).expect("topo");
+    let plan = build_plan("destroy-full-test", None, 1, &diff, &topo);
+    let executor = PlanExecutor::new(&db.client, "destroy-full-test", "0.6.0", false);
+    executor.execute(&plan).await.expect("apply plan");
+
+    // Confirm table was created.
+    let count_before = aqueduct_core::live_state::get_stream_table_count(&db.client)
+        .await
+        .expect("count before");
+    assert_eq!(count_before, 1, "One stream table should exist before destroy");
+
+    // Full destroy.
+    let opts = DestroyOptions {
+        project: "destroy-full-test".to_string(),
+        dry_run: false,
+    };
+    let result = destroy_project(&db.client, &opts)
+        .await
+        .expect("full destroy");
+
+    assert!(!result.dry_run);
+    assert_eq!(result.stream_tables_dropped.len(), 1);
+    assert!(result.catalog_rows_deleted > 0, "Should delete catalog rows");
+
+    // Stream table count should now be 0.
+    let count_after = aqueduct_core::live_state::get_stream_table_count(&db.client)
+        .await
+        .expect("count after");
+    assert_eq!(count_after, 0, "No stream tables should remain after destroy");
+}
+
+/// Test: planner fuzzing — random DAG mutations always produce a consistent plan.
+///
+/// This is a lightweight version of the full planner fuzzer described in the
+/// v0.6 roadmap.  It applies N random create/drop mutations and asserts that
+/// every plan → apply → plan cycle ends with an empty plan (convergence).
+#[tokio::test]
+async fn test_planner_fuzzing_random_mutations() {
+    use aqueduct_core::dag::{DagState, QualifiedName, RefreshMode, StreamTableSpec};
+
+    let db = TestDb::new().await.expect("start test db");
+    db.install_mock_pgtrickle().await.expect("install mock");
+    db.install_aqueduct_catalog().await.expect("init catalog");
+
+    // Seed the PRNG with a fixed value for reproducibility.
+    let mut state: u64 = 0xDEAD_BEEF_CAFE_1234;
+    let lcg_next = |s: u64| s.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+
+    let table_names = ["alpha", "beta", "gamma", "delta"];
+
+    // Start with an empty project; iterate 8 random mutations.
+    let mut current_desired: Vec<StreamTableSpec> = vec![];
+    let project = "fuzz-test";
+
+    // Re-use the same DB connection for all iterations.
+    // Create all base tables upfront.
+    for tname in &table_names {
+        db.client
+            .execute(
+                &format!("CREATE TABLE IF NOT EXISTS raw_{} (id bigint, val numeric)", tname),
+                &[],
+            )
+            .await
+            .expect("create raw table");
+    }
+
+    for iteration in 0..8u32 {
+        state = lcg_next(state);
+        let table_idx = (state >> 32) as usize % table_names.len();
+        let table_name = table_names[table_idx];
+        let qname = QualifiedName::new("public", table_name);
+
+        // Toggle: if table is in desired, remove it; otherwise add it.
+        let already_present = current_desired
+            .iter()
+            .any(|s| s.qualified_name == qname);
+
+        if already_present {
+            current_desired.retain(|s| s.qualified_name != qname);
+        } else {
+            current_desired.push(StreamTableSpec {
+                qualified_name: qname.clone(),
+                query: format!(
+                    "SELECT id, SUM(val) AS total FROM raw_{} GROUP BY id",
+                    table_name
+                ),
+                refresh_mode: RefreshMode::Full,
+                schedule: "30s".to_string(),
+                cdc_mode: None,
+                explicit_depends_on: vec![],
+                depends_on: vec![],
+                cypher_source: None,
+            });
+        }
+
+        let desired_state = DagState {
+            stream_tables: current_desired.clone(),
+            sources: vec![],
+            consumers: vec![],
+        };
+
+        let actual = read_live_state(&db.client).await.expect("read live state");
+        let diff = compute_diff(&desired_state, &actual);
+
+        if diff.is_empty() {
+            continue;
+        }
+
+        let topo = topological_sort(&desired_state).expect("topo");
+        let current_version = aqueduct_core::live_state::get_latest_dag_version(
+            &db.client,
+            project,
+        )
+        .await
+        .expect("get version");
+        let next_version = current_version.map(|v| v + 1).unwrap_or(1);
+        let plan = build_plan(project, current_version, next_version, &diff, &topo);
+
+        let executor = PlanExecutor::new(&db.client, project, "0.6.0", false);
+        executor
+            .execute(&plan)
+            .await
+            .unwrap_or_else(|e| panic!("execute failed on iteration {}: {}", iteration, e));
+
+        // After apply, plan should be empty (convergence invariant).
+        let actual2 = read_live_state(&db.client).await.expect("read live state 2");
+        let diff2 = compute_diff(&desired_state, &actual2);
+        assert!(
+            diff2.is_empty(),
+            "Iteration {}: plan should be empty after apply, but got {} change(s)",
+            iteration,
+            diff2.changes().len()
+        );
+    }
+}
+
