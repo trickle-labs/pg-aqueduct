@@ -42,10 +42,7 @@ async fn run_dbt_ingest(args: IngestArgs) -> anyhow::Result<()> {
         );
     }
 
-    tracing::info!(
-        "Ingesting dbt artefacts from {}",
-        dbt_target_dir.display()
-    );
+    tracing::info!("Ingesting dbt artefacts from {}", dbt_target_dir.display());
 
     let result = ingest_from_dbt(&dbt_target_dir, &project_dir)?;
 
@@ -59,9 +56,7 @@ async fn run_dbt_ingest(args: IngestArgs) -> anyhow::Result<()> {
                     "No stream_table models found in {}.",
                     dbt_target_dir.display()
                 );
-                println!(
-                    "Ensure models are configured with `materialized: stream_table` in dbt."
-                );
+                println!("Ensure models are configured with `materialized: stream_table` in dbt.");
                 return Ok(());
             }
 
@@ -71,12 +66,7 @@ async fn run_dbt_ingest(args: IngestArgs) -> anyhow::Result<()> {
                     IngestChangeKind::Updated => "~",
                     IngestChangeKind::Unchanged => " ",
                 };
-                println!(
-                    "  {} {} {}",
-                    symbol,
-                    change.kind,
-                    change.path.display()
-                );
+                println!("  {} {} {}", symbol, change.kind, change.path.display());
             }
 
             println!();
@@ -89,8 +79,7 @@ async fn run_dbt_ingest(args: IngestArgs) -> anyhow::Result<()> {
             } else {
                 println!(
                     "✓ {} stream model(s) and {} source(s) are already up to date.",
-                    result.streams_total,
-                    result.sources_total,
+                    result.streams_total, result.sources_total,
                 );
             }
 
@@ -100,7 +89,10 @@ async fn run_dbt_ingest(args: IngestArgs) -> anyhow::Result<()> {
                 "  1. Review the generated migration files in {}/migrations/",
                 project_dir.display()
             );
-            println!("  2. Run: aqueduct validate --project-dir {}", project_dir.display());
+            println!(
+                "  2. Run: aqueduct validate --project-dir {}",
+                project_dir.display()
+            );
             println!("  3. Run: aqueduct plan --to <target>");
         }
     }

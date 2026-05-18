@@ -300,11 +300,7 @@ fn build_stream_migration_file(
     depends_on: &[String],
     streams_dir: &Path,
 ) -> MigrationFile {
-    let sql_body = compiled_sql
-        .trim()
-        .trim_end_matches(';')
-        .trim()
-        .to_string();
+    let sql_body = compiled_sql.trim().trim_end_matches(';').trim().to_string();
 
     let schema = model
         .config
@@ -395,7 +391,10 @@ fn read_compiled_sql(dbt_target_dir: &Path, model: &DbtNode) -> Result<String> {
         }
         // Also try the path relative to the dbt project root (dbt sometimes strips
         // the target/ prefix from compiled_path).
-        let alt_path = dbt_target_dir.parent().unwrap_or(dbt_target_dir).join(compiled_path);
+        let alt_path = dbt_target_dir
+            .parent()
+            .unwrap_or(dbt_target_dir)
+            .join(compiled_path);
         if alt_path.exists() {
             return std::fs::read_to_string(&alt_path).map_err(AqueductError::Io);
         }

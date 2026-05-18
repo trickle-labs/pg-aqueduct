@@ -2,7 +2,9 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 mod commands;
-use commands::{apply, fmt, import, ingest, init, lint, plan, preview, rollback, status, unlock, validate};
+use commands::{
+    apply, fmt, import, ingest, init, lint, plan, preview, rollback, status, unlock, validate,
+};
 
 /// Declarative schema evolution and migration for stream-table DAGs.
 #[derive(Debug, Parser)]

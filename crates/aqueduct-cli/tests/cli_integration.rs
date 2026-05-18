@@ -745,10 +745,16 @@ fn test_ingest_dbt_generates_stream_files() {
         .join("migrations")
         .join("streams")
         .join("order_totals.sql");
-    assert!(stream_file.exists(), "Stream migration file should be created");
+    assert!(
+        stream_file.exists(),
+        "Stream migration file should be created"
+    );
 
     let content = fs::read_to_string(&stream_file).unwrap();
-    assert!(content.contains("@aqueduct:schedule"), "Should have schedule directive");
+    assert!(
+        content.contains("@aqueduct:schedule"),
+        "Should have schedule directive"
+    );
     assert!(content.contains("30s"), "Should have 30s schedule");
     assert!(content.contains("DIFFERENTIAL"), "Should have refresh mode");
     assert!(content.contains("SELECT"), "Should have SQL body");
@@ -807,12 +813,18 @@ fn test_ingest_dbt_generates_source_files() {
         .join("migrations")
         .join("sources")
         .join("raw_orders.sql");
-    assert!(source_file.exists(), "Source migration file should be created");
+    assert!(
+        source_file.exists(),
+        "Source migration file should be created"
+    );
 
     let content = fs::read_to_string(&source_file).unwrap();
     assert!(content.contains("kind"), "Source file should declare kind");
     assert!(content.contains("source"), "Source file should say source");
-    assert!(content.contains("owned = false"), "Source should be owned = false");
+    assert!(
+        content.contains("owned = false"),
+        "Source should be owned = false"
+    );
 }
 
 /// Test: ingest is idempotent — running twice produces no changes on second run.
@@ -873,5 +885,8 @@ fn test_ingest_dbt_roundtrip_example() {
 
     assert_eq!(result.streams_total, 3, "Example has 3 stream_table models");
     assert_eq!(result.sources_total, 2, "Example has 2 referenced sources");
-    assert!(result.streams_changed > 0, "Files should be created on first run");
+    assert!(
+        result.streams_changed > 0,
+        "Files should be created on first run"
+    );
 }
