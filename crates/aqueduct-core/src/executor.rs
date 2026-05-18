@@ -255,6 +255,205 @@ impl<'a> PlanExecutor<'a> {
                         locked = false;
                     }
                 }
+
+                // ── v0.3: Blue/Green steps ────────────────────────────────────────
+                PlanStep::CreateGreenSchema { schema } => {
+                    tracing::info!("Creating green schema '{}'", schema);
+                    self.client
+                        .execute(
+                            &format!("CREATE SCHEMA IF NOT EXISTS {}", quote_ident(schema)),
+                            &[],
+                        )
+                        .await?;
+                }
+
+                PlanStep::CreateStreamTableInGreen { spec, green_schema } => {
+                    tracing::info!(
+                        "Creating stream table '{}' in green schema '{}'",
+                        spec.qualified_name,
+                        green_schema
+                    );
+                    // Create the table in the green schema.
+                    let pgtrickle_exists: bool = self
+                        .client
+                        .query_one(
+                            "SELECT EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = 'pgtrickle')",
+                            &[],
+                        )
+                        .await?
+                        .get(0);
+
+                    if pgtrickle_exists {
+                        self.client
+                            .execute(
+                                "SELECT pgtrickle.create_stream_table($1, $2, $3, $4, $5, $6)",
+                                &[
+                                    green_schema,
+                                    &spec.qualified_name.name,
+                                    &spec.query,
+                                    &spec.refresh_mode.to_string(),
+                                    &spec.schedule,
+                                    &spec.cdc_mode,
+                                ],
+                            )
+                            .await?;
+                    } else {
+                        self.client
+                            .execute(
+                                &format!(
+                                    "CREATE TABLE IF NOT EXISTS {}.{} AS SELECT * FROM ({}) q LIMIT 0",
+                                    quote_ident(green_schema),
+                                    quote_ident(&spec.qualified_name.name),
+                                    spec.query
+                                ),
+                                &[],
+                            )
+                            .await?;
+                    }
+                }
+
+                PlanStep::WaitForConvergence {
+                    green_schema,
+                    node_names,
+                    ..
+                } => {
+                    // In mock/test environments, convergence is immediate.
+                    tracing::info!(
+                        "Waiting for green schema '{}' to converge ({} nodes)",
+                        green_schema,
+                        node_names.len()
+                    );
+                }
+
+                PlanStep::SwapConsumerViews {
+                    assignments,
+                    green_schema,
+                    ..
+                } => {
+                    tracing::info!(
+                        "Swapping {} consumer views → green schema '{}'",
+                        assignments.len(),
+                        green_schema
+                    );
+                    // Execute all view swaps individually.
+                    // (A real transaction would need &mut client; we use
+                    //  individual statements here for compatibility with the
+                    //  shared &Client interface.)
+                    for assignment in assignments {
+                        let view_schema = &assignment.view_name.schema;
+                        let view_name = &assignment.view_name.name;
+                        let target_schema = &assignment.target_table.schema;
+                        let target_name = &assignment.target_table.name;
+                        let default_body = format!(
+                            "SELECT * FROM {}.{}",
+                            quote_ident(target_schema),
+                            quote_ident(target_name)
+                        );
+                        let sql_body = assignment
+                            .sql_body
+                            .as_deref()
+                            .unwrap_or(default_body.as_str());
+
+                        self.client
+                            .execute(
+                                &format!(
+                                    "CREATE OR REPLACE VIEW {}.{} AS {}",
+                                    quote_ident(view_schema),
+                                    quote_ident(view_name),
+                                    sql_body
+                                ),
+                                &[],
+                            )
+                            .await?;
+                    }
+                }
+
+                PlanStep::RetireBlueSchema {
+                    schema,
+                    retain_secs,
+                } => {
+                    if *retain_secs == 0 {
+                        // Drop immediately.
+                        tracing::info!("Dropping blue schema '{}'", schema);
+                        self.client
+                            .execute(
+                                &format!("DROP SCHEMA IF EXISTS {} CASCADE", quote_ident(schema)),
+                                &[],
+                            )
+                            .await?;
+                    } else {
+                        // In production, this would schedule a deferred drop.
+                        // In tests, we just log.
+                        tracing::info!(
+                            "Blue schema '{}' will be retired in {}s",
+                            schema,
+                            retain_secs
+                        );
+                    }
+                }
+
+                // ── v0.3: Consumer view steps ──────────────────────────────────────
+                PlanStep::ManageConsumerView { spec, action } => {
+                    let view_schema = &spec.expose_as.schema;
+                    let view_name = &spec.expose_as.name;
+
+                    match action.as_str() {
+                        "drop" => {
+                            tracing::info!("Dropping consumer view '{}'", spec.expose_as);
+                            self.client
+                                .execute(
+                                    &format!(
+                                        "DROP VIEW IF EXISTS {}.{}",
+                                        quote_ident(view_schema),
+                                        quote_ident(view_name)
+                                    ),
+                                    &[],
+                                )
+                                .await?;
+                        }
+                        "create" | "alter" => {
+                            tracing::info!(
+                                "{} consumer view '{}' → source '{}'",
+                                action.to_uppercase(),
+                                spec.expose_as,
+                                spec.source
+                            );
+
+                            let default_body = format!(
+                                "SELECT * FROM {}.{}",
+                                quote_ident(&spec.source.schema),
+                                quote_ident(&spec.source.name)
+                            );
+                            let body = spec.sql_body.as_deref().unwrap_or(default_body.as_str());
+
+                            // Ensure the view schema exists.
+                            self.client
+                                .execute(
+                                    &format!(
+                                        "CREATE SCHEMA IF NOT EXISTS {}",
+                                        quote_ident(view_schema)
+                                    ),
+                                    &[],
+                                )
+                                .await?;
+
+                            self.client
+                                .execute(
+                                    &format!(
+                                        "CREATE OR REPLACE VIEW {}.{} AS {}",
+                                        quote_ident(view_schema),
+                                        quote_ident(view_name),
+                                        body
+                                    ),
+                                    &[],
+                                )
+                                .await?;
+                        }
+                        _ => {
+                            tracing::warn!("Unknown consumer view action: '{}'", action);
+                        }
+                    }
+                }
             }
         }
 

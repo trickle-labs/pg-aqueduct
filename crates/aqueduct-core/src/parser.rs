@@ -68,6 +68,14 @@ pub struct FrontMatter {
     /// `pg_eddy.cypher_to_sql()` before running IVM pre-validation.
     pub cypher_source: Option<String>,
 
+    /// For consumer views: the stream table this consumer reads from.
+    /// Format: "schema.table" or just "table" (defaults to "public" schema).
+    pub source: Option<String>,
+
+    /// For consumer views: the fully-qualified name to expose the view as.
+    /// Format: "schema.view_name". Defaults to "public.{consumer_name}".
+    pub expose_as: Option<String>,
+
     /// Unknown / forward-compatible keys (stored for lint warnings).
     #[serde(flatten)]
     pub unknown_keys: HashMap<String, serde_json::Value>,
@@ -92,14 +100,15 @@ pub struct MigrationFile {
     pub unknown_keys: Vec<String>,
 }
 
-/// Parse all migration files under `migrations/streams/` and `migrations/sources/` in `project_dir`.
+/// Parse all migration files under `migrations/streams/`, `migrations/sources/`, and
+/// `migrations/consumers/` in `project_dir`.
 pub fn load_migrations(
     project_dir: &Path,
     vars: &HashMap<String, String>,
 ) -> Result<Vec<MigrationFile>> {
     let mut files = Vec::new();
 
-    for subdir in &["streams", "sources"] {
+    for subdir in &["streams", "sources", "consumers"] {
         let dir = project_dir.join("migrations").join(subdir);
         if !dir.exists() {
             continue;
@@ -205,6 +214,8 @@ fn parse_front_matter(filename: &str, lines: &[String]) -> Result<(FrontMatter, 
     let mut cdc_mode: Option<String> = None;
     let mut schema: Option<String> = None;
     let mut cypher_source: Option<String> = None;
+    let mut source: Option<String> = None;
+    let mut expose_as: Option<String> = None;
     let mut unknown_keys: Vec<String> = Vec::new();
     let mut known_key_values: HashMap<String, serde_json::Value> = HashMap::new();
 
@@ -241,6 +252,12 @@ fn parse_front_matter(filename: &str, lines: &[String]) -> Result<(FrontMatter, 
                 "cypher_source" => {
                     cypher_source = Some(strip_string_quotes(raw_value).to_string());
                 }
+                "source" => {
+                    source = Some(strip_string_quotes(raw_value).to_string());
+                }
+                "expose_as" => {
+                    expose_as = Some(strip_string_quotes(raw_value).to_string());
+                }
                 other => {
                     unknown_keys.push(other.to_string());
                     // Store for forward-compat.
@@ -262,6 +279,8 @@ fn parse_front_matter(filename: &str, lines: &[String]) -> Result<(FrontMatter, 
         cdc_mode,
         schema,
         cypher_source,
+        source,
+        expose_as,
         unknown_keys: known_key_values,
     };
 

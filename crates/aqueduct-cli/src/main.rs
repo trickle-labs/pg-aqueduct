@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 mod commands;
-use commands::{apply, import, init, plan, rollback, status, unlock, validate};
+use commands::{apply, import, init, plan, preview, rollback, status, unlock, validate};
 
 /// Declarative schema evolution and migration for stream-table DAGs.
 #[derive(Debug, Parser)]
@@ -50,6 +50,9 @@ enum Commands {
 
     /// Release a stale project lock (emergency use).
     Unlock(unlock::UnlockArgs),
+
+    /// Create, inspect, or tear down a preview environment for a candidate change.
+    Preview(preview::PreviewArgs),
 }
 
 #[tokio::main]
@@ -84,6 +87,7 @@ async fn main() {
         Commands::Rollback(args) => rollback::run(args).await,
         Commands::Import(args) => import::run(args).await,
         Commands::Unlock(args) => unlock::run(args).await,
+        Commands::Preview(args) => preview::run(args).await,
     };
 
     if let Err(e) = result {

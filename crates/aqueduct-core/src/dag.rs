@@ -93,11 +93,38 @@ pub struct SourceSpec {
     pub create_sql: Option<String>,
 }
 
+/// A consumer view that exposes a stream table (or a projection thereof) to consumers.
+///
+/// Consumer views provide a stable indirection layer that enables zero-downtime
+/// blue/green migrations: during a blue/green deployment, the view is atomically
+/// updated to point from the blue schema to the green schema.
+///
+/// Declared in `migrations/consumers/*.sql` with front-matter directives:
+/// ```sql
+/// -- @aqueduct:kind = consumer
+/// -- @aqueduct:source = order_totals
+/// -- @aqueduct:expose_as = public.api_orders
+/// SELECT customer_id, total_amount FROM order_totals WHERE total_amount > 0;
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsumerSpec {
+    /// The consumer name (from filename, used as an internal identifier).
+    pub name: String,
+    /// The stream table this consumer reads from.
+    pub source: QualifiedName,
+    /// The fully-qualified view name to create/maintain (e.g., `public.api_orders`).
+    pub expose_as: QualifiedName,
+    /// Optional SQL projection/filter. When None, the view is `SELECT * FROM <source>`.
+    pub sql_body: Option<String>,
+}
+
 /// The complete desired DAG state parsed from migration files.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DagState {
     pub stream_tables: Vec<StreamTableSpec>,
     pub sources: Vec<SourceSpec>,
+    /// Consumer views managed by aqueduct (optional indirection layer for blue/green).
+    pub consumers: Vec<ConsumerSpec>,
 }
 
 impl DagState {
@@ -110,12 +137,17 @@ impl DagState {
     pub fn find_source(&self, name: &QualifiedName) -> Option<&SourceSpec> {
         self.sources.iter().find(|s| &s.qualified_name == name)
     }
+
+    pub fn find_consumer(&self, expose_as: &QualifiedName) -> Option<&ConsumerSpec> {
+        self.consumers.iter().find(|c| &c.expose_as == expose_as)
+    }
 }
 
 /// Build a DagState from a list of parsed migration files.
 pub fn build_dag_state(files: &[MigrationFile], infer_deps: bool) -> Result<DagState> {
     let mut stream_tables = Vec::new();
     let mut sources = Vec::new();
+    let mut consumers = Vec::new();
 
     for file in files {
         match file.front_matter.kind {
@@ -196,7 +228,32 @@ pub fn build_dag_state(files: &[MigrationFile], infer_deps: bool) -> Result<DagS
                 });
             }
             MigrationKind::Consumer => {
-                // Consumer views are tracked but not yet fully managed in v0.1.
+                // Parse consumer-view spec from front-matter.
+                let source_str = file.front_matter.source.as_deref().unwrap_or(&file.name);
+                let source = QualifiedName::from_str_parts(source_str);
+
+                let schema = file
+                    .front_matter
+                    .schema
+                    .clone()
+                    .unwrap_or_else(|| "public".to_string());
+
+                let expose_as = if let Some(ea) = &file.front_matter.expose_as {
+                    QualifiedName::from_str_parts(ea)
+                } else {
+                    QualifiedName::new(&schema, &file.name)
+                };
+
+                consumers.push(ConsumerSpec {
+                    name: file.name.clone(),
+                    source,
+                    expose_as,
+                    sql_body: if !file.sql_body.is_empty() {
+                        Some(file.sql_body.clone())
+                    } else {
+                        None
+                    },
+                });
             }
         }
     }
@@ -204,6 +261,7 @@ pub fn build_dag_state(files: &[MigrationFile], infer_deps: bool) -> Result<DagS
     Ok(DagState {
         stream_tables,
         sources,
+        consumers,
     })
 }
 

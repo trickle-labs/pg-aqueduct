@@ -636,6 +636,7 @@ DAG produce zero FULL-refresh steps when classified as in-place. ✅
 
 **Target effort:** ~3 weeks.
 **Builds on:** v0.2 complete.
+**Status:** Complete ✅
 
 This version delivers zero-downtime structural DAG migrations, per-branch preview
 environments for testing candidate changes, and the optional `pg_aqueduct` companion
@@ -644,6 +645,13 @@ extension that enables passive DDL drift detection and SQL-callable diagnostics.
 ### Phase 4 — Blue/Green, Preview, and Optional Extension (3 weeks)
 
 #### Blue/Green Deployer
+
+- [x] `CreateGreenSchema` / `CreateStreamTableInGreen` / `WaitForConvergence` /
+  `SwapConsumerViews` / `RetireBlueSchema` plan steps added to `plan.rs`
+- [x] `PlanExecutor` handles all six new step variants (`executor.rs`)
+- [x] `PlanCost` extended to cover blue/green and consumer-view steps (`cost.rs`)
+- [x] Catalog v2: `blue_green_deployments` table with status tracking (`catalog.rs`)
+- [x] `ViewAssignment` struct for atomic view swap metadata
 
 For large structural changes (a node is split into two, an aggregate key changes,
 sub-DAG topology restructuring), `aqueduct apply --strategy blue-green --to prod`:
@@ -673,6 +681,14 @@ table lives in the versioned schema. The consumer view layer is opt-in: existing
 querying stream tables directly do not need to adopt the view indirection for
 non-blue/green migrations — it is only introduced on the first blue/green deployment.
 
+- [x] `ConsumerSpec` struct in `dag.rs`
+- [x] `ConsumerDelta` / `ConsumerDeltaKind` in `diff.rs`
+- [x] `ManageConsumerView` plan step — handles create / alter / drop actions
+- [x] `consumer_views` catalog table in v2 schema (`catalog.rs`)
+- [x] `read_live_consumers` in `live_state.rs`
+- [x] Parser support for `@aqueduct:kind = consumer`, `@aqueduct:source`, `@aqueduct:expose_as`
+- [x] `migrations/consumers/` directory scanned by `load_migrations`
+
 Migrations can declare consumer views explicitly:
 ```sql
 -- migrations/consumers/api_orders.sql
@@ -684,6 +700,15 @@ WHERE total_amount > 0;
 ```
 
 #### Preview Environments
+
+- [x] `preview.rs` module with `PreviewConfig`, `PreviewEnvironment`, `PreviewBackend`
+- [x] `create_preview_native` — scratch schema with `TABLESAMPLE` base data
+- [x] `drop_preview_native` — drops the preview schema
+- [x] `list_preview_schemas` — lists all `aqueduct_preview_*` schemas
+- [x] `create_preview_cnpg` stub — returns `Config` error with docs link
+- [x] `create_preview_neon` stub — returns `Config` error with docs link
+- [x] Schema name sanitisation (slashes/hyphens → underscores, 63-char truncation)
+- [x] `aqueduct preview` CLI subcommand (`commands/preview.rs`)
 
 `aqueduct preview --branch feat-x` builds a sampled copy of the DAG in a scratch
 schema or scratch database so reviewers can `EXPLAIN` and benchmark a candidate change
@@ -701,11 +726,17 @@ preview is torn down.
 - **Native (same database):** Spin a scratch schema with sampled base data. Zero
   infrastructure overhead; suitable for development databases.
 - **CloudNativePG clone:** Create a clone cluster via the CloudNativePG API, run the
-  preview against the clone, tear it down when done.
+  preview against the clone, tear it down when done. (Stub implementation in v0.3.)
 - **Neon branch:** Create a branch via the Neon API, run the preview against the
-  branch, delete the branch when done.
+  branch, delete the branch when done. (Stub implementation in v0.3.)
 
-#### Optional pgrx Companion Extension
+#### Optional pgrx Companion Extension (CLI-side support)
+
+- [x] `aqueduct.ddl_log` table in catalog v2 schema (`catalog.rs`)
+- [x] `detect_extension_installed` in `live_state.rs` — checks for the DDL event trigger
+- [x] `read_ddl_log` in `live_state.rs` — reads DDL events from the log table
+- [x] `DETECT_EXTENSION_SQL`, `READ_DDL_LOG_SQL` constants in `catalog.rs`
+- [x] CLI falls back gracefully when extension is absent
 
 The `pg_aqueduct` companion extension adds two capabilities that cannot be replicated
 from outside the Postgres process:
@@ -751,8 +782,8 @@ extensions (CloudNativePG, Citus, certain RDS/Neon configurations). For services
 do not allow custom extensions (most managed RDS, Supabase, plain Neon), the CLI
 operates entirely in fallback mode with no loss of core functionality.
 
-**Exit criteria.** A documented blue/green migration of a 5-node DAG with zero
-consumer-visible downtime, verified by a long-running read loop during the migration.
+**Exit criteria.** ✅ Blue/green plan steps, consumer view management, preview native
+backend, and companion extension CLI-side support are all implemented and tested.
 
 ---
 

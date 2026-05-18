@@ -123,6 +123,18 @@ pub async fn estimate_plan_cost(
                 estimated_rows: None,
                 estimated_duration: "< 1s".to_string(),
             },
+            // v0.3: Blue/Green and Consumer View steps
+            PlanStep::CreateGreenSchema { .. }
+            | PlanStep::CreateStreamTableInGreen { .. }
+            | PlanStep::WaitForConvergence { .. }
+            | PlanStep::SwapConsumerViews { .. }
+            | PlanStep::RetireBlueSchema { .. }
+            | PlanStep::ManageConsumerView { .. } => StepCost {
+                step: step.description(),
+                class: "blue-green".to_string(),
+                estimated_rows: None,
+                estimated_duration: "< 1s".to_string(),
+            },
         };
         steps.push(cost);
     }

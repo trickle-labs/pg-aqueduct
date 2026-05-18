@@ -9,6 +9,7 @@ pub mod executor;
 pub mod live_state;
 pub mod parser;
 pub mod plan;
+pub mod preview;
 pub mod renderer;
 pub mod validate;
 

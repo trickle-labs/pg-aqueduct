@@ -283,6 +283,7 @@ async fn test_in_place_plan_no_full_rebuild() {
             cypher_source: None,
         }],
         sources: vec![],
+        consumers: vec![],
     };
 
     // Desired: add COUNT(*) column.
@@ -377,4 +378,136 @@ async fn test_plan_renderer_with_cost() {
     let text = aqueduct_core::renderer::render_plan_text_with_cost(&plan, None, None, &cost);
     assert!(text.contains("cost-render-test"));
     assert!(text.contains("Duration (est)"));
+}
+
+// ── v0.3 tests ────────────────────────────────────────────────────────────────
+
+/// Test: consumer migration file (in migrations/consumers/) is parsed and
+/// produces a ManageConsumerView plan step.
+#[tokio::test]
+async fn test_consumer_view_in_plan() {
+    use aqueduct_core::plan::PlanStep;
+
+    let db = aqueduct_testkit::TestDb::new().await.expect("start db");
+    db.install_mock_pgtrickle().await.expect("install mock");
+    db.install_aqueduct_catalog().await.expect("init catalog");
+
+    let consumer_file = aqueduct_core::parser::parse_migration_file(
+        &PathBuf::from("consumers/report_orders.sql"),
+        r#"-- @aqueduct:kind = consumer
+-- @aqueduct:source = public.order_totals
+-- @aqueduct:expose_as = reporting.orders
+SELECT customer_id, total FROM public.order_totals;
+"#,
+        &std::collections::HashMap::new(),
+    )
+    .unwrap();
+
+    let desired = aqueduct_core::dag::build_dag_state(&[consumer_file], false).unwrap();
+    assert_eq!(desired.consumers.len(), 1);
+
+    let actual = aqueduct_core::live_state::read_live_state(&db.client)
+        .await
+        .unwrap();
+    let diff = aqueduct_core::diff::compute_diff(&desired, &actual);
+    let topo = aqueduct_core::dag::topological_sort(&desired).unwrap();
+    let plan = aqueduct_core::plan::build_plan("consumer-cli-test", None, 1, &diff, &topo);
+
+    let has_consumer_step = plan.steps.iter().any(|s| {
+        matches!(s, PlanStep::ManageConsumerView { spec, action }
+            if spec.expose_as.schema == "reporting" && action == "create")
+    });
+    assert!(
+        has_consumer_step,
+        "Plan should include ManageConsumerView(create) step"
+    );
+}
+
+/// Test: source and expose_as front-matter directives do not produce
+/// unknown-key warnings.
+#[test]
+fn test_source_and_expose_as_no_unknown_keys() {
+    let file = aqueduct_core::parser::parse_migration_file(
+        &PathBuf::from("consumers/my_consumer.sql"),
+        r#"-- @aqueduct:kind = consumer
+-- @aqueduct:source = public.orders
+-- @aqueduct:expose_as = api.orders
+SELECT id, amount FROM public.orders;
+"#,
+        &std::collections::HashMap::new(),
+    )
+    .expect("should parse without error");
+
+    assert_eq!(
+        file.front_matter.unknown_keys.len(),
+        0,
+        "source and expose_as should not be treated as unknown keys"
+    );
+}
+
+/// Test: preview backend=neon without credentials returns a Config error.
+#[tokio::test]
+async fn test_preview_neon_without_credentials() {
+    use aqueduct_core::preview::{create_preview_neon, PreviewBackend, PreviewConfig};
+
+    let files: Vec<aqueduct_core::parser::MigrationFile> = vec![];
+    let desired = aqueduct_core::dag::build_dag_state(&files, false).unwrap();
+
+    let config = PreviewConfig {
+        branch: "test-branch".to_string(),
+        backend: PreviewBackend::Neon {
+            api_token: String::new(),
+            project_id: "proj-123".to_string(),
+        },
+        sample_fraction: 0.1,
+        recreate: false,
+    };
+
+    // Extract API token and project ID from config.
+    let (api_token, project_id) = if let PreviewBackend::Neon {
+        api_token,
+        project_id,
+    } = &config.backend
+    {
+        (api_token.as_str(), project_id.as_str())
+    } else {
+        ("", "")
+    };
+
+    let result = create_preview_neon(api_token, project_id, &config, &desired).await;
+    assert!(result.is_err(), "Neon preview without token should fail");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("not supported") || err.contains("Neon") || err.contains("token"),
+        "Error should mention Neon: {}",
+        err
+    );
+}
+
+/// Test: consumer view delta renders correctly as a plan description.
+#[test]
+fn test_consumer_view_plan_description() {
+    use aqueduct_core::dag::ConsumerSpec;
+    use aqueduct_core::plan::PlanStep;
+
+    let spec = ConsumerSpec {
+        name: "orders_view".to_string(),
+        source: aqueduct_core::dag::QualifiedName::new("public", "order_totals"),
+        expose_as: aqueduct_core::dag::QualifiedName::new("reporting", "orders"),
+        sql_body: None,
+    };
+
+    let step = PlanStep::ManageConsumerView {
+        spec,
+        action: "create".to_string(),
+    };
+
+    let desc = step.description();
+    assert!(
+        desc.contains("reporting.orders")
+            || desc.contains("ManageConsumerView")
+            || desc.contains("VIEW"),
+        "Step description should mention the view: {}",
+        desc
+    );
 }
