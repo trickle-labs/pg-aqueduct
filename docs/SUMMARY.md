@@ -4,6 +4,12 @@
 
 ---
 
+# Getting Started
+
+- [Installation](installation.md)
+
+---
+
 # Tutorials
 
 - [5-Minute Tutorial](tutorial-5min.md)
