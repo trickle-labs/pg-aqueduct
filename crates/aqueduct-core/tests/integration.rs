@@ -735,7 +735,7 @@ async fn test_catalog_v2_tables_exist() {
         .await
         .expect("init v2 catalog");
 
-    // Verify all v2 tables exist.
+    // Verify all tables exist (including v3 stream_table_ownership).
     for table in &[
         "dag_versions",
         "migrations",
@@ -744,6 +744,7 @@ async fn test_catalog_v2_tables_exist() {
         "ddl_log",
         "consumer_views",
         "blue_green_deployments",
+        "stream_table_ownership",
     ] {
         let row = db
             .client
@@ -758,7 +759,7 @@ async fn test_catalog_v2_tables_exist() {
         assert!(exists, "Table aqueduct.{} should exist", table);
     }
 
-    // Version should be 2.
+    // CATALOG_INIT_V2_SQL is now CATALOG_INIT_V3_SQL; version is 3.
     let version_row = db
         .client
         .query_one(
@@ -769,7 +770,7 @@ async fn test_catalog_v2_tables_exist() {
         .await
         .expect("query version");
     let version: serde_json::Value = version_row.get(0);
-    assert_eq!(version.as_i64().unwrap(), 2);
+    assert_eq!(version.as_i64().unwrap(), 3);
 }
 
 /// Test: consumer file is parsed and produces ManageConsumerView plan step.
@@ -3182,6 +3183,14 @@ async fn test_consumer_only_apply_end_to_end() {
         .await
         .expect("install catalog");
 
+    db.client
+        .execute(
+            "CREATE TABLE IF NOT EXISTS raw_orders (id bigint, amount numeric)",
+            &[],
+        )
+        .await
+        .expect("create source table");
+
     let files_v1 = vec![parse_file(
         "orders",
         "-- @aqueduct:schedule = \"30s\"\n-- @aqueduct:refresh_mode = \"DIFFERENTIAL\"\nSELECT id, amount FROM raw_orders;\n",
@@ -3244,6 +3253,11 @@ async fn test_concurrent_apply_race() {
         .await
         .expect("install catalog");
 
+    db.client
+        .execute("CREATE TABLE IF NOT EXISTS raw_orders (id bigint)", &[])
+        .await
+        .expect("create source table");
+
     let files = vec![parse_file(
         "orders",
         "-- @aqueduct:schedule = \"30s\"\n-- @aqueduct:refresh_mode = \"DIFFERENTIAL\"\nSELECT id FROM raw_orders;\n",
@@ -3303,6 +3317,14 @@ async fn test_stale_plan_detection() {
         .await
         .expect("install catalog");
 
+    db.client
+        .execute(
+            "CREATE TABLE IF NOT EXISTS raw_orders (id bigint, amount numeric)",
+            &[],
+        )
+        .await
+        .expect("create source table");
+
     let files_v1 = vec![parse_file(
         "orders",
         "-- @aqueduct:schedule = \"30s\"\n-- @aqueduct:refresh_mode = \"DIFFERENTIAL\"\nSELECT id FROM raw_orders;\n",
@@ -3361,6 +3383,15 @@ async fn test_two_project_isolation() {
     db.install_aqueduct_catalog()
         .await
         .expect("install catalog");
+
+    db.client
+        .execute(
+            "CREATE TABLE IF NOT EXISTS raw_a (id bigint); \
+             CREATE TABLE IF NOT EXISTS raw_b (id bigint)",
+            &[],
+        )
+        .await
+        .expect("create source tables");
 
     let files_a = vec![parse_file(
         "orders_a",
@@ -3447,6 +3478,11 @@ async fn test_resume_skips_non_safety_steps() {
     db.install_aqueduct_catalog()
         .await
         .expect("install catalog");
+
+    db.client
+        .execute("CREATE TABLE IF NOT EXISTS raw_orders (id bigint)", &[])
+        .await
+        .expect("create source table");
 
     let files = vec![parse_file(
         "orders",
