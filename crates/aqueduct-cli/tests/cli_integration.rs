@@ -1277,9 +1277,7 @@ fn test_cli_no_args_shows_help() {
 
     // With no args, most CLIs show help on stderr and exit non-zero,
     // OR they print help and exit 0. We accept either.
-    let assert = Command::cargo_bin("aqueduct")
-        .unwrap()
-        .assert();
+    let assert = Command::cargo_bin("aqueduct").unwrap().assert();
 
     // Either success (--help mode) or failure (error mode) is fine,
     // but it must output something about aqueduct on stdout or stderr.
@@ -1319,9 +1317,10 @@ fn test_cli_validate_help_or_unknown() {
     } else {
         // Does not have validate subcommand — that's OK too.
         assert!(
-            combined.contains("validate") || combined.contains("error") || combined.contains("unknown"),
+            combined.contains("validate")
+                || combined.contains("error")
+                || combined.contains("unknown"),
             "should mention validate in error output"
         );
     }
 }
-

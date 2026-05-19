@@ -109,13 +109,11 @@ pub fn collect_subgraph(desired: &DagState, anchor: &QualifiedName) -> Vec<Quali
 
     // BFS/DFS to collect ancestors (nodes that anchor depends on, transitively)
     // and descendants (nodes that depend on anchor, transitively).
-    let mut subgraph: std::collections::HashSet<QualifiedName> =
-        std::collections::HashSet::new();
+    let mut subgraph: std::collections::HashSet<QualifiedName> = std::collections::HashSet::new();
     subgraph.insert(anchor.clone());
 
     // Forward BFS: collect all descendants.
-    let mut queue: std::collections::VecDeque<QualifiedName> =
-        std::collections::VecDeque::new();
+    let mut queue: std::collections::VecDeque<QualifiedName> = std::collections::VecDeque::new();
     queue.push_back(anchor.clone());
     while let Some(current) = queue.pop_front() {
         for table in &desired.stream_tables {
@@ -192,12 +190,10 @@ pub async fn create_preview_native(
     let mut created_tables: Vec<String> = Vec::new();
 
     // Determine which tables to include (P-07: subgraph filtering).
-    let subgraph_names: Option<std::collections::HashSet<QualifiedName>> =
-        config.anchor_table.as_ref().map(|anchor| {
-            collect_subgraph(desired, anchor)
-                .into_iter()
-                .collect()
-        });
+    let subgraph_names: Option<std::collections::HashSet<QualifiedName>> = config
+        .anchor_table
+        .as_ref()
+        .map(|anchor| collect_subgraph(desired, anchor).into_iter().collect());
 
     // Sample source tables into the preview schema.
     for source in &desired.sources {
@@ -231,8 +227,7 @@ pub async fn create_preview_native(
         }
 
         // SEC-03: Use AST-based query rewriting instead of string replacement.
-        let rewritten_query =
-            rewrite_query_for_preview_ast(&stream_table.query, &schema, desired);
+        let rewritten_query = rewrite_query_for_preview_ast(&stream_table.query, &schema, desired);
 
         // Create as a materialised view snapshot (not a live stream).
         let create_sql = format!(
@@ -576,9 +571,18 @@ mod tests {
             consumers: vec![],
         };
         let rewritten = rewrite_query_for_preview_ast(query, "preview_feat", &desired);
-        assert!(rewritten.contains("preview_feat"), "should reference preview schema");
-        assert!(!rewritten.contains("public.orders"), "should replace public.orders");
-        assert!(!rewritten.contains("public.order_items"), "should replace public.order_items");
+        assert!(
+            rewritten.contains("preview_feat"),
+            "should reference preview schema"
+        );
+        assert!(
+            !rewritten.contains("public.orders"),
+            "should replace public.orders"
+        );
+        assert!(
+            !rewritten.contains("public.order_items"),
+            "should replace public.order_items"
+        );
     }
 
     /// P-07: collect_subgraph returns the anchor and its dependencies.

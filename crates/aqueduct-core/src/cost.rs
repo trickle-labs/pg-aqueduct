@@ -105,7 +105,8 @@ pub async fn estimate_plan_cost(
                         Err(CostError::SqlError(ref e)) => {
                             tracing::warn!(
                                 "EXPLAIN failed for '{}': {} (cost estimate unavailable)",
-                                name, e
+                                name,
+                                e
                             );
                             None
                         }

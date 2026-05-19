@@ -799,7 +799,11 @@ async fn test_catalog_v4_indexes_exist() {
             .await
             .unwrap_or_else(|_| panic!("query for index {}", idx_name));
         let exists: bool = row.get(0);
-        assert!(exists, "Index {} should exist after v4 catalog init", idx_name);
+        assert!(
+            exists,
+            "Index {} should exist after v4 catalog init",
+            idx_name
+        );
     }
 }
 
@@ -1090,7 +1094,10 @@ async fn test_plan_steps_for_query_change() {
         matches!(s, PlanStep::AlterStreamTable { .. })
             || matches!(s, PlanStep::DropStreamTable { .. })
     });
-    assert!(has_alter_or_recreate, "Plan should contain alter or recreate step for query change");
+    assert!(
+        has_alter_or_recreate,
+        "Plan should contain alter or recreate step for query change"
+    );
     // P-06: plan_stats summary should match the inline summary.
     let stats = plan_stats(&plan.steps);
     assert_eq!(stats.alters, plan.summary.alters);
@@ -1179,8 +1186,14 @@ async fn test_blue_green_topology_restructure() {
             _ => None,
         })
         .collect();
-    assert!(created.contains(&"node_c".to_string()), "plan should create node_c");
-    assert!(created.contains(&"node_d".to_string()), "plan should create node_d");
+    assert!(
+        created.contains(&"node_c".to_string()),
+        "plan should create node_c"
+    );
+    assert!(
+        created.contains(&"node_d".to_string()),
+        "plan should create node_d"
+    );
     assert_eq!(plan.summary.creates, 2, "Plan should create 2 new tables");
 }
 
@@ -3689,7 +3702,10 @@ async fn test_pgtrickle_caps_absent() {
     let db = TestDb::new().await.expect("start test db");
     // No mock pgtrickle installed.
     let caps = probe_pgtrickle_capabilities(&db.client).await;
-    assert!(!caps.installed, "caps.installed should be false without pgtrickle schema");
+    assert!(
+        !caps.installed,
+        "caps.installed should be false without pgtrickle schema"
+    );
     assert!(!caps.has_create);
     assert!(!caps.has_alter);
     assert!(!caps.has_drop);
@@ -3701,7 +3717,10 @@ async fn test_pgtrickle_caps_present() {
     let db = TestDb::new().await.expect("start test db");
     db.install_mock_pgtrickle().await.expect("install mock");
     let caps = probe_pgtrickle_capabilities(&db.client).await;
-    assert!(caps.installed, "caps.installed should be true after installing mock");
+    assert!(
+        caps.installed,
+        "caps.installed should be true after installing mock"
+    );
     // Mock may or may not match all signatures; installed is the key invariant.
 }
 
@@ -3760,7 +3779,10 @@ SELECT COUNT(*) AS cnt FROM public.raw_events;
         .await
         .expect("count migrations")
         .get(0);
-    assert_eq!(migration_count, 0, "dry-run should write no migration records");
+    assert_eq!(
+        migration_count, 0,
+        "dry-run should write no migration records"
+    );
 
     // Now inject a failure by manually inserting a recoverable_failure migration
     // to verify the resume path.
@@ -3791,9 +3813,15 @@ SELECT COUNT(*) AS cnt FROM public.raw_events;
         )
         .await
         .expect("query recoverable migration");
-    assert!(row.is_some(), "should find the injected recoverable_failure migration");
+    assert!(
+        row.is_some(),
+        "should find the injected recoverable_failure migration"
+    );
     let found_id: i64 = row.as_ref().unwrap().get(0);
-    assert_eq!(found_id, migration_id, "found migration should match injected one");
+    assert_eq!(
+        found_id, migration_id,
+        "found migration should match injected one"
+    );
 
     // Verify progress field contains the expected completed_steps.
     let progress: serde_json::Value = row.unwrap().get(1);
@@ -3869,7 +3897,11 @@ SELECT id, val FROM public.raw_b;
     let plan_a = build_plan("project-a", None, 1, &diff_a, &topo_a).expect("build plan A");
     let exec_a = PlanExecutor::for_apply(&db.client, "project-a", "0.12.0-test");
     let result_a = exec_a.execute(&plan_a).await;
-    assert!(result_a.is_ok(), "apply project A should succeed: {:?}", result_a);
+    assert!(
+        result_a.is_ok(),
+        "apply project A should succeed: {:?}",
+        result_a
+    );
 
     // Apply project B.
     let diff_b = compute_diff(&desired_b, &aqueduct_core::dag::DagState::default());
@@ -3881,7 +3913,11 @@ SELECT id, val FROM public.raw_b;
     let plan_b = build_plan("project-b", None, 1, &diff_b, &topo_b).expect("build plan B");
     let exec_b = PlanExecutor::for_apply(&db.client, "project-b", "0.12.0-test");
     let result_b = exec_b.execute(&plan_b).await;
-    assert!(result_b.is_ok(), "apply project B should succeed: {:?}", result_b);
+    assert!(
+        result_b.is_ok(),
+        "apply project B should succeed: {:?}",
+        result_b
+    );
 
     // Verify A's catalog rows exist.
     let a_versions: i64 = db
@@ -3928,7 +3964,10 @@ SELECT id, val FROM public.raw_b;
         .await
         .expect("count A versions after destroy")
         .get(0);
-    assert_eq!(a_versions_after, 0, "project A dag_versions should be removed");
+    assert_eq!(
+        a_versions_after, 0,
+        "project A dag_versions should be removed"
+    );
 
     // Verify B's dag_versions are intact.
     let b_versions_after: i64 = db
@@ -3940,7 +3979,10 @@ SELECT id, val FROM public.raw_b;
         .await
         .expect("count B versions after destroy")
         .get(0);
-    assert_eq!(b_versions_after, b_versions, "project B dag_versions should be intact");
+    assert_eq!(
+        b_versions_after, b_versions,
+        "project B dag_versions should be intact"
+    );
 }
 
 /// T-10: Property-based fuzz test — build_plan never panics for arbitrary Create deltas.
@@ -4133,7 +4175,9 @@ async fn test_tutorial_smoke_aqueduct_commands() {
             let subcommand = parts[1];
 
             // Skip commands that need a live database connection.
-            let needs_db = ["apply", "plan", "status", "rollback", "init", "promote", "destroy", "import"];
+            let needs_db = [
+                "apply", "plan", "status", "rollback", "init", "promote", "destroy", "import",
+            ];
             if needs_db.contains(&subcommand) {
                 continue;
             }
@@ -4155,4 +4199,3 @@ async fn test_tutorial_smoke_aqueduct_commands() {
         "tutorials should contain aqueduct CLI commands"
     );
 }
-

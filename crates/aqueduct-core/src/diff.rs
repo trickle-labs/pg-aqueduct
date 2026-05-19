@@ -582,8 +582,14 @@ mod tests {
         let orders_key = QualifiedName::new("public", "orders");
         let items_key = QualifiedName::new("public", "order_items");
 
-        assert!(index.contains_key(&orders_key), "index should contain orders");
-        assert!(index.contains_key(&items_key), "index should contain order_items");
+        assert!(
+            index.contains_key(&orders_key),
+            "index should contain orders"
+        );
+        assert!(
+            index.contains_key(&items_key),
+            "index should contain order_items"
+        );
 
         let orders_deps = &index[&orders_key];
         assert!(orders_deps.contains(&QualifiedName::new("public", "order_totals")));

@@ -48,9 +48,7 @@ impl PgtrickleCaps {
 /// `pgtrickle.pgt_stream_tables.refresh_status` column.
 ///
 /// Never returns an error — a failed probe simply marks capabilities as absent.
-pub async fn probe_pgtrickle_capabilities(
-    client: &tokio_postgres::Client,
-) -> PgtrickleCaps {
+pub async fn probe_pgtrickle_capabilities(client: &tokio_postgres::Client) -> PgtrickleCaps {
     let installed: bool = client
         .query_one(
             "SELECT EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = 'pgtrickle')",
@@ -67,18 +65,16 @@ pub async fn probe_pgtrickle_capabilities(
     // Check individual functions with to_regprocedure.
     let check = async |sig: &str| -> bool {
         client
-            .query_one(
-                "SELECT to_regprocedure($1::text) IS NOT NULL",
-                &[&sig],
-            )
+            .query_one("SELECT to_regprocedure($1::text) IS NOT NULL", &[&sig])
             .await
             .map(|r| r.get::<_, bool>(0))
             .unwrap_or(false)
     };
 
-    let has_create = check("pgtrickle.create_stream_table(text, text, text, text, text, text)").await;
-    let has_alter  = check("pgtrickle.alter_stream_table(text, text, text, text, text, text)").await;
-    let has_drop   = check("pgtrickle.drop_stream_table(text, text)").await;
+    let has_create =
+        check("pgtrickle.create_stream_table(text, text, text, text, text, text)").await;
+    let has_alter = check("pgtrickle.alter_stream_table(text, text, text, text, text, text)").await;
+    let has_drop = check("pgtrickle.drop_stream_table(text, text)").await;
     let has_pause_scheduler = check("pgtrickle.pause_scheduler(text[])").await;
     let has_resume_scheduler = check("pgtrickle.resume_scheduler(text[])").await;
 
@@ -107,7 +103,6 @@ pub async fn probe_pgtrickle_capabilities(
         has_refresh_status,
     }
 }
-
 
 /// Result of a successful plan execution (U-05).
 ///

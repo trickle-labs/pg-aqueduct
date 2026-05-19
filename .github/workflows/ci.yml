@@ -49,7 +49,8 @@ jobs:
         run: cargo install cargo-audit --locked
 
       - name: Run cargo audit
-        run: cargo audit --deny warnings
+        # RUSTSEC-2025-0052: async-std unmaintained warning (transitive via httpmock dev-dep only)
+        run: cargo audit --deny warnings --ignore RUSTSEC-2025-0052
 
   # ── Unit Tests ──────────────────────────────────────────────────────────────
   unit-tests:
@@ -211,13 +212,13 @@ jobs:
 
   # ── MSRV (CI-09) ────────────────────────────────────────────────────────────
   msrv:
-    name: MSRV check (Rust 1.80)
+    name: MSRV check (Rust 1.85)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install Rust 1.80
-        uses: dtolnay/rust-toolchain@1.80
+      - name: Install Rust 1.85
+        uses: dtolnay/rust-toolchain@1.85
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2

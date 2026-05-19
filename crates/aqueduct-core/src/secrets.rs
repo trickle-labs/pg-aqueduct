@@ -89,17 +89,11 @@ pub async fn resolve_secret(backend: &SecretBackend, key: &str) -> Result<String
             ))
         }),
 
-        SecretBackend::AwsSecretsManager { region } => {
-            fetch_aws_secret(region, key).await
-        }
+        SecretBackend::AwsSecretsManager { region } => fetch_aws_secret(region, key).await,
 
-        SecretBackend::GcpSecretManager { project_id: _ } => {
-            fetch_gcp_secret(key).await
-        }
+        SecretBackend::GcpSecretManager { project_id: _ } => fetch_gcp_secret(key).await,
 
-        SecretBackend::HashicorpVault { vault_addr } => {
-            fetch_vault_secret(vault_addr, key).await
-        }
+        SecretBackend::HashicorpVault { vault_addr } => fetch_vault_secret(vault_addr, key).await,
 
         SecretBackend::Sops => {
             // Validate that the key path does not escape via `../`.
@@ -308,9 +302,16 @@ async fn fetch_aws_secret(region: &str, secret_name: &str) -> Result<String> {
         .body(body.clone());
 
     // Add SigV4 authentication when credentials are available.
-    if let Some(auth) =
-        aws_sigv4_auth("POST", host, "/", region, "secretsmanager", payload, &datetime, date)
-    {
+    if let Some(auth) = aws_sigv4_auth(
+        "POST",
+        host,
+        "/",
+        region,
+        "secretsmanager",
+        payload,
+        &datetime,
+        date,
+    ) {
         request = request.header("Authorization", auth);
         if let Ok(token) = std::env::var("AWS_SESSION_TOKEN") {
             request = request.header("X-Amz-Security-Token", token);
@@ -466,9 +467,8 @@ async fn fetch_gcp_secret(secret_name: &str) -> Result<String> {
         })?;
 
     // Decode base64.
-    let bytes = base64_decode(b64).map_err(|e| {
-        AqueductError::Config(format!("GCP SM: base64 decode error: {}", e))
-    })?;
+    let bytes = base64_decode(b64)
+        .map_err(|e| AqueductError::Config(format!("GCP SM: base64 decode error: {}", e)))?;
 
     String::from_utf8(bytes)
         .map_err(|_| AqueductError::Config("GCP SM: secret value is not valid UTF-8".to_string()))
@@ -476,8 +476,7 @@ async fn fetch_gcp_secret(secret_name: &str) -> Result<String> {
 
 /// Minimal base64 decoder (standard alphabet, no padding validation strictness).
 fn base64_decode(input: &str) -> std::result::Result<Vec<u8>, String> {
-    const TABLE: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut decode_table = [0xFF_u8; 256];
     for (i, &c) in TABLE.iter().enumerate() {
         decode_table[c as usize] = i as u8;
@@ -488,10 +487,26 @@ fn base64_decode(input: &str) -> std::result::Result<Vec<u8>, String> {
 
     let bytes: Vec<u8> = input.bytes().collect();
     for chunk in bytes.chunks(4) {
-        let a = if chunk.len() > 0 { decode_table[chunk[0] as usize] } else { 0 };
-        let b = if chunk.len() > 1 { decode_table[chunk[1] as usize] } else { 0 };
-        let c = if chunk.len() > 2 { decode_table[chunk[2] as usize] } else { 0 };
-        let d = if chunk.len() > 3 { decode_table[chunk[3] as usize] } else { 0 };
+        let a = if chunk.len() > 0 {
+            decode_table[chunk[0] as usize]
+        } else {
+            0
+        };
+        let b = if chunk.len() > 1 {
+            decode_table[chunk[1] as usize]
+        } else {
+            0
+        };
+        let c = if chunk.len() > 2 {
+            decode_table[chunk[2] as usize]
+        } else {
+            0
+        };
+        let d = if chunk.len() > 3 {
+            decode_table[chunk[3] as usize]
+        } else {
+            0
+        };
         if a == 0xFF || b == 0xFF {
             return Err("invalid base64 character".to_string());
         }
@@ -757,10 +772,7 @@ mod tests {
         });
 
         // Point the AWS endpoint at the mock server.
-        std::env::set_var(
-            "AWS_ENDPOINT_URL_SECRETSMANAGER",
-            server.base_url(),
-        );
+        std::env::set_var("AWS_ENDPOINT_URL_SECRETSMANAGER", server.base_url());
         // Clear any real AWS credentials to avoid accidentally hitting real AWS.
         std::env::remove_var("AWS_ACCESS_KEY_ID");
         std::env::remove_var("AWS_SECRET_ACCESS_KEY");
@@ -784,10 +796,7 @@ mod tests {
                 .body(r#"{"__type":"ResourceNotFoundException","message":"Secrets Manager can't find the specified secret."}"#);
         });
 
-        std::env::set_var(
-            "AWS_ENDPOINT_URL_SECRETSMANAGER",
-            server.base_url(),
-        );
+        std::env::set_var("AWS_ENDPOINT_URL_SECRETSMANAGER", server.base_url());
         std::env::remove_var("AWS_ACCESS_KEY_ID");
         std::env::remove_var("AWS_SECRET_ACCESS_KEY");
 
@@ -806,8 +815,7 @@ mod tests {
         let server = MockServer::start();
         let secret_name = "projects/my-project/secrets/my-secret/versions/latest";
         let server_mock = server.mock(|when, then| {
-            when.method(GET)
-                .path(format!("/v1/{}:access", secret_name));
+            when.method(GET).path(format!("/v1/{}:access", secret_name));
             then.status(200)
                 .header("Content-Type", "application/json")
                 // "aGVsbG93b3JsZA==" is base64("helloworld")
@@ -873,8 +881,7 @@ mod tests {
     #[tokio::test]
     async fn test_vault_missing_token() {
         std::env::remove_var("VAULT_TOKEN");
-        let result =
-            fetch_vault_secret("http://127.0.0.1:8200", "secret/my-secret").await;
+        let result = fetch_vault_secret("http://127.0.0.1:8200", "secret/my-secret").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("VAULT_TOKEN"));
     }
@@ -886,7 +893,10 @@ mod tests {
         std::env::remove_var("GOOGLE_APPLICATION_TOKEN");
         let result = fetch_gcp_secret("projects/p/secrets/s/versions/1").await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("GOOGLE_OAUTH_TOKEN"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("GOOGLE_OAUTH_TOKEN"));
     }
 
     #[test]
@@ -914,4 +924,3 @@ mod tests {
         assert_eq!(dt.len(), 16);
     }
 }
-
