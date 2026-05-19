@@ -646,6 +646,11 @@ pub async fn resolve_dsn_secrets(dsn: &str, backend: &SecretBackend) -> Result<S
 mod tests {
     use super::*;
 
+    /// Tests that mutate process-wide environment variables must hold this lock
+    /// to prevent data races when the test suite runs in parallel.
+    static ENV_VAR_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
     #[test]
     fn test_backend_from_str_env() {
         let b = SecretBackend::from_str("env").unwrap();
@@ -772,6 +777,9 @@ mod tests {
                 .body(r#"{"SecretString":"test_secret_value","Name":"my-db-password"}"#);
         });
 
+        // Serialize env-var mutation across parallel tests.
+        let _lock = ENV_VAR_LOCK.lock().await;
+
         // Point the AWS endpoint at the mock server.
         std::env::set_var("AWS_ENDPOINT_URL_SECRETSMANAGER", server.base_url());
         // Clear any real AWS credentials to avoid accidentally hitting real AWS.
@@ -796,6 +804,9 @@ mod tests {
             then.status(400)
                 .body(r#"{"__type":"ResourceNotFoundException","message":"Secrets Manager can't find the specified secret."}"#);
         });
+
+        // Serialize env-var mutation across parallel tests.
+        let _lock = ENV_VAR_LOCK.lock().await;
 
         std::env::set_var("AWS_ENDPOINT_URL_SECRETSMANAGER", server.base_url());
         std::env::remove_var("AWS_ACCESS_KEY_ID");
@@ -822,6 +833,9 @@ mod tests {
                 // "aGVsbG93b3JsZA==" is base64("helloworld")
                 .body(r#"{"payload":{"data":"aGVsbG93b3JsZA=="}}"#);
         });
+
+        // Serialize env-var mutation across parallel tests.
+        let _lock = ENV_VAR_LOCK.lock().await;
 
         std::env::set_var("GCP_SECRET_MANAGER_ENDPOINT_URL", server.base_url());
         std::env::set_var("GOOGLE_OAUTH_TOKEN", "fake-test-token");
@@ -850,6 +864,10 @@ mod tests {
         });
 
         let vault_addr = server.base_url();
+
+        // Serialize env-var mutation across parallel tests.
+        let _lock = ENV_VAR_LOCK.lock().await;
+
         std::env::set_var("VAULT_TOKEN", "test-vault-token");
 
         let result = fetch_vault_secret(&vault_addr, "secret/my-db-password").await;
@@ -870,6 +888,9 @@ mod tests {
             then.status(403).body(r#"{"errors":["permission denied"]}"#);
         });
 
+        // Serialize env-var mutation across parallel tests.
+        let _lock = ENV_VAR_LOCK.lock().await;
+
         std::env::set_var("VAULT_TOKEN", "bad-token");
         let result = fetch_vault_secret(&server.base_url(), "secret/my-secret").await;
         assert!(result.is_err());
@@ -881,6 +902,7 @@ mod tests {
     /// SEC-02: Vault missing token returns config error.
     #[tokio::test]
     async fn test_vault_missing_token() {
+        let _lock = ENV_VAR_LOCK.lock().await;
         std::env::remove_var("VAULT_TOKEN");
         let result = fetch_vault_secret("http://127.0.0.1:8200", "secret/my-secret").await;
         assert!(result.is_err());
@@ -890,6 +912,7 @@ mod tests {
     /// SEC-02: GCP missing token returns config error.
     #[tokio::test]
     async fn test_gcp_missing_token() {
+        let _lock = ENV_VAR_LOCK.lock().await;
         std::env::remove_var("GOOGLE_OAUTH_TOKEN");
         std::env::remove_var("GOOGLE_APPLICATION_TOKEN");
         let result = fetch_gcp_secret("projects/p/secrets/s/versions/1").await;

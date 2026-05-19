@@ -84,7 +84,7 @@ jobs:
 
       - name: Initialize aqueduct catalog
         run: |
-          aqueduct init --dsn "postgres://aqueduct:password@localhost:5432/smoke_test"
+          aqueduct init --dsn "postgres://aqueduct:password@localhost:5432/smoke_test" --allow-plaintext-password
         env:
           RUST_LOG: info
 
@@ -110,7 +110,8 @@ jobs:
           aqueduct plan \
             --to prod \
             --project-dir /tmp/smoke-project \
-            --dsn "postgres://aqueduct:password@localhost:5432/smoke_test"
+            --dsn "postgres://aqueduct:password@localhost:5432/smoke_test" \
+            --allow-plaintext-password
         env:
           RUST_LOG: info
 
@@ -121,6 +122,7 @@ jobs:
             --project-dir /tmp/smoke-project \
             --dsn "postgres://aqueduct:password@localhost:5432/smoke_test" \
             --dry-run \
-            --yes
+            --yes \
+            --allow-plaintext-password
         env:
           RUST_LOG: info

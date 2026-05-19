@@ -24,11 +24,20 @@ pub struct InitArgs {
     /// Scaffold a new project directory with aqueduct.toml and migrations/.
     #[arg(long)]
     pub scaffold: bool,
+
+    /// Allow DSN with embedded plaintext password (not recommended outside CI/dev).
+    #[arg(long)]
+    pub allow_plaintext_password: bool,
 }
 
 pub async fn run(args: InitArgs) -> anyhow::Result<()> {
-    let dsn =
-        super::resolve_dsn(args.dsn.as_deref(), args.to.as_deref(), &args.project_dir).await?;
+    let dsn = super::resolve_dsn_with_opts(
+        args.dsn.as_deref(),
+        args.to.as_deref(),
+        &args.project_dir,
+        args.allow_plaintext_password,
+    )
+    .await?;
 
     let client = connect(&dsn).await?;
 
