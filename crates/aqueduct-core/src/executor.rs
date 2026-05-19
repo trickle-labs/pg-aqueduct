@@ -3,9 +3,9 @@ use tokio::sync::oneshot;
 use tokio_postgres::NoTls;
 
 use crate::catalog::{
-    ACQUIRE_LOCK_SQL, FINISH_MIGRATION_SQL, GET_RUNNING_OR_RECOVERABLE_MIGRATION_SQL,
-    HEARTBEAT_LOCK_SQL, INSERT_DAG_VERSION_SQL, RELEASE_LOCK_SQL, START_MIGRATION_SQL,
-    UPDATE_MIGRATION_PROGRESS_SQL,
+    ACQUIRE_LOCK_SQL, DEREGISTER_OWNERSHIP_SQL, FINISH_MIGRATION_SQL,
+    GET_RUNNING_OR_RECOVERABLE_MIGRATION_SQL, HEARTBEAT_LOCK_SQL, INSERT_DAG_VERSION_SQL,
+    REGISTER_OWNERSHIP_SQL, RELEASE_LOCK_SQL, START_MIGRATION_SQL, UPDATE_MIGRATION_PROGRESS_SQL,
 };
 use crate::dag::DagState;
 use crate::error::{AqueductError, Result};
@@ -302,6 +302,19 @@ impl<'a> PlanExecutor<'a> {
                                 ],
                             )
                             .await?;
+                        // C-06: Register ownership so destroy_project can scope drops.
+                        // Best-effort: table may not exist on old catalogs.
+                        let _ = self
+                            .client
+                            .execute(
+                                REGISTER_OWNERSHIP_SQL,
+                                &[
+                                    &self.project,
+                                    &spec.qualified_name.schema,
+                                    &spec.qualified_name.name,
+                                ],
+                            )
+                            .await;
                     }
 
                     PlanStep::AlterStreamTable {
@@ -351,6 +364,15 @@ impl<'a> PlanExecutor<'a> {
                                 )
                                 .await?;
                         }
+                        // C-06: Deregister ownership. Best-effort: table may not
+                        // exist on old catalogs.
+                        let _ = self
+                            .client
+                            .execute(
+                                DEREGISTER_OWNERSHIP_SQL,
+                                &[&name.schema, &name.name],
+                            )
+                            .await;
                     }
 
                     PlanStep::Backfill { name: _, mode: _ } => {
