@@ -169,7 +169,7 @@ jobs:
               text = f.read()
 
           version = "${{ steps.version.outputs.version }}"
-          pattern = rf"(## \[{re.escape(version)}\][^\n]*\n)(.*?)(?=\n## \[|\Z)"
+          pattern = rf"(## \[v?{re.escape(version)}\][^\n]*\n)(.*?)(?=\n## \[|\Z)"
           m = re.search(pattern, text, re.DOTALL)
           if not m:
               print(f"ERROR: No changelog entry found for version {version}", file=sys.stderr)
