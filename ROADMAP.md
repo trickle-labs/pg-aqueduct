@@ -1492,6 +1492,7 @@ a test in `integration.rs`, and a renderer in `render_plan_text()`.
 
 ## v0.10 — Safety Contract Repair & Multi-Project Isolation
 
+**Status:** Complete ✅
 **Target effort:** 5–6 weeks.
 **Builds on:** v0.9 complete.
 **Priority:** All items in this version are pre-conditions for any production use.
@@ -1509,7 +1510,7 @@ PostgreSQL deployments.
 
 #### Critical Correctness Bugs
 
-- [ ] **Fix consumer-only plans skipped as no-ops (C-01).** `PlanSummary::is_empty`
+- [x] **Fix consumer-only plans skipped as no-ops (C-01).** `PlanSummary::is_empty`
   only checks `creates`, `drops`, and `alters`. Consumer deltas add `ManageConsumerView`
   steps but never increment those counters, so a plan containing only consumer-view
   creates, alters, or drops is treated as empty and skipped by both `apply` and
@@ -1517,7 +1518,7 @@ PostgreSQL deployments.
   to `PlanSummary`; include them in all is_empty checks, exit-code decisions, renderer
   totals, and gate logic.
 
-- [ ] **Move lock acquisition before live-state read and next-version computation (C-02).**
+- [x] **Move lock acquisition before live-state read and next-version computation (C-02).**
   `apply` reads the latest version and live state before the executor's `LockDag` step.
   Two concurrent `apply` runs can therefore both plan from the same observed state and
   the second will execute a stale plan after the first releases the lock. Fix: acquire
@@ -1525,14 +1526,14 @@ PostgreSQL deployments.
   step that revalidates `from_version`, live spec hash, and diff under lock before any
   DDL. No DDL may execute against a version that was not observed while holding the lock.
 
-- [ ] **Make `RecordSnapshot` read the actual inserted `dag_versions.version` (C-03).**
+- [x] **Make `RecordSnapshot` read the actual inserted `dag_versions.version` (C-03).**
   `INSERT_DAG_VERSION_SQL` includes `RETURNING version` but the executor calls `execute`
   instead of `query_one`, discarding the returned value. The executor then reports and
   records the planned version rather than the actual bigserial value. Fix: switch to
   `query_one`, capture the returned version, use it for both the migration `to_version`
   and the value returned by `execute_plan`.
 
-- [ ] **Wire real backfill or remove from the success contract (C-04).** The planner
+- [x] **Wire real backfill or remove from the success contract (C-04).** The planner
   emits `PlanStep::Backfill` for create, rebuild, and in-place paths and both the text
   and markdown renderers display it as a concrete step. The executor marks it as a no-op
   with a comment saying it is mock-only. Fix for this version: remove `Backfill` from
@@ -1541,7 +1542,7 @@ PostgreSQL deployments.
   completion waiting is implemented end-to-end in v0.13 once the pg_trickle compatibility
   layer (v0.12) is in place.
 
-- [ ] **Enforce project scoping on stream-table live state (C-06, C-07, M-11).**
+- [x] **Enforce project scoping on stream-table live state (C-06, C-07, M-11).**
   `read_live_state` scans `pgtrickle.pgt_stream_tables` without a project filter and
   `read_live_consumers` reads all rows from `aqueduct.consumer_views` without filtering
   by project. Fix:
@@ -1557,7 +1558,7 @@ PostgreSQL deployments.
 
 #### Safety and Idempotency Bugs
 
-- [ ] **Redesign resume to support failure-recovery, not only crash-recovery (S-01, S-02).**
+- [x] **Redesign resume to support failure-recovery, not only crash-recovery (S-01, S-02).**
   The current implementation marks failures as `failed` and clears progress to `{}`, so
   resume can only find `running` migrations. Any migration that fails a step becomes
   non-resumable. Additionally, the resume loop skips every step with index less than the
@@ -1572,73 +1573,73 @@ PostgreSQL deployments.
   confirmed complete. (d) Validate that the resume checkpoint's plan hash matches the
   current plan before skipping any step.
 
-- [ ] **Move scheduler pause to after lock acquisition (S-03).** `run_steps` calls
+- [x] **Move scheduler pause to after lock acquisition (S-03).** `run_steps` calls
   `pgtrickle.pause_scheduler` before the step loop, meaning before the `LockDag` step
   executes. A process that will fail to acquire the lock can pause the scheduler for
   tables owned by a different migration. Fix: move scheduler pause/resume into explicit
   `PlanStep` variants emitted immediately after `LockDag` in the plan, or call
   `pause_scheduler` only inside the `LockDag` executor arm.
 
-- [ ] **Make heartbeat holder-bound and treat heartbeat loss as fatal (S-04).**
+- [x] **Make heartbeat holder-bound and treat heartbeat loss as fatal (S-04).**
   `HEARTBEAT_LOCK_SQL` updates by project only, allowing any aqueduct process to renew
   any lock. Heartbeat errors are logged but non-fatal. Fix: change the SQL to
   `UPDATE aqueduct.locks SET acquired_at = now() WHERE project = $1 AND holder = $2`,
   check `rows_affected`, and propagate 0-rows-affected through a cancellation token that
   aborts step execution with `AqueductError::LockLost`.
 
-- [ ] **Release lock on graceful errors (S-05).** The lock is only released on the success
+- [x] **Release lock on graceful errors (S-05).** The lock is only released on the success
   path. Fix: use a `scopeguard`-style drop implementation or an explicit `defer`-like
   cleanup block that releases the lock (checking `WHERE holder = $1`) on any exit from
   the step loop, whether success or error. Preserve TTL-expiry-only release for hard
   crashes.
 
-- [ ] **Treat step progress checkpoint failures as fatal (S-06).** After each step the
+- [x] **Treat step progress checkpoint failures as fatal (S-06).** After each step the
   executor calls `.ok()` on the progress-write result. Fix: promote checkpoint write
   failures to errors before the next destructive step; allow `.ok()` only for genuinely
   non-destructive bookkeeping steps.
 
-- [ ] **Use a read-only connection path for dry-run apply (S-07).** `aqueduct apply
+- [x] **Use a read-only connection path for dry-run apply (S-07).** `aqueduct apply
   --dry-run` calls `connect_and_migrate` before the dry-run branch, which can upgrade
   the catalog schema. Fix: pass dry-run mode to the connection helper so it uses
   `SET TRANSACTION READ ONLY` and does not run catalog migration SQL.
 
-- [ ] **Share a single `execute_plan` path across apply, rollback, and promote (S-08).**
+- [x] **Share a single `execute_plan` path across apply, rollback, and promote (S-08).**
   `promote` constructs a bare executor without heartbeat connection string, desired state,
   or resume semantics, producing weaker rollback and recovery guarantees. Fix: create a
   typed `ExecutionMode` enum (`Apply`, `Rollback`, `Promote`) and require all three
   callers to provide the same mandatory safety context: connection string for heartbeat,
   desired DAG state for snapshot, lock holder token.
 
-- [ ] **Enforce `connect_and_migrate` uniformly across all catalog-reading commands (S-09).**
+- [x] **Enforce `connect_and_migrate` uniformly across all catalog-reading commands (S-09).**
   Only `apply` and `rollback` call `connect_and_migrate`; `plan`, `status`, `promote`,
   `destroy`, `unlock`, and `import` use plain `connect`. Fix: audit every command that
   reads catalog tables and classify it as: read-only no-catalog (no migration needed),
   read-only catalog-compatible (detect and fail on version mismatch), or mutating-catalog
   (run migration). Apply the appropriate connection path to each.
 
-- [ ] **Make destroy `CASCADE` fallback opt-in (S-10).** The destroy fallback and the
+- [x] **Make destroy `CASCADE` fallback opt-in (S-10).** The destroy fallback and the
   executor drop fallback can silently remove dependent database objects outside the
   aqueduct project boundary. Fix: replace `DROP TABLE ... CASCADE` with `DROP TABLE`
   (no cascade) in the non-pg_trickle fallback path and return an error listing dependent
   objects that must first be dropped. Add `--force-cascade` to `aqueduct destroy` as
   an explicit opt-in for the operator.
 
-- [ ] **Enforce `accept_data_loss` in rollback (S-11).** `RollbackArgs` declares the
+- [x] **Enforce `accept_data_loss` in rollback (S-11).** `RollbackArgs` declares the
   flag but the flow never reads it. Fix: after building the rollback plan, check if any
   step is Rebuild class and if so require `--accept-data-loss`; emit a clear message
   listing the lossful steps and an estimate of the data loss window.
 
-- [ ] **Separate `create_count` from `rebuild_count` in `PlanSummary` (S-12).** First-time
+- [x] **Separate `create_count` from `rebuild_count` in `PlanSummary` (S-12).** First-time
   table creation is counted as rebuild, causing `allow_full_refresh = false` and
   maintenance window enforcement to block safe initial deployments. Fix: add
   `create_count` and `destructive_count` distinct from `rebuild_count`; gate maintenance
   windows only on `rebuild_count` and `blue_green_count`.
 
-- [ ] **Include hostname, PID, and UUID in lock holder string (S-13).** The current holder
+- [x] **Include hostname, PID, and UUID in lock holder string (S-13).** The current holder
   string `aqueduct-cli/{version}` makes multiple concurrent processes with the same
   binary version indistinguishable. Fix: format as `aqueduct/{version}/{hostname}/{pid}/{uuid}`.
 
-- [ ] **Fail closed for scheduler pause and IMMEDIATE toggle failures (S-14).** Pause
+- [x] **Fail closed for scheduler pause and IMMEDIATE toggle failures (S-14).** Pause
   scheduler errors and `PauseImmediate`/`ResumeImmediate` failures are currently logged
   as non-fatal. Fix: promote these to fatal errors by default; add `--best-effort` mode
   as an explicit operator escape hatch for environments where pg_trickle is absent or
@@ -1646,29 +1647,29 @@ PostgreSQL deployments.
 
 #### Additional Correctness Fixes
 
-- [ ] **Populate consumer and source counters in PlanSummary and renderer (C-11).**
+- [x] **Populate consumer and source counters in PlanSummary and renderer (C-11).**
   Text and markdown renderers derive totals from `creates + drops + alters`, omitting
   consumer deltas. Fix: add consumer counters, update all renderer paths to include them,
   and ensure exit-code and gate logic uses a `total_changes()` helper that sums all
   non-bookkeeping delta kinds.
 
-- [ ] **Fix source DDL state: read from recorded snapshots (C-05).** `read_live_state`
+- [x] **Fix source DDL state: read from recorded snapshots (C-05).** `read_live_state`
   always returns `sources: vec![]`. Fix: deserialise the latest `spec_jsonb` from
   `aqueduct.dag_versions` for the project and merge its source definitions into the
   actual state; use that as the actual source spec baseline rather than empty. Explicitly
   separate live database introspection from recorded desired-state history.
 
-- [ ] **Fix `check_pgtrickle_version` graceful absence handling (C-09).** The function
+- [x] **Fix `check_pgtrickle_version` graceful absence handling (C-09).** The function
   directly queries `SELECT pgtrickle.pgt_extension_version()`, which errors if the schema
   or function is absent. Fix: probe `to_regprocedure('pgtrickle.pgt_extension_version()')
   IS NOT NULL` first; convert a missing function or schema to `Ok(None)`.
 
-- [ ] **Fix `classify_delta` panic paths in `AlterQuery` arm (C-10).** `classify_delta`
+- [x] **Fix `classify_delta` panic paths in `AlterQuery` arm (C-10).** `classify_delta`
   unwraps both `desired` and `actual` in the `AlterQuery` arm. Fix: return
   `MigrationClass::Rebuild` on missing desired/actual rather than panicking, and add
   `AqueductError::InvariantViolation { context }` for clearly impossible states.
 
-- [ ] **Implement three-way comparison in diff and status (C-12).** `diff` and
+- [x] **Implement three-way comparison in diff and status (C-12).** `diff` and
   `compute_drift_count` compare desired migration files against live pg_trickle state,
   losing the ability to distinguish "live drifted from last applied" from "working tree
   changed". Fix: expose `aqueduct diff --from last-applied --to live` and
@@ -1677,19 +1678,19 @@ PostgreSQL deployments.
 
 #### New Tests
 
-- [ ] Consumer-only apply end-to-end: create, alter, and drop a consumer view with no
+- [x] Consumer-only apply end-to-end: create, alter, and drop a consumer view with no
   stream-table changes; assert apply succeeds and consumer view reflects the change.
-- [ ] Concurrent apply race: start two applies against the same project from the same
+- [x] Concurrent apply race: start two applies against the same project from the same
   planned state; assert exactly one succeeds and the other receives a clear error.
-- [ ] Stale-plan rejection: apply v1, plan from v1 state, manually apply a change to
+- [x] Stale-plan rejection: apply v1, plan from v1 state, manually apply a change to
   reach v2, then attempt to execute the stale v1→? plan; assert rejection with a
   from-version mismatch error.
-- [ ] Two-project isolation: apply tables for project A and project B in one database;
+- [x] Two-project isolation: apply tables for project A and project B in one database;
   destroy project A; assert all project A tables are gone and all project B tables are
   intact.
-- [ ] Resume skips non-safety steps: checkpoint after step 3, restart apply; assert
+- [x] Resume skips non-safety steps: checkpoint after step 3, restart apply; assert
   `LockDag` re-executes and DDL steps 0–3 are skipped.
-- [ ] Heartbeat loss aborts migration: set TTL to 1 s; externally delete the lock row
+- [x] Heartbeat loss aborts migration: set TTL to 1 s; externally delete the lock row
   mid-migration; assert the executor aborts with `LockLost`.
 
 **v0.10 release criteria.**

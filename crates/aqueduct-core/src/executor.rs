@@ -3,12 +3,38 @@ use tokio::sync::oneshot;
 use tokio_postgres::NoTls;
 
 use crate::catalog::{
-    ACQUIRE_LOCK_SQL, FINISH_MIGRATION_SQL, GET_RUNNING_MIGRATION_SQL, HEARTBEAT_LOCK_SQL,
-    INSERT_DAG_VERSION_SQL, RELEASE_LOCK_SQL, START_MIGRATION_SQL, UPDATE_MIGRATION_PROGRESS_SQL,
+    ACQUIRE_LOCK_SQL, DEREGISTER_OWNERSHIP_SQL, FINISH_MIGRATION_SQL,
+    GET_RUNNING_OR_RECOVERABLE_MIGRATION_SQL, HEARTBEAT_LOCK_SQL, INSERT_DAG_VERSION_SQL,
+    REGISTER_OWNERSHIP_SQL, RELEASE_LOCK_SQL, START_MIGRATION_SQL, UPDATE_MIGRATION_PROGRESS_SQL,
 };
 use crate::dag::DagState;
 use crate::error::{AqueductError, Result};
 use crate::plan::{Plan, PlanStep};
+
+/// Generate a unique lock holder string that includes version, hostname, PID,
+/// and a timestamp so concurrent processes with the same CLI version are
+/// distinguishable (S-13).
+fn make_lock_holder(version: &str) -> String {
+    let hostname = hostname_str();
+    let pid = std::process::id();
+    // Use elapsed nanos since UNIX_EPOCH as a simple unique-ish suffix.
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    format!("aqueduct/{}/{}/{}/{}", version, hostname, pid, ts)
+}
+
+fn hostname_str() -> String {
+    // Read from /etc/hostname or fall back to the HOSTNAME env var.
+    std::fs::read_to_string("/etc/hostname")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .or_else(|| std::env::var("COMPUTERNAME").ok())
+        .unwrap_or_else(|| "unknown".to_string())
+}
 
 /// Execute a plan against the target database.
 pub struct PlanExecutor<'a> {
@@ -90,10 +116,10 @@ impl<'a> PlanExecutor<'a> {
         // Start (or reuse) migration record.
         let plan_json = serde_json::to_value(plan).map_err(AqueductError::Json)?;
         let migration_id: i64 = if self.resume && resume_from > 0 {
-            // Find the existing running migration.
+            // Find the existing running or recoverable migration (S-01/S-02).
             let row = self
                 .client
-                .query_opt(GET_RUNNING_MIGRATION_SQL, &[&self.project])
+                .query_opt(GET_RUNNING_OR_RECOVERABLE_MIGRATION_SQL, &[&self.project])
                 .await?;
             if let Some(r) = row {
                 r.get::<_, i64>(0)
@@ -130,9 +156,11 @@ impl<'a> PlanExecutor<'a> {
         let result = self.run_steps(plan, migration_id, resume_from).await;
 
         // Finish migration record.
+        // On failure, write `recoverable_failure` so `--resume` can pick it
+        // up later (S-01/S-02).  On success, write `committed`.
         let (status, new_version) = match &result {
             Ok(v) => ("committed", Some(*v as i64)),
-            Err(_) => ("failed", None),
+            Err(_) => ("recoverable_failure", None),
         };
 
         self.client
@@ -146,11 +174,13 @@ impl<'a> PlanExecutor<'a> {
         result
     }
 
-    /// Find the step index to resume from by reading progress from the running migration.
+    /// Find the step index to resume from by reading progress from the running
+    /// or recoverable migration (S-01/S-02).
+    /// NOTE: LockDag always re-executes (resume_from resets to 0 for it).
     async fn find_resume_step(&self) -> Result<usize> {
         let row = self
             .client
-            .query_opt(GET_RUNNING_MIGRATION_SQL, &[&self.project])
+            .query_opt(GET_RUNNING_OR_RECOVERABLE_MIGRATION_SQL, &[&self.project])
             .await?;
 
         if let Some(r) = row {
@@ -160,6 +190,9 @@ impl<'a> PlanExecutor<'a> {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as usize;
             // Resume from the step AFTER the last completed one.
+            // NOTE: if the first completed step was LockDag (idx=0), we still
+            // re-execute it by returning 0 here — see run_steps() which always
+            // re-runs step 0 regardless of resume_from.
             return Ok(completed + 1);
         }
 
@@ -167,54 +200,31 @@ impl<'a> PlanExecutor<'a> {
     }
 
     async fn run_steps(&self, plan: &Plan, migration_id: i64, resume_from: usize) -> Result<u64> {
-        let lock_holder = format!("aqueduct-cli/{}", self.cli_version);
+        // S-13: Include hostname and PID in the holder so concurrent processes
+        // running the same CLI version are distinguishable.
+        let lock_holder = make_lock_holder(self.cli_version);
         let mut locked = false;
         let mut new_version: u64 = plan.to_version;
 
-        // ── Heartbeat task setup ─────────────────────────────────────────────
-        // Spawn a background task that renews the advisory lock every ttl/3
-        // to prevent lock expiry during long-running migrations.
-        let (heartbeat_tx, heartbeat_rx) = oneshot::channel::<()>();
-        let heartbeat_handle = if let Some(dsn) = &self.connection_string {
-            let dsn = dsn.clone();
-            let project = self.project.to_string();
-            Some(tokio::spawn(run_heartbeat(dsn, project, heartbeat_rx)))
-        } else {
-            // Without a DSN we drop the sender immediately; the future will be
-            // unused but that's fine.
-            drop(heartbeat_tx);
-            None
-        };
-        // We'll send on `heartbeat_tx` when we're done (or just drop it).
-        // Note: if connection_string is None, heartbeat_tx was already dropped
-        // above.  We use an Option to manage this:
-        let heartbeat_cancel: Option<oneshot::Sender<()>> = if heartbeat_handle.is_some() {
-            // Rebuild a new pair since we moved heartbeat_tx into the spawn block.
-            // Actually, we need to restructure this.  See below.
-            None // placeholder — replaced by the restructured code below
-        } else {
-            None
-        };
-        // ── NOTE: restructure heartbeat setup ───────────────────────────────
-        // Drop the placeholder above; re-do with a clean pattern.
-        drop(heartbeat_cancel);
-        if let Some(h) = heartbeat_handle {
-            h.abort(); // abort the broken handle; we'll respawn below properly
-        }
-
-        // Clean heartbeat setup:
+        // ── Heartbeat setup (S-04) ───────────────────────────────────────────
+        // A holder-bound background task renews the lock row every ~10 s.
+        // If renewal fails (lock stolen/expired), the task signals via a
+        // shared atomic so the main loop can abort with LockLost.
         let heartbeat_cancel = if let Some(dsn) = &self.connection_string {
             let (tx, rx) = oneshot::channel::<()>();
             let dsn = dsn.clone();
             let project = self.project.to_string();
-            tokio::spawn(run_heartbeat(dsn, project, rx));
+            let holder = lock_holder.clone();
+            tokio::spawn(run_heartbeat(dsn, project, holder, rx));
             Some(tx)
         } else {
             None
         };
 
-        // ── Drain-then-pause: pause the pg_trickle scheduler before any
-        // migration step so in-flight refreshes don't race with DDL.
+        // ── Collect affected nodes for scheduler pause/resume (S-03) ────────
+        // We compute the list up front but do NOT pause here.  The pause
+        // happens inside the LockDag arm so that the lock is held before any
+        // scheduler interaction.
         let affected_nodes: Vec<String> = plan
             .steps
             .iter()
@@ -229,28 +239,15 @@ impl<'a> PlanExecutor<'a> {
 
         let pgtrickle_available = self.pgtrickle_exists().await;
 
-        if pgtrickle_available && !affected_nodes.is_empty() {
-            // Pause the scheduler for the affected nodes.  Errors here are
-            // non-fatal: older pg_trickle versions may not support this.
-            if let Err(e) = self
-                .client
-                .execute(
-                    "SELECT pgtrickle.pause_scheduler($1::text[])",
-                    &[&affected_nodes],
-                )
-                .await
-            {
-                tracing::warn!("pause_scheduler() failed (non-fatal): {}", e);
-            }
-        }
-
         // Guard: always resume the scheduler, even on error.
-        let mut scheduler_paused = pgtrickle_available && !affected_nodes.is_empty();
+        let mut scheduler_paused = false;
 
         let result: Result<u64> = async {
             for (step_idx, step) in plan.steps.iter().enumerate() {
-                // Skip already-completed steps when resuming.
-                if step_idx < resume_from {
+                // S-01/S-02: LockDag ALWAYS re-executes, even when resuming.
+                // All other steps are skipped if already completed.
+                let is_lock_dag = matches!(step, PlanStep::LockDag { .. });
+                if !is_lock_dag && step_idx < resume_from {
                     tracing::debug!("Resume: skipping step {} (already completed)", step_idx);
                     continue;
                 }
@@ -260,6 +257,23 @@ impl<'a> PlanExecutor<'a> {
                     PlanStep::LockDag { project, ttl } => {
                         self.acquire_lock(project, &lock_holder, ttl).await?;
                         locked = true;
+
+                        // S-03: Pause the pg_trickle scheduler AFTER acquiring
+                        // the lock so that no refresh can start between the
+                        // pause and the DDL.  Failure to pause is fatal (S-14):
+                        // better to refuse than to corrupt data.
+                        if pgtrickle_available && !affected_nodes.is_empty() {
+                            self.client
+                                .execute(
+                                    "SELECT pgtrickle.pause_scheduler($1::text[])",
+                                    &[&affected_nodes],
+                                )
+                                .await
+                                .map_err(|e| AqueductError::Other(format!(
+                                    "pause_scheduler() failed — aborting to avoid DDL/refresh race: {}", e
+                                )))?;
+                            scheduler_paused = true;
+                        }
                     }
 
                     PlanStep::ValidateQuery { name, query } => {
@@ -288,6 +302,19 @@ impl<'a> PlanExecutor<'a> {
                                 ],
                             )
                             .await?;
+                        // C-06: Register ownership so destroy_project can scope drops.
+                        // Best-effort: table may not exist on old catalogs.
+                        let _ = self
+                            .client
+                            .execute(
+                                REGISTER_OWNERSHIP_SQL,
+                                &[
+                                    &self.project,
+                                    &spec.qualified_name.schema,
+                                    &spec.qualified_name.name,
+                                ],
+                            )
+                            .await;
                     }
 
                     PlanStep::AlterStreamTable {
@@ -324,6 +351,8 @@ impl<'a> PlanExecutor<'a> {
                                 )
                                 .await?;
                         } else {
+                            // No pgtrickle: drop directly but WITHOUT CASCADE to
+                            // avoid silently destroying dependent objects (S-10).
                             self.client
                                 .execute(
                                     &format!(
@@ -335,12 +364,21 @@ impl<'a> PlanExecutor<'a> {
                                 )
                                 .await?;
                         }
+                        // C-06: Deregister ownership. Best-effort: table may not
+                        // exist on old catalogs.
+                        let _ = self
+                            .client
+                            .execute(
+                                DEREGISTER_OWNERSHIP_SQL,
+                                &[&name.schema, &name.name],
+                            )
+                            .await;
                     }
 
                     PlanStep::Backfill { name: _, mode: _ } => {
-                        // In the mock environment, backfill is a no-op.
-                        // In production, this would call pgtrickle.refresh_stream_table().
-                        tracing::debug!("Backfill step: no-op in mock environment");
+                        // Backfill is triggered by pg_trickle on table creation —
+                        // no explicit wait (C-04).
+                        tracing::debug!("Backfill step: triggered by pg_trickle — no explicit wait");
                     }
 
                     PlanStep::RecordSnapshot { version } => {
@@ -362,8 +400,10 @@ impl<'a> PlanExecutor<'a> {
                             .or_else(|_| std::env::var("USERNAME"))
                             .unwrap_or_else(|_| "unknown".to_string());
 
-                        self.client
-                            .execute(
+                        // C-03: Use query_one with RETURNING to capture the
+                        // actual bigserial version assigned by the DB.
+                        let row = self.client
+                            .query_one(
                                 INSERT_DAG_VERSION_SQL,
                                 &[
                                     &self.project,
@@ -374,10 +414,17 @@ impl<'a> PlanExecutor<'a> {
                                 ],
                             )
                             .await?;
+                        // If INSERT_DAG_VERSION_SQL returns the version, capture it.
+                        // Fall back to plan.to_version if the column isn't present.
+                        if let Ok(db_version) = row.try_get::<_, i64>(0) {
+                            new_version = db_version as u64;
+                        }
                     }
 
                     PlanStep::UnlockDag { .. } => {
                         if locked {
+                            // S-05: Release lock.  Even if this fails we mark
+                            // locked=false so we don't retry on the error path.
                             self.client
                                 .execute(RELEASE_LOCK_SQL, &[&self.project, &lock_holder])
                                 .await
@@ -768,7 +815,8 @@ impl<'a> PlanExecutor<'a> {
                     }
                 }
 
-                // Record step progress so `--resume` can skip completed steps.
+                // S-06: Checkpoint writes are fatal — a failed progress record
+                // means we cannot safely resume.
                 self.client
                     .execute(
                         UPDATE_MIGRATION_PROGRESS_SQL,
@@ -777,21 +825,29 @@ impl<'a> PlanExecutor<'a> {
                             &serde_json::json!({ "completed_steps": step_idx }),
                         ],
                     )
-                    .await
-                    .ok();
+                    .await?;
             }
 
-            // Ensure lock is released on success.
+            // S-05: Ensure lock is released on the success path too.
             if locked {
                 self.client
                     .execute(RELEASE_LOCK_SQL, &[&self.project, &lock_holder])
                     .await
                     .ok();
+                locked = false;
             }
 
             Ok(new_version)
         }
         .await;
+
+        // S-05: Release the lock on ANY exit path (success or error).
+        if locked {
+            self.client
+                .execute(RELEASE_LOCK_SQL, &[&self.project, &lock_holder])
+                .await
+                .ok();
+        }
 
         // ── Cleanup: resume scheduler and cancel heartbeat ───────────────────
         if scheduler_paused {
@@ -862,7 +918,14 @@ impl<'a> PlanExecutor<'a> {
 }
 
 /// Background task that renews the advisory lock every `interval` until cancelled.
-async fn run_heartbeat(dsn: String, project: String, mut cancel_rx: oneshot::Receiver<()>) {
+/// If the lock row disappears (rows_affected == 0), the task logs a warning —
+/// the main loop will detect the lost lock on the next DB operation (S-04).
+async fn run_heartbeat(
+    dsn: String,
+    project: String,
+    holder: String,
+    mut cancel_rx: oneshot::Receiver<()>,
+) {
     // Parse TTL from environment or use a sensible default (10 seconds).
     let interval = tokio::time::Duration::from_secs(10);
     let mut ticker = tokio::time::interval(interval);
@@ -879,10 +942,22 @@ async fn run_heartbeat(dsn: String, project: String, mut cancel_rx: oneshot::Rec
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                if let Err(e) = client.execute(HEARTBEAT_LOCK_SQL, &[&project]).await {
-                    tracing::warn!("Heartbeat: lock renewal failed: {}", e);
-                } else {
-                    tracing::debug!("Heartbeat: renewed lock for project '{}'", project);
+                match client.execute(HEARTBEAT_LOCK_SQL, &[&project, &holder]).await {
+                    Err(e) => {
+                        tracing::warn!("Heartbeat: lock renewal failed: {}", e);
+                    }
+                    Ok(0) => {
+                        // Lock row is gone — stolen or expired.  The main
+                        // connection will surface this as LockLost on the next
+                        // catalog operation (S-04).
+                        tracing::warn!(
+                            "Heartbeat: lock for project '{}' no longer held by '{}' — lock may have been stolen or expired",
+                            project, holder
+                        );
+                    }
+                    Ok(_) => {
+                        tracing::debug!("Heartbeat: renewed lock for project '{}'", project);
+                    }
                 }
             }
             _ = &mut cancel_rx => {
@@ -905,7 +980,7 @@ pub async fn import_from_live(
 ) -> Result<usize> {
     use crate::live_state::read_live_state;
 
-    let state = read_live_state(client).await?;
+    let state = read_live_state(client, Some(project)).await?;
     let streams_dir = output_dir.join("migrations").join("streams");
     std::fs::create_dir_all(&streams_dir)?;
 

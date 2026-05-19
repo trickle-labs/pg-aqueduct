@@ -27,6 +27,16 @@ pub struct DestroyArgs {
     /// Show what would be destroyed without executing.
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Also drop dependent database objects (views, etc.) via CASCADE.
+    /// Without this flag, `destroy` refuses if any stream table has dependents.
+    #[arg(long)]
+    pub force_cascade: bool,
+
+    /// Skip ownership verification. By default, `destroy` refuses to drop
+    /// stream tables that are not registered as owned by this project.
+    #[arg(long)]
+    pub force_unowned: bool,
 }
 
 pub async fn run(args: DestroyArgs) -> anyhow::Result<()> {
@@ -52,6 +62,8 @@ pub async fn run(args: DestroyArgs) -> anyhow::Result<()> {
     let options = DestroyOptions {
         project: project_name.clone(),
         dry_run: args.dry_run,
+        force_cascade: args.force_cascade,
+        force_unowned: args.force_unowned,
     };
 
     let result = destroy_project(&client, &options).await?;

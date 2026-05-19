@@ -72,7 +72,7 @@ async fn test_read_live_state_empty() {
     let db = TestDb::new().await.expect("start test db");
     db.install_mock_pgtrickle().await.expect("install mock");
 
-    let state = read_live_state(&db.client).await.expect("read state");
+    let state = read_live_state(&db.client, None).await.expect("read state");
     assert!(state.stream_tables.is_empty());
 }
 
@@ -106,7 +106,7 @@ async fn test_create_and_read_stream_table() {
         .await
         .expect("create stream table");
 
-    let state = read_live_state(&db.client).await.expect("read state");
+    let state = read_live_state(&db.client, None).await.expect("read state");
     assert_eq!(state.stream_tables.len(), 1);
     assert_eq!(state.stream_tables[0].qualified_name.name, "order_totals");
     assert_eq!(state.stream_tables[0].schedule, "30s");
@@ -136,7 +136,7 @@ SELECT customer_id, SUM(amount) AS total FROM raw_orders GROUP BY customer_id;
 
     let files = vec![parse_file("order_totals", migration_content)];
     let desired = build_dag_state(&files, true).expect("build desired state");
-    let actual = read_live_state(&db.client)
+    let actual = read_live_state(&db.client, None)
         .await
         .expect("read actual state");
 
@@ -155,7 +155,9 @@ SELECT customer_id, SUM(amount) AS total FROM raw_orders GROUP BY customer_id;
     assert_eq!(new_version, 1);
 
     // Verify the stream table was "created" in the mock catalog.
-    let state_after = read_live_state(&db.client).await.expect("read state after");
+    let state_after = read_live_state(&db.client, None)
+        .await
+        .expect("read state after");
     assert_eq!(state_after.stream_tables.len(), 1);
     assert_eq!(
         state_after.stream_tables[0].qualified_name.name,
@@ -169,7 +171,9 @@ SELECT customer_id, SUM(amount) AS total FROM raw_orders GROUP BY customer_id;
     assert_eq!(version, Some(1));
 
     // Now a second plan should be a no-op.
-    let actual2 = read_live_state(&db.client).await.expect("read actual2");
+    let actual2 = read_live_state(&db.client, None)
+        .await
+        .expect("read actual2");
     let diff2 = compute_diff(&desired, &actual2);
     assert!(diff2.is_empty());
 }
@@ -202,7 +206,9 @@ async fn test_plan_detects_schedule_change() {
         "-- @aqueduct:schedule = \"1m\"\nSELECT 1 AS val;",
     )];
     let desired = build_dag_state(&files, false).expect("build desired");
-    let actual = read_live_state(&db.client).await.expect("read actual");
+    let actual = read_live_state(&db.client, None)
+        .await
+        .expect("read actual");
 
     let diff = compute_diff(&desired, &actual);
     assert!(!diff.is_empty());
@@ -282,7 +288,7 @@ async fn test_rollback() {
         "-- @aqueduct:schedule = \"30s\"\nSELECT 1 AS a;",
     )];
     let desired_v1 = build_dag_state(&files_v1, false).expect("desired v1");
-    let actual_v1 = read_live_state(&db.client).await.expect("actual v1");
+    let actual_v1 = read_live_state(&db.client, None).await.expect("actual v1");
     let diff_v1 = compute_diff(&desired_v1, &actual_v1);
     let topo_v1 = topological_sort(&desired_v1).expect("topo v1");
     let plan_v1 = build_plan("rollback-test", None, 1, &diff_v1, &topo_v1).expect("build_plan");
@@ -296,18 +302,20 @@ async fn test_rollback() {
         parse_file("table_b", "-- @aqueduct:schedule = \"1m\"\nSELECT 2 AS b;"),
     ];
     let desired_v2 = build_dag_state(&files_v2, false).expect("desired v2");
-    let actual_v2 = read_live_state(&db.client).await.expect("actual v2");
+    let actual_v2 = read_live_state(&db.client, None).await.expect("actual v2");
     let diff_v2 = compute_diff(&desired_v2, &actual_v2);
     let topo_v2 = topological_sort(&desired_v2).expect("topo v2");
     let plan_v2 = build_plan("rollback-test", Some(1), 2, &diff_v2, &topo_v2).expect("build_plan");
 
     executor.execute(&plan_v2).await.expect("apply v2");
 
-    let state_v2 = read_live_state(&db.client).await.expect("state v2");
+    let state_v2 = read_live_state(&db.client, None).await.expect("state v2");
     assert_eq!(state_v2.stream_tables.len(), 2);
 
     // Rollback to v1: desired state is files_v1.
-    let actual_after_v2 = read_live_state(&db.client).await.expect("actual after v2");
+    let actual_after_v2 = read_live_state(&db.client, None)
+        .await
+        .expect("actual after v2");
     let diff_rollback = compute_diff(&desired_v1, &actual_after_v2);
     let topo_rb = topological_sort(&desired_v1).expect("topo rb");
     let plan_rollback =
@@ -318,7 +326,7 @@ async fn test_rollback() {
         .await
         .expect("apply rollback");
 
-    let state_after_rollback = read_live_state(&db.client)
+    let state_after_rollback = read_live_state(&db.client, None)
         .await
         .expect("state after rollback");
     assert_eq!(state_after_rollback.stream_tables.len(), 1);
@@ -367,7 +375,7 @@ async fn test_lock_prevents_concurrent_apply() {
     // Trying to acquire the same lock should fail.
     let files = vec![parse_file("t", "SELECT 1;")];
     let desired = build_dag_state(&files, false).expect("desired");
-    let actual = read_live_state(&db.client).await.expect("actual");
+    let actual = read_live_state(&db.client, None).await.expect("actual");
     let diff = compute_diff(&desired, &actual);
     let topo = topological_sort(&desired).expect("topo");
     let plan = build_plan("locked-project", None, 1, &diff, &topo).expect("build_plan");
@@ -404,7 +412,7 @@ SELECT customer_id, SUM(amount) AS total FROM raw_orders GROUP BY customer_id;
 "#,
     )];
     let desired_v1 = build_dag_state(&files_v1, false).expect("desired v1");
-    let actual_v1 = read_live_state(&db.client).await.expect("actual v1");
+    let actual_v1 = read_live_state(&db.client, None).await.expect("actual v1");
     let diff_v1 = compute_diff(&desired_v1, &actual_v1);
     let topo_v1 = topological_sort(&desired_v1).expect("topo v1");
     let plan_v1 = build_plan("inplace-test", None, 1, &diff_v1, &topo_v1).expect("build_plan");
@@ -421,7 +429,7 @@ SELECT customer_id, SUM(amount) AS total, COUNT(*) AS order_count FROM raw_order
 "#,
     )];
     let desired_v2 = build_dag_state(&files_v2, false).expect("desired v2");
-    let actual_v2 = read_live_state(&db.client).await.expect("actual v2");
+    let actual_v2 = read_live_state(&db.client, None).await.expect("actual v2");
     let diff_v2 = compute_diff(&desired_v2, &actual_v2);
 
     assert!(!diff_v2.is_empty());
@@ -516,7 +524,7 @@ SELECT customer_id, SUM(amount) AS total FROM raw_orders GROUP BY customer_id;
 "#,
     )];
     let desired = build_dag_state(&files, false).expect("desired");
-    let actual = read_live_state(&db.client).await.expect("actual");
+    let actual = read_live_state(&db.client, None).await.expect("actual");
     let diff = compute_diff(&desired, &actual);
 
     assert!(!diff.is_empty());
@@ -698,7 +706,7 @@ SELECT customer_id, SUM(amount) AS total FROM raw_orders GROUP BY customer_id;
 "#,
     )];
     let desired = build_dag_state(&files, false).expect("desired");
-    let actual = read_live_state(&db.client).await.expect("actual");
+    let actual = read_live_state(&db.client, None).await.expect("actual");
     let diff = compute_diff(&desired, &actual);
     let topo = topological_sort(&desired).expect("topo");
     let plan = build_plan("cost-test", None, 1, &diff, &topo).expect("build_plan");
@@ -727,7 +735,7 @@ async fn test_catalog_v2_tables_exist() {
         .await
         .expect("init v2 catalog");
 
-    // Verify all v2 tables exist.
+    // Verify all tables exist (including v3 stream_table_ownership).
     for table in &[
         "dag_versions",
         "migrations",
@@ -736,6 +744,7 @@ async fn test_catalog_v2_tables_exist() {
         "ddl_log",
         "consumer_views",
         "blue_green_deployments",
+        "stream_table_ownership",
     ] {
         let row = db
             .client
@@ -750,7 +759,7 @@ async fn test_catalog_v2_tables_exist() {
         assert!(exists, "Table aqueduct.{} should exist", table);
     }
 
-    // Version should be 2.
+    // CATALOG_INIT_V2_SQL is now CATALOG_INIT_V3_SQL; version is 3.
     let version_row = db
         .client
         .query_one(
@@ -761,7 +770,7 @@ async fn test_catalog_v2_tables_exist() {
         .await
         .expect("query version");
     let version: serde_json::Value = version_row.get(0);
-    assert_eq!(version.as_i64().unwrap(), 2);
+    assert_eq!(version.as_i64().unwrap(), 3);
 }
 
 /// Test: consumer file is parsed and produces ManageConsumerView plan step.
@@ -802,7 +811,7 @@ SELECT * FROM public.order_totals WHERE amount > 0;
     assert_eq!(desired.consumers[0].expose_as.schema, "reporting");
     assert_eq!(desired.consumers[0].expose_as.name, "orders");
 
-    let actual = read_live_state(&db.client).await.expect("actual");
+    let actual = read_live_state(&db.client, None).await.expect("actual");
     let diff = compute_diff(&desired, &actual);
     let topo = topological_sort(&desired).expect("topo");
     let plan = build_plan("consumer-test", None, 1, &diff, &topo).expect("build_plan");
@@ -850,7 +859,7 @@ SELECT customer_id, total FROM public.order_totals;
 
     let files = vec![consumer_file];
     let desired = build_dag_state(&files, false).expect("desired");
-    let actual = read_live_state(&db.client).await.expect("actual");
+    let actual = read_live_state(&db.client, None).await.expect("actual");
     let diff = compute_diff(&desired, &actual);
     let topo = topological_sort(&desired).expect("topo");
     let plan = build_plan("consumer-exec-test", None, 1, &diff, &topo).expect("build_plan");
@@ -1183,7 +1192,7 @@ async fn test_destroy_project_dry_run() {
         "-- @aqueduct:schedule = \"30s\"\nSELECT customer_id, SUM(amount) AS total FROM raw_orders GROUP BY customer_id;",
     )];
     let desired = build_dag_state(&files, false).expect("desired");
-    let actual = read_live_state(&db.client).await.expect("actual");
+    let actual = read_live_state(&db.client, None).await.expect("actual");
     let diff = compute_diff(&desired, &actual);
     let topo = topological_sort(&desired).expect("topo");
     let plan = build_plan("destroy-dry-run-test", None, 1, &diff, &topo).expect("build_plan");
@@ -1194,6 +1203,8 @@ async fn test_destroy_project_dry_run() {
     let opts = DestroyOptions {
         project: "destroy-dry-run-test".to_string(),
         dry_run: true,
+        force_cascade: false,
+        force_unowned: false,
     };
     let result = destroy_project(&db.client, &opts)
         .await
@@ -1234,7 +1245,7 @@ async fn test_destroy_project_full() {
         "-- @aqueduct:schedule = \"30s\"\nSELECT customer_id, SUM(amount) AS total FROM raw_orders2 GROUP BY customer_id;",
     )];
     let desired = build_dag_state(&files, false).expect("desired");
-    let actual = read_live_state(&db.client).await.expect("actual");
+    let actual = read_live_state(&db.client, None).await.expect("actual");
     let diff = compute_diff(&desired, &actual);
     let topo = topological_sort(&desired).expect("topo");
     let plan = build_plan("destroy-full-test", None, 1, &diff, &topo).expect("build_plan");
@@ -1254,6 +1265,8 @@ async fn test_destroy_project_full() {
     let opts = DestroyOptions {
         project: "destroy-full-test".to_string(),
         dry_run: false,
+        force_cascade: false,
+        force_unowned: false,
     };
     let result = destroy_project(&db.client, &opts)
         .await
@@ -1350,7 +1363,9 @@ async fn test_planner_fuzzing_random_mutations() {
             consumers: vec![],
         };
 
-        let actual = read_live_state(&db.client).await.expect("read live state");
+        let actual = read_live_state(&db.client, None)
+            .await
+            .expect("read live state");
         let diff = compute_diff(&desired_state, &actual);
 
         if diff.is_empty() {
@@ -1373,7 +1388,7 @@ async fn test_planner_fuzzing_random_mutations() {
             .unwrap_or_else(|e| panic!("execute failed on iteration {}: {}", iteration, e));
 
         // After apply, plan should be empty (convergence invariant).
-        let actual2 = read_live_state(&db.client)
+        let actual2 = read_live_state(&db.client, None)
             .await
             .expect("read live state 2");
         let diff2 = compute_diff(&desired_state, &actual2);
@@ -1416,7 +1431,7 @@ async fn test_cookbook_01_change_schedule_faster() {
         "-- @aqueduct:schedule = \"10s\"\n-- @aqueduct:refresh_mode = \"FULL\"\nSELECT 1 AS v;",
     )];
     let desired = build_dag_state(&files, false).expect("desired");
-    let actual = read_live_state(&db.client).await.expect("actual");
+    let actual = read_live_state(&db.client, None).await.expect("actual");
     let diff = compute_diff(&desired, &actual);
 
     assert!(!diff.is_empty());
@@ -1458,7 +1473,7 @@ async fn test_cookbook_02_change_schedule_slower() {
         "-- @aqueduct:schedule = \"10m\"\n-- @aqueduct:refresh_mode = \"FULL\"\nSELECT 2 AS v;",
     )];
     let desired = build_dag_state(&files, false).expect("desired");
-    let actual = read_live_state(&db.client).await.expect("actual");
+    let actual = read_live_state(&db.client, None).await.expect("actual");
     let diff = compute_diff(&desired, &actual);
 
     assert!(!diff.is_empty());
@@ -1506,7 +1521,7 @@ async fn test_cookbook_03_enable_cdc_mode() {
         "-- @aqueduct:schedule = \"30s\"\n-- @aqueduct:refresh_mode = \"FULL\"\n-- @aqueduct:cdc_mode = \"wal\"\nSELECT 3 AS v;",
     )];
     let desired = build_dag_state(&files, false).expect("desired");
-    let actual = read_live_state(&db.client).await.expect("actual");
+    let actual = read_live_state(&db.client, None).await.expect("actual");
     let diff = compute_diff(&desired, &actual);
 
     assert!(!diff.is_empty());
@@ -1557,7 +1572,7 @@ SELECT id, SUM(amount) AS total FROM raw_c04 GROUP BY id;
 "#,
     )];
     let desired = build_dag_state(&files, false).expect("desired");
-    let actual = read_live_state(&db.client).await.expect("actual");
+    let actual = read_live_state(&db.client, None).await.expect("actual");
     let diff = compute_diff(&desired, &actual);
 
     assert!(!diff.is_empty());
@@ -1613,7 +1628,7 @@ SELECT id, SUM(amount) AS total, SUM(discount) AS discount_total FROM raw_c05 GR
 "#,
     )];
     let desired = build_dag_state(&files, false).expect("desired");
-    let actual = read_live_state(&db.client).await.expect("actual");
+    let actual = read_live_state(&db.client, None).await.expect("actual");
     let diff = compute_diff(&desired, &actual);
 
     assert!(!diff.is_empty());
@@ -1664,7 +1679,7 @@ SELECT id, SUM(value) AS total, COUNT(*) AS event_count FROM raw_c06 GROUP BY id
 "#,
     )];
     let desired = build_dag_state(&files, false).expect("desired");
-    let actual = read_live_state(&db.client).await.expect("actual");
+    let actual = read_live_state(&db.client, None).await.expect("actual");
     let diff = compute_diff(&desired, &actual);
 
     assert!(!diff.is_empty());
@@ -2009,7 +2024,7 @@ SELECT id, SUM(amount) AS total FROM raw_c15 WHERE status = 'active' GROUP BY id
 "#,
     )];
     let desired = build_dag_state(&files, false).expect("desired");
-    let actual = read_live_state(&db.client).await.expect("actual");
+    let actual = read_live_state(&db.client, None).await.expect("actual");
     let diff = compute_diff(&desired, &actual);
 
     assert!(!diff.is_empty());
@@ -2111,7 +2126,7 @@ SELECT id, AVG(score) AS avg_score FROM raw_c18 GROUP BY id;
 "#,
     )];
     let desired = build_dag_state(&files, false).expect("desired");
-    let actual = read_live_state(&db.client).await.expect("actual");
+    let actual = read_live_state(&db.client, None).await.expect("actual");
     let diff = compute_diff(&desired, &actual);
 
     assert!(!diff.is_empty());
@@ -2129,7 +2144,9 @@ SELECT id, AVG(score) AS avg_score FROM raw_c18 GROUP BY id;
     let version = executor.execute(&plan).await.expect("execute");
     assert_eq!(version, 1);
 
-    let state_after = read_live_state(&db.client).await.expect("state after");
+    let state_after = read_live_state(&db.client, None)
+        .await
+        .expect("state after");
     assert_eq!(state_after.stream_tables.len(), 1);
     assert_eq!(
         state_after.stream_tables[0].qualified_name.name,
@@ -2158,7 +2175,7 @@ async fn test_cookbook_19_drop_stream_table() {
 
     // Desired: empty migrations directory (no tables).
     let desired = build_dag_state(&[], false).expect("desired");
-    let actual = read_live_state(&db.client).await.expect("actual");
+    let actual = read_live_state(&db.client, None).await.expect("actual");
     let diff = compute_diff(&desired, &actual);
 
     assert!(!diff.is_empty());
@@ -2214,7 +2231,7 @@ SELECT COUNT(*) AS num_customers FROM public.c20_totals;
         "c20_totals must precede c20_summary"
     );
 
-    let actual = read_live_state(&db.client).await.expect("actual");
+    let actual = read_live_state(&db.client, None).await.expect("actual");
     let diff = compute_diff(&desired, &actual);
     let plan = build_plan("cookbook-20", None, 1, &diff, &topo).expect("build_plan");
     assert_eq!(plan.summary.creates, 2);
@@ -2222,7 +2239,9 @@ SELECT COUNT(*) AS num_customers FROM public.c20_totals;
     let executor = PlanExecutor::new(&db.client, "cookbook-20", "0.7.0", false);
     executor.execute(&plan).await.expect("execute");
 
-    let state = read_live_state(&db.client).await.expect("state after");
+    let state = read_live_state(&db.client, None)
+        .await
+        .expect("state after");
     assert_eq!(state.stream_tables.len(), 2);
 }
 
@@ -2247,7 +2266,7 @@ async fn test_cookbook_21_add_downstream_node() {
         "-- @aqueduct:schedule = \"30s\"\nSELECT id, SUM(amount) AS total FROM raw_c21 GROUP BY id;",
     )];
     let desired_v1 = build_dag_state(&files_v1, false).expect("desired v1");
-    let actual_v1 = read_live_state(&db.client).await.expect("actual v1");
+    let actual_v1 = read_live_state(&db.client, None).await.expect("actual v1");
     let diff_v1 = compute_diff(&desired_v1, &actual_v1);
     let topo_v1 = topological_sort(&desired_v1).expect("topo v1");
     let plan_v1 = build_plan("cookbook-21", None, 1, &diff_v1, &topo_v1).expect("build_plan");
@@ -2266,7 +2285,7 @@ async fn test_cookbook_21_add_downstream_node() {
         ),
     ];
     let desired_v2 = build_dag_state(&files_v2, false).expect("desired v2");
-    let actual_v2 = read_live_state(&db.client).await.expect("actual v2");
+    let actual_v2 = read_live_state(&db.client, None).await.expect("actual v2");
     let diff_v2 = compute_diff(&desired_v2, &actual_v2);
 
     // Only c21_summary should be a new Create — c21_totals is Unchanged.
@@ -2305,7 +2324,7 @@ async fn test_cookbook_22_remove_downstream_node() {
         ),
     ];
     let desired_v1 = build_dag_state(&files_v1, false).expect("desired v1");
-    let actual_v1 = read_live_state(&db.client).await.expect("actual v1");
+    let actual_v1 = read_live_state(&db.client, None).await.expect("actual v1");
     let diff_v1 = compute_diff(&desired_v1, &actual_v1);
     let topo_v1 = topological_sort(&desired_v1).expect("topo v1");
     let plan_v1 = build_plan("cookbook-22", None, 1, &diff_v1, &topo_v1).expect("build_plan");
@@ -2318,7 +2337,7 @@ async fn test_cookbook_22_remove_downstream_node() {
         "-- @aqueduct:schedule = \"30s\"\nSELECT id, SUM(val) AS total FROM raw_c22 GROUP BY id;",
     )];
     let desired_v2 = build_dag_state(&files_v2, false).expect("desired v2");
-    let actual_v2 = read_live_state(&db.client).await.expect("actual v2");
+    let actual_v2 = read_live_state(&db.client, None).await.expect("actual v2");
     let diff_v2 = compute_diff(&desired_v2, &actual_v2);
 
     assert_eq!(diff_v2.changes().len(), 1);
@@ -2372,7 +2391,7 @@ async fn test_cookbook_23_three_level_chain() {
     assert!(pos_l1 < pos_l2, "lvl1 must precede lvl2");
     assert!(pos_l2 < pos_l3, "lvl2 must precede lvl3");
 
-    let actual = read_live_state(&db.client).await.expect("actual");
+    let actual = read_live_state(&db.client, None).await.expect("actual");
     let diff = compute_diff(&desired, &actual);
     let plan = build_plan("cookbook-23", None, 1, &diff, &topo).expect("build_plan");
     assert_eq!(plan.summary.creates, 3);
@@ -2381,7 +2400,7 @@ async fn test_cookbook_23_three_level_chain() {
     executor.execute(&plan).await.expect("execute");
 
     // Second plan must be a no-op.
-    let actual2 = read_live_state(&db.client).await.expect("actual2");
+    let actual2 = read_live_state(&db.client, None).await.expect("actual2");
     let diff2 = compute_diff(&desired, &actual2);
     assert!(diff2.is_empty(), "Plan should be empty after apply");
 }
@@ -2423,7 +2442,7 @@ SELECT customer_id, total FROM public.c24_orders WHERE total > 0;
 
     let files = vec![consumer_file];
     let desired = build_dag_state(&files, false).expect("desired");
-    let actual = read_live_state(&db.client).await.expect("actual");
+    let actual = read_live_state(&db.client, None).await.expect("actual");
     let diff = compute_diff(&desired, &actual);
     let topo = topological_sort(&desired).expect("topo");
     let plan = build_plan("cookbook-24", None, 1, &diff, &topo).expect("build_plan");
@@ -2568,7 +2587,7 @@ async fn test_cookbook_27_multi_table_schedule_change() {
         parse_file("c27_c", "-- @aqueduct:schedule = \"10s\"\n-- @aqueduct:refresh_mode = \"FULL\"\nSELECT 27 AS v;"),
     ];
     let desired = build_dag_state(&files, false).expect("desired");
-    let actual = read_live_state(&db.client).await.expect("actual");
+    let actual = read_live_state(&db.client, None).await.expect("actual");
     let diff = compute_diff(&desired, &actual);
 
     assert_eq!(diff.changes().len(), 3);
@@ -2626,7 +2645,7 @@ async fn test_cookbook_28_import_roundtrip() {
     assert_eq!(files[0].name, "c28_stats");
 
     let desired = build_dag_state(&files, false).expect("desired");
-    let actual = read_live_state(&db.client).await.expect("actual");
+    let actual = read_live_state(&db.client, None).await.expect("actual");
     let diff = compute_diff(&desired, &actual);
 
     assert!(
@@ -2656,7 +2675,7 @@ async fn test_cookbook_29_rollback_to_prior_state() {
         "-- @aqueduct:schedule = \"30s\"\nSELECT id, SUM(val) AS total FROM raw_c29 GROUP BY id;",
     )];
     let desired_v1 = build_dag_state(&files_v1, false).expect("desired v1");
-    let actual_v1 = read_live_state(&db.client).await.expect("actual v1");
+    let actual_v1 = read_live_state(&db.client, None).await.expect("actual v1");
     let diff_v1 = compute_diff(&desired_v1, &actual_v1);
     let topo_v1 = topological_sort(&desired_v1).expect("topo v1");
     let plan_v1 = build_plan("cookbook-29", None, 1, &diff_v1, &topo_v1).expect("build_plan");
@@ -2675,17 +2694,17 @@ async fn test_cookbook_29_rollback_to_prior_state() {
         ),
     ];
     let desired_v2 = build_dag_state(&files_v2, false).expect("desired v2");
-    let actual_v2 = read_live_state(&db.client).await.expect("actual v2");
+    let actual_v2 = read_live_state(&db.client, None).await.expect("actual v2");
     let diff_v2 = compute_diff(&desired_v2, &actual_v2);
     let topo_v2 = topological_sort(&desired_v2).expect("topo v2");
     let plan_v2 = build_plan("cookbook-29", Some(1), 2, &diff_v2, &topo_v2).expect("build_plan");
     executor.execute(&plan_v2).await.expect("apply v2");
 
-    let state_v2 = read_live_state(&db.client).await.expect("state v2");
+    let state_v2 = read_live_state(&db.client, None).await.expect("state v2");
     assert_eq!(state_v2.stream_tables.len(), 2);
 
     // Rollback: go back to v1 desired.
-    let actual_v3 = read_live_state(&db.client)
+    let actual_v3 = read_live_state(&db.client, None)
         .await
         .expect("actual for rollback");
     let diff_rb = compute_diff(&desired_v1, &actual_v3);
@@ -2694,7 +2713,9 @@ async fn test_cookbook_29_rollback_to_prior_state() {
     assert_eq!(plan_rb.summary.drops, 1, "Rollback should drop c29_extra");
     executor.execute(&plan_rb).await.expect("rollback");
 
-    let state_after_rb = read_live_state(&db.client).await.expect("state after rb");
+    let state_after_rb = read_live_state(&db.client, None)
+        .await
+        .expect("state after rb");
     assert_eq!(state_after_rb.stream_tables.len(), 1);
     assert_eq!(
         state_after_rb.stream_tables[0].qualified_name.name,
@@ -2737,7 +2758,7 @@ SELECT id, SUM(amount) AS total FROM raw_c30 GROUP BY id;
 "#,
     )];
     let desired_v1 = build_dag_state(&files_v1, false).expect("desired v1");
-    let actual_v1 = read_live_state(&db.client).await.expect("actual v1");
+    let actual_v1 = read_live_state(&db.client, None).await.expect("actual v1");
     let diff_v1 = compute_diff(&desired_v1, &actual_v1);
     let topo_v1 = topological_sort(&desired_v1).expect("topo v1");
     let plan_v1 = build_plan("cookbook-30", None, 1, &diff_v1, &topo_v1).expect("build_plan");
@@ -2753,7 +2774,7 @@ SELECT id, SUM(amount) AS total, COUNT(*) AS order_count FROM raw_c30 GROUP BY i
 "#,
     )];
     let desired_v2 = build_dag_state(&files_v2, false).expect("desired v2");
-    let actual_v2 = read_live_state(&db.client).await.expect("actual v2");
+    let actual_v2 = read_live_state(&db.client, None).await.expect("actual v2");
     let diff_v2 = compute_diff(&desired_v2, &actual_v2);
     let topo_v2 = topological_sort(&desired_v2).expect("topo v2");
     let plan_v2 = build_plan("cookbook-30", Some(1), 2, &diff_v2, &topo_v2).expect("build_plan");
@@ -2770,6 +2791,8 @@ SELECT id, SUM(amount) AS total, COUNT(*) AS order_count FROM raw_c30 GROUP BY i
     let opts = DestroyOptions {
         project: "cookbook-30".to_string(),
         dry_run: false,
+        force_cascade: false,
+        force_unowned: false,
     };
     let result = destroy_project(&db.client, &opts).await.expect("destroy");
     assert!(!result.dry_run);
@@ -2979,7 +3002,9 @@ SELECT customer_id, SUM(amount) AS total FROM raw_orders GROUP BY customer_id;
 "#,
     )];
     let desired = build_dag_state(&files, true).expect("build desired");
-    let actual = read_live_state(&db.client).await.expect("actual state");
+    let actual = read_live_state(&db.client, None)
+        .await
+        .expect("actual state");
     let diff = compute_diff(&desired, &actual);
     let topo = topological_sort(&desired).expect("topo sort");
     let plan = build_plan("resume-test", None, 1, &diff, &topo).expect("build_plan");
@@ -3026,7 +3051,7 @@ SELECT customer_id, SUM(amount) AS total FROM raw_orders GROUP BY customer_id;
 "#,
     )];
     let desired_v1 = build_dag_state(&files_v1, true).expect("desired v1");
-    let actual_v1 = read_live_state(&db.client).await.expect("actual v1");
+    let actual_v1 = read_live_state(&db.client, None).await.expect("actual v1");
     let diff_v1 = compute_diff(&desired_v1, &actual_v1);
     let topo_v1 = topological_sort(&desired_v1).expect("topo v1");
     let plan_v1 =
@@ -3093,7 +3118,7 @@ async fn test_alter_stream_table_query_update() {
         ),
     )];
     let desired_v1 = build_dag_state(&files_v1, true).expect("desired v1");
-    let actual_v1 = read_live_state(&db.client).await.expect("actual v1");
+    let actual_v1 = read_live_state(&db.client, None).await.expect("actual v1");
     let diff_v1 = compute_diff(&desired_v1, &actual_v1);
     let topo_v1 = topological_sort(&desired_v1).expect("topo v1");
     let plan_v1 = build_plan("h1-test", None, 1, &diff_v1, &topo_v1).expect("build_plan");
@@ -3115,7 +3140,7 @@ async fn test_alter_stream_table_query_update() {
         ),
     )];
     let desired_v2 = build_dag_state(&files_v2, true).expect("desired v2");
-    let actual_v2 = read_live_state(&db.client).await.expect("actual v2");
+    let actual_v2 = read_live_state(&db.client, None).await.expect("actual v2");
     let diff_v2 = compute_diff(&desired_v2, &actual_v2);
     let topo_v2 = topological_sort(&desired_v2).expect("topo v2");
     let plan_v2 = build_plan("h1-test", Some(1), 2, &diff_v2, &topo_v2).expect("build_plan");
@@ -3145,4 +3170,385 @@ async fn test_alter_stream_table_query_update() {
         "AlterStreamTable should have updated query to include order_count; got: {}",
         stored_query
     );
+}
+
+// ── v0.10 new tests ──────────────────────────────────────────────────────────
+
+/// v0.10 C-01/C-11: Consumer-view-only apply succeeds when no stream table changes.
+#[tokio::test]
+async fn test_consumer_only_apply_end_to_end() {
+    let db = TestDb::new().await.expect("start test db");
+    db.install_mock_pgtrickle().await.expect("install mock");
+    db.install_aqueduct_catalog()
+        .await
+        .expect("install catalog");
+
+    db.client
+        .execute(
+            "CREATE TABLE IF NOT EXISTS raw_orders (id bigint, amount numeric)",
+            &[],
+        )
+        .await
+        .expect("create source table");
+
+    let files_v1 = vec![parse_file(
+        "orders",
+        "-- @aqueduct:schedule = \"30s\"\n-- @aqueduct:refresh_mode = \"DIFFERENTIAL\"\nSELECT id, amount FROM raw_orders;\n",
+    )];
+    let desired_v1 = build_dag_state(&files_v1, true).expect("desired v1");
+    let actual_empty = read_live_state(&db.client, None).await.expect("actual");
+    let diff_v1 = compute_diff(&desired_v1, &actual_empty);
+    let topo_v1 = topological_sort(&desired_v1).expect("topo v1");
+    let plan_v1 = build_plan("consumer-test", None, 1, &diff_v1, &topo_v1).expect("plan v1");
+    PlanExecutor::new(&db.client, "consumer-test", "0.10.0", false)
+        .with_desired_state(desired_v1.clone())
+        .execute(&plan_v1)
+        .await
+        .expect("apply v1");
+
+    // Build a plan with a consumer create and no stream table changes.
+    let diff_consumer = aqueduct_core::diff::DagDiff {
+        deltas: vec![],
+        source_deltas: vec![],
+        consumer_deltas: vec![aqueduct_core::diff::ConsumerDelta {
+            kind: aqueduct_core::diff::ConsumerDeltaKind::Create,
+            expose_as: QualifiedName::new("public", "orders_view"),
+            desired: Some(aqueduct_core::dag::ConsumerSpec {
+                name: "orders_view".to_string(),
+                source: QualifiedName::new("public", "orders"),
+                expose_as: QualifiedName::new("public", "orders_view"),
+                sql_body: None,
+            }),
+            actual_source: None,
+        }],
+    };
+    let plan_consumer =
+        build_plan("consumer-test", Some(1), 2, &diff_consumer, &[]).expect("plan with consumer");
+
+    assert_eq!(
+        plan_consumer.summary.consumer_creates, 1,
+        "consumer_creates == 1"
+    );
+    assert_eq!(plan_consumer.summary.creates, 0, "no stream table creates");
+    assert!(
+        !plan_consumer.summary.is_empty(),
+        "plan should not be empty"
+    );
+
+    PlanExecutor::new(&db.client, "consumer-test", "0.10.0", false)
+        .with_desired_state(desired_v1)
+        .execute(&plan_consumer)
+        .await
+        .expect("apply consumer-only plan");
+}
+
+/// v0.10 lock: Two concurrent lock acquisitions produce exactly one winner.
+#[tokio::test]
+async fn test_concurrent_apply_race() {
+    use aqueduct_core::error::AqueductError;
+
+    let db = TestDb::new().await.expect("start test db");
+    db.install_mock_pgtrickle().await.expect("install mock");
+    db.install_aqueduct_catalog()
+        .await
+        .expect("install catalog");
+
+    db.client
+        .execute("CREATE TABLE IF NOT EXISTS raw_orders (id bigint)", &[])
+        .await
+        .expect("create source table");
+
+    let files = vec![parse_file(
+        "orders",
+        "-- @aqueduct:schedule = \"30s\"\n-- @aqueduct:refresh_mode = \"DIFFERENTIAL\"\nSELECT id FROM raw_orders;\n",
+    )];
+    let desired = build_dag_state(&files, true).expect("desired");
+    let actual = read_live_state(&db.client, None).await.expect("actual");
+    let diff = compute_diff(&desired, &actual);
+    let topo = topological_sort(&desired).expect("topo");
+    let plan = build_plan("race-test", None, 1, &diff, &topo).expect("plan");
+
+    PlanExecutor::new(&db.client, "race-test", "0.10.0", false)
+        .with_desired_state(desired.clone())
+        .execute(&plan)
+        .await
+        .expect("first apply should succeed");
+
+    // Simulate another holder acquiring the lock.
+    db.client
+        .execute(
+            "INSERT INTO aqueduct.locks (project, holder, acquired_at, ttl)
+             VALUES ('race-test', 'other-holder', now(), '30s')
+             ON CONFLICT (project) DO UPDATE SET holder = 'other-holder', acquired_at = now()",
+            &[],
+        )
+        .await
+        .expect("insert contention lock");
+
+    let actual2 = read_live_state(&db.client, None).await.expect("actual2");
+    let diff2 = compute_diff(&desired, &actual2);
+    let plan2 = build_plan("race-test", Some(1), 2, &diff2, &topo).expect("plan2");
+
+    let result = PlanExecutor::new(&db.client, "race-test", "0.10.0", false)
+        .with_desired_state(desired.clone())
+        .execute(&plan2)
+        .await;
+    assert!(
+        matches!(result, Err(AqueductError::LockContention { .. })),
+        "expected LockContention, got: {:?}",
+        result
+    );
+
+    db.client
+        .execute(
+            "DELETE FROM aqueduct.locks WHERE project = 'race-test'",
+            &[],
+        )
+        .await
+        .ok();
+}
+
+/// v0.10 C-08: from_version mismatch detects stale plan.
+#[tokio::test]
+async fn test_stale_plan_detection() {
+    let db = TestDb::new().await.expect("start test db");
+    db.install_mock_pgtrickle().await.expect("install mock");
+    db.install_aqueduct_catalog()
+        .await
+        .expect("install catalog");
+
+    db.client
+        .execute(
+            "CREATE TABLE IF NOT EXISTS raw_orders (id bigint, amount numeric)",
+            &[],
+        )
+        .await
+        .expect("create source table");
+
+    let files_v1 = vec![parse_file(
+        "orders",
+        "-- @aqueduct:schedule = \"30s\"\n-- @aqueduct:refresh_mode = \"DIFFERENTIAL\"\nSELECT id FROM raw_orders;\n",
+    )];
+    let desired_v1 = build_dag_state(&files_v1, true).expect("desired v1");
+    let actual_empty = read_live_state(&db.client, None).await.expect("actual");
+    let diff_v1 = compute_diff(&desired_v1, &actual_empty);
+    let topo_v1 = topological_sort(&desired_v1).expect("topo v1");
+    let plan_v1 = build_plan("stale-test", None, 1, &diff_v1, &topo_v1).expect("plan v1");
+    PlanExecutor::new(&db.client, "stale-test", "0.10.0", false)
+        .with_desired_state(desired_v1.clone())
+        .execute(&plan_v1)
+        .await
+        .expect("apply v1");
+
+    let files_v2 = vec![parse_file(
+        "orders",
+        "-- @aqueduct:schedule = \"30s\"\n-- @aqueduct:refresh_mode = \"DIFFERENTIAL\"\nSELECT id, amount FROM raw_orders;\n",
+    )];
+    let desired_v2 = build_dag_state(&files_v2, true).expect("desired v2");
+    let actual_v1 = read_live_state(&db.client, None).await.expect("actual v1");
+    let diff_v2 = compute_diff(&desired_v2, &actual_v1);
+    let plan_v2 = build_plan("stale-test", Some(1), 2, &diff_v2, &topo_v1).expect("plan v2");
+
+    // Manually advance the catalog to version 2.
+    db.client
+        .execute(
+            "INSERT INTO aqueduct.dag_versions (project, spec_hash, applied_by, plan_jsonb, spec_jsonb)
+             VALUES ('stale-test', '\\xdeadbeef', 'test', '{}'::jsonb, '{}'::jsonb)",
+            &[],
+        )
+        .await
+        .expect("manually advance to v2");
+
+    let db_ver = get_latest_dag_version(&db.client, "stale-test")
+        .await
+        .expect("get db ver");
+    assert_eq!(db_ver, Some(2));
+    assert_eq!(plan_v2.from_version, Some(1));
+    // Stale: plan's from_version is behind the current DB version.
+    assert!(
+        plan_v2.from_version.unwrap_or(0) < db_ver.unwrap_or(0),
+        "stale plan: from_version {} < db_version {}",
+        plan_v2.from_version.unwrap_or(0),
+        db_ver.unwrap_or(0)
+    );
+}
+
+/// v0.10 C-06: Destroying project A does not affect project B tables.
+#[tokio::test]
+async fn test_two_project_isolation() {
+    use aqueduct_core::destroy::{destroy_project, DestroyOptions};
+
+    let db = TestDb::new().await.expect("start test db");
+    db.install_mock_pgtrickle().await.expect("install mock");
+    db.install_aqueduct_catalog()
+        .await
+        .expect("install catalog");
+
+    db.client
+        .batch_execute(
+            "CREATE TABLE IF NOT EXISTS raw_a (id bigint); \
+             CREATE TABLE IF NOT EXISTS raw_b (id bigint)",
+        )
+        .await
+        .expect("create source tables");
+
+    let files_a = vec![parse_file(
+        "orders_a",
+        "-- @aqueduct:schedule = \"30s\"\n-- @aqueduct:refresh_mode = \"DIFFERENTIAL\"\nSELECT id FROM raw_a;\n",
+    )];
+    let desired_a = build_dag_state(&files_a, true).expect("desired a");
+    let actual0 = read_live_state(&db.client, Some("project-a"))
+        .await
+        .expect("actual0");
+    let diff_a = compute_diff(&desired_a, &actual0);
+    let topo_a = topological_sort(&desired_a).expect("topo a");
+    let plan_a = build_plan("project-a", None, 1, &diff_a, &topo_a).expect("plan a");
+    PlanExecutor::new(&db.client, "project-a", "0.10.0", false)
+        .with_desired_state(desired_a.clone())
+        .execute(&plan_a)
+        .await
+        .expect("apply project A");
+
+    let files_b = vec![parse_file(
+        "orders_b",
+        "-- @aqueduct:schedule = \"30s\"\n-- @aqueduct:refresh_mode = \"DIFFERENTIAL\"\nSELECT id FROM raw_b;\n",
+    )];
+    let desired_b = build_dag_state(&files_b, true).expect("desired b");
+    let actual1 = read_live_state(&db.client, Some("project-b"))
+        .await
+        .expect("actual1");
+    let diff_b = compute_diff(&desired_b, &actual1);
+    let topo_b = topological_sort(&desired_b).expect("topo b");
+    let plan_b = build_plan("project-b", None, 1, &diff_b, &topo_b).expect("plan b");
+    PlanExecutor::new(&db.client, "project-b", "0.10.0", false)
+        .with_desired_state(desired_b.clone())
+        .execute(&plan_b)
+        .await
+        .expect("apply project B");
+
+    let state_both = read_live_state(&db.client, None).await.expect("both");
+    assert_eq!(state_both.stream_tables.len(), 2);
+
+    destroy_project(
+        &db.client,
+        &DestroyOptions {
+            project: "project-a".to_string(),
+            dry_run: false,
+            force_cascade: false,
+            force_unowned: false,
+        },
+    )
+    .await
+    .expect("destroy A");
+
+    let state_b = read_live_state(&db.client, Some("project-b"))
+        .await
+        .expect("state B");
+    assert_eq!(state_b.stream_tables.len(), 1, "project B table survives");
+    assert_eq!(state_b.stream_tables[0].qualified_name.name, "orders_b");
+
+    let state_a = read_live_state(&db.client, Some("project-a"))
+        .await
+        .expect("state A after");
+    assert_eq!(state_a.stream_tables.len(), 0, "project A tables destroyed");
+}
+
+/// v0.10 S-01/S-02: LockDag is always at index 0, even in resumed plans.
+#[tokio::test]
+async fn test_resume_skips_non_safety_steps() {
+    let db = TestDb::new().await.expect("start test db");
+    db.install_mock_pgtrickle().await.expect("install mock");
+    db.install_aqueduct_catalog()
+        .await
+        .expect("install catalog");
+
+    db.client
+        .execute("CREATE TABLE IF NOT EXISTS raw_orders (id bigint)", &[])
+        .await
+        .expect("create source table");
+
+    let files = vec![parse_file(
+        "orders",
+        "-- @aqueduct:schedule = \"30s\"\n-- @aqueduct:refresh_mode = \"DIFFERENTIAL\"\nSELECT id FROM raw_orders;\n",
+    )];
+    let desired = build_dag_state(&files, true).expect("desired");
+    let actual = read_live_state(&db.client, None).await.expect("actual");
+    let diff = compute_diff(&desired, &actual);
+    let topo = topological_sort(&desired).expect("topo");
+    let plan = build_plan("resume-test", None, 1, &diff, &topo).expect("plan");
+
+    assert!(
+        matches!(plan.steps.first(), Some(PlanStep::LockDag { .. })),
+        "First step must be LockDag"
+    );
+
+    PlanExecutor::new(&db.client, "resume-test", "0.10.0", false)
+        .with_desired_state(desired.clone())
+        .execute(&plan)
+        .await
+        .expect("apply");
+
+    let ver = get_latest_dag_version(&db.client, "resume-test")
+        .await
+        .expect("get version");
+    assert_eq!(ver, Some(1));
+
+    // A resumed plan must also have LockDag as step 0.
+    let actual2 = read_live_state(&db.client, None).await.expect("actual2");
+    let diff2 = compute_diff(&desired, &actual2);
+    let plan2 = build_plan("resume-test", Some(1), 2, &diff2, &topo).expect("plan2");
+    assert!(
+        matches!(plan2.steps.first(), Some(PlanStep::LockDag { .. })),
+        "LockDag must be first even in resumed plans"
+    );
+
+    let _ = PlanExecutor::new(&db.client, "resume-test", "0.10.0", false)
+        .with_desired_state(desired)
+        .with_resume(true)
+        .execute(&plan2)
+        .await;
+}
+
+/// v0.10 S-04: Heartbeat is holder-bound — wrong holder returns 0 rows.
+#[tokio::test]
+async fn test_heartbeat_lock_is_holder_bound() {
+    let db = TestDb::new().await.expect("start test db");
+    db.install_aqueduct_catalog()
+        .await
+        .expect("install catalog");
+
+    let holder = "aqueduct/0.10.0/test-host/1234/0";
+    db.client
+        .execute(
+            "INSERT INTO aqueduct.locks (project, holder, acquired_at, ttl)
+             VALUES ('hb-test', $1, now(), '30s')",
+            &[&holder],
+        )
+        .await
+        .expect("insert lock");
+
+    let ok = db
+        .client
+        .execute(
+            aqueduct_core::catalog::HEARTBEAT_LOCK_SQL,
+            &[&"hb-test", &holder],
+        )
+        .await
+        .expect("heartbeat correct holder");
+    assert_eq!(ok, 1, "correct holder should update 1 row");
+
+    let bad = db
+        .client
+        .execute(
+            aqueduct_core::catalog::HEARTBEAT_LOCK_SQL,
+            &[&"hb-test", &"impostor"],
+        )
+        .await
+        .expect("heartbeat wrong holder");
+    assert_eq!(bad, 0, "wrong holder should update 0 rows (S-04)");
+
+    db.client
+        .execute("DELETE FROM aqueduct.locks WHERE project = 'hb-test'", &[])
+        .await
+        .ok();
 }

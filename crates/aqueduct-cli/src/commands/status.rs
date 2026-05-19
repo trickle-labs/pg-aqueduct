@@ -79,7 +79,7 @@ async fn poll_once(
 
     // H8: compute real drift count by comparing desired state to live state.
     let drift_count: usize = {
-        let live_result = aqueduct_core::live_state::read_live_state(client).await;
+        let live_result = aqueduct_core::live_state::read_live_state(client, None).await;
         match (|| -> anyhow::Result<_> {
             let files = aqueduct_core::parser::load_migrations(project_dir, &Default::default())?;
             let desired = aqueduct_core::dag::build_dag_state(&files, true)?;

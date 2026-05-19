@@ -114,7 +114,7 @@ async fn test_end_to_end_lifecycle() {
         aqueduct_core::parser::load_migrations(tmp.path(), &std::collections::HashMap::new())
             .unwrap();
     let desired = aqueduct_core::dag::build_dag_state(&files, true).unwrap();
-    let actual = aqueduct_core::live_state::read_live_state(&db.client)
+    let actual = aqueduct_core::live_state::read_live_state(&db.client, None)
         .await
         .unwrap();
     let diff = aqueduct_core::diff::compute_diff(&desired, &actual);
@@ -138,7 +138,7 @@ async fn test_end_to_end_lifecycle() {
     assert_eq!(count, 1);
 
     // Plan again: should be a no-op.
-    let actual2 = aqueduct_core::live_state::read_live_state(&db.client)
+    let actual2 = aqueduct_core::live_state::read_live_state(&db.client, None)
         .await
         .unwrap();
     let diff2 = aqueduct_core::diff::compute_diff(&desired, &actual2);
@@ -161,7 +161,7 @@ async fn test_plan_renderer() {
     .unwrap();
 
     let desired = aqueduct_core::dag::build_dag_state(&[file], false).unwrap();
-    let actual = aqueduct_core::live_state::read_live_state(&db.client)
+    let actual = aqueduct_core::live_state::read_live_state(&db.client, None)
         .await
         .unwrap();
     let diff = aqueduct_core::diff::compute_diff(&desired, &actual);
@@ -366,7 +366,7 @@ async fn test_plan_renderer_with_cost() {
     .unwrap();
 
     let desired = aqueduct_core::dag::build_dag_state(&[file], false).unwrap();
-    let actual = aqueduct_core::live_state::read_live_state(&db.client)
+    let actual = aqueduct_core::live_state::read_live_state(&db.client, None)
         .await
         .unwrap();
     let diff = aqueduct_core::diff::compute_diff(&desired, &actual);
@@ -409,7 +409,7 @@ SELECT customer_id, total FROM public.order_totals;
     let desired = aqueduct_core::dag::build_dag_state(&[consumer_file], false).unwrap();
     assert_eq!(desired.consumers.len(), 1);
 
-    let actual = aqueduct_core::live_state::read_live_state(&db.client)
+    let actual = aqueduct_core::live_state::read_live_state(&db.client, None)
         .await
         .unwrap();
     let diff = aqueduct_core::diff::compute_diff(&desired, &actual);
@@ -952,6 +952,8 @@ fn test_destroy_options_dry_run_flag() {
     let opts = DestroyOptions {
         project: "my-project".to_string(),
         dry_run: true,
+        force_cascade: false,
+        force_unowned: false,
     };
     assert!(opts.dry_run);
 }
@@ -1081,7 +1083,7 @@ async fn test_destroy_project_dry_run_cli() {
     .unwrap();
 
     let desired = aqueduct_core::dag::build_dag_state(&[file], false).unwrap();
-    let actual = aqueduct_core::live_state::read_live_state(&db.client)
+    let actual = aqueduct_core::live_state::read_live_state(&db.client, None)
         .await
         .unwrap();
     let diff = aqueduct_core::diff::compute_diff(&desired, &actual);
@@ -1095,6 +1097,8 @@ async fn test_destroy_project_dry_run_cli() {
     let opts = DestroyOptions {
         project: "destroy-cli-test".to_string(),
         dry_run: true,
+        force_cascade: false,
+        force_unowned: false,
     };
     let result = destroy_project(&db.client, &opts).await.unwrap();
 
@@ -1117,9 +1121,9 @@ fn test_allow_full_refresh_false_enforcement() {
     use aqueduct_core::diff::{DagDiff, DeltaKind, NodeDelta};
     use aqueduct_core::plan::build_plan;
 
-    let spec = StreamTableSpec {
+    let desired_spec = StreamTableSpec {
         qualified_name: QualifiedName::new("public", "t"),
-        query: "SELECT 1 AS x".to_string(),
+        query: "SELECT id AS user_id FROM t".to_string(),
         refresh_mode: RefreshMode::Differential,
         schedule: "30s".to_string(),
         cdc_mode: None,
@@ -1127,11 +1131,16 @@ fn test_allow_full_refresh_false_enforcement() {
         depends_on: vec![],
         cypher_source: None,
     };
+    let actual_spec = StreamTableSpec {
+        query: "SELECT id FROM t".to_string(),
+        ..desired_spec.clone()
+    };
+    // Column rename: same count, different alias → classifies as Rebuild (S-12).
     let delta = NodeDelta {
         qualified_name: QualifiedName::new("public", "t"),
-        kind: DeltaKind::Create,
-        desired: Some(spec),
-        actual: None,
+        kind: DeltaKind::AlterQuery,
+        desired: Some(desired_spec),
+        actual: Some(actual_spec),
     };
     let diff = DagDiff {
         deltas: vec![delta],

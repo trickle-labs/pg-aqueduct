@@ -65,6 +65,22 @@ pub enum AqueductError {
     #[error("Invalid secret path '{path}': must be within the allowed root")]
     InvalidSecretPath { path: String },
 
+    /// Returned when the lock heartbeat confirms the lock was lost mid-migration.
+    #[error("Lock lost mid-migration: the project lock was stolen or expired")]
+    LockLost,
+
+    /// Returned when a rollback plan contains Rebuild-class steps and
+    /// `--accept-data-loss` was not passed.
+    #[error("Rollback would cause data loss. Pass --accept-data-loss to proceed.")]
+    DataLossRequired,
+
+    /// Returned when `destroy` cannot verify ownership and `--force-unowned`
+    /// was not passed.
+    #[error(
+        "Cannot verify ownership for stream table '{table}'. Pass --force-unowned to proceed."
+    )]
+    OwnershipRequired { table: String },
+
     #[error("{0}")]
     Other(String),
 }

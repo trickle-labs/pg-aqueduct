@@ -115,7 +115,7 @@ pub async fn run(args: RollbackArgs) -> anyhow::Result<()> {
         let files = aqueduct_core::parser::load_migrations(&args.project_dir, &vars)?;
         aqueduct_core::dag::build_dag_state(&files, true)?
     };
-    let actual = read_live_state(&client).await?;
+    let actual = read_live_state(&client, Some(&project_name)).await?;
 
     let next_version = current_v + 1;
     let diff = compute_diff(&desired, &actual);
@@ -128,6 +128,24 @@ pub async fn run(args: RollbackArgs) -> anyhow::Result<()> {
             target_version
         );
         return Ok(());
+    }
+
+    // S-11: If the rollback plan includes destructive (rebuild) steps, require
+    // --accept-data-loss to proceed.
+    if plan.summary.rebuild_count > 0 && !args.accept_data_loss {
+        let lossy_changes: Vec<_> = plan
+            .summary
+            .changes
+            .iter()
+            .filter(|c| c.class == "rebuild")
+            .map(|c| format!("  {} {} ({})", c.symbol, c.name, c.description))
+            .collect();
+        return Err(anyhow::anyhow!(
+            "Rollback would cause data loss for {} rebuild-class change(s):\n{}\n\n\
+             Pass --accept-data-loss to proceed.",
+            plan.summary.rebuild_count,
+            lossy_changes.join("\n")
+        ));
     }
 
     println!(

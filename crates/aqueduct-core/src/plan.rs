@@ -261,19 +261,55 @@ pub struct Plan {
 /// Summary statistics for a plan.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PlanSummary {
+    /// Stream tables created (first-time deployment).
     pub creates: usize,
+    /// Stream tables dropped.
     pub drops: usize,
+    /// Stream tables altered (schedule, refresh_mode, query, etc.).
     pub alters: usize,
+    /// Count of Free-class changes.
     pub free_count: usize,
+    /// Count of In-place-class changes.
     pub in_place_count: usize,
+    /// Count of Rebuild-class changes on EXISTING tables (not fresh creates).
+    /// First-time creates do NOT increment this counter to avoid false-positive
+    /// maintenance-window and allow_full_refresh enforcement.
     pub rebuild_count: usize,
+    /// Count of Blue/green-class changes.
     pub blue_green_count: usize,
+    /// Count of first-time stream table creations (same as `creates`; separate
+    /// from `rebuild_count` so maintenance-window enforcement is not triggered
+    /// by initial deployments).
+    pub create_count: usize,
+    /// Count of destructive operations (drops + rebuild-class alters).
+    pub destructive_count: usize,
+    /// Consumer views created.
+    pub consumer_creates: usize,
+    /// Consumer views dropped.
+    pub consumer_drops: usize,
+    /// Consumer views altered.
+    pub consumer_alters: usize,
     pub changes: Vec<PlanChange>,
 }
 
 impl PlanSummary {
     pub fn is_empty(&self) -> bool {
-        self.creates == 0 && self.drops == 0 && self.alters == 0
+        self.creates == 0
+            && self.drops == 0
+            && self.alters == 0
+            && self.consumer_creates == 0
+            && self.consumer_drops == 0
+            && self.consumer_alters == 0
+    }
+
+    /// Total number of non-bookkeeping changes across all delta kinds.
+    pub fn total_changes(&self) -> usize {
+        self.creates
+            + self.drops
+            + self.alters
+            + self.consumer_creates
+            + self.consumer_drops
+            + self.consumer_alters
     }
 }
 
@@ -407,6 +443,7 @@ pub fn build_plan(
 
             summary.alters += 1;
             summary.rebuild_count += source_delta.cascade_impacts.len();
+            summary.destructive_count += source_delta.cascade_impacts.len();
             summary.changes.push(PlanChange {
                 symbol: "~".to_string(),
                 name: source_delta.qualified_name.to_string(),
@@ -525,13 +562,19 @@ pub fn build_plan(
                 }
 
                 steps.push(PlanStep::CreateStreamTable { spec: spec.clone() });
+                // Backfill is triggered by pg_trickle on table creation — no
+                // explicit wait in this version. The step is emitted for
+                // completeness but the executor marks it as a no-op.
                 steps.push(PlanStep::Backfill {
                     name: spec.qualified_name.clone(),
                     mode: spec.refresh_mode.to_string(),
                 });
 
+                // First-time creates go into `creates` and `create_count`
+                // but NOT into `rebuild_count` to avoid false-positive
+                // maintenance-window and allow_full_refresh enforcement.
                 summary.creates += 1;
-                summary.rebuild_count += 1;
+                summary.create_count += 1;
                 summary.changes.push(PlanChange {
                     symbol: change_symbol.to_string(),
                     name: delta.qualified_name.to_string(),
@@ -545,7 +588,7 @@ pub fn build_plan(
                     cascade: false,
                 });
                 summary.drops += 1;
-                summary.rebuild_count += 1;
+                summary.destructive_count += 1;
                 summary.changes.push(PlanChange {
                     symbol: change_symbol.to_string(),
                     name: delta.qualified_name.to_string(),
@@ -600,6 +643,7 @@ pub fn build_plan(
                     });
                     summary.alters += 1;
                     summary.rebuild_count += 1;
+                    summary.destructive_count += 1;
                 } else {
                     steps.push(PlanStep::AlterStreamTable {
                         name: delta.qualified_name.clone(),
@@ -691,6 +735,7 @@ pub fn build_plan(
                         });
                         summary.alters += 1;
                         summary.rebuild_count += 1;
+                        summary.destructive_count += 1;
                     }
                 }
 
@@ -724,6 +769,13 @@ pub fn build_plan(
             ConsumerDeltaKind::Drop => "drop",
             ConsumerDeltaKind::Unchanged => continue,
         };
+        // Update consumer counters.
+        match action {
+            "create" => summary.consumer_creates += 1,
+            "alter" => summary.consumer_alters += 1,
+            "drop" => summary.consumer_drops += 1,
+            _ => {}
+        }
         if let Some(spec) = &consumer_delta.desired {
             consumer_steps.push(PlanStep::ManageConsumerView {
                 spec: spec.clone(),

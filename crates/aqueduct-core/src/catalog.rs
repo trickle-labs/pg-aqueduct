@@ -1,7 +1,7 @@
 /// SQL statements for bootstrapping the aqueduct catalog schema.
 /// These are embedded directly in the binary via include_str!() in a real deployment;
 /// for v0.1 we keep them as a constant in this module.
-pub const CATALOG_SCHEMA_VERSION: u32 = 2;
+pub const CATALOG_SCHEMA_VERSION: u32 = 3;
 
 /// The SQL to create the aqueduct catalog schema (v1, baseline).
 pub const CATALOG_INIT_SQL: &str = r#"
@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS aqueduct.migrations (
     progress        jsonb NOT NULL DEFAULT '{}',
     cli_version     text,
     plan_format_version int NOT NULL DEFAULT 1,
-    CONSTRAINT status_check CHECK (status IN ('running', 'committed', 'failed', 'rolled_back'))
+    CONSTRAINT status_check CHECK (status IN ('running', 'committed', 'failed', 'rolled_back', 'recoverable_failure'))
 );
 
 -- Serialises concurrent apply runs per project.
@@ -108,8 +108,38 @@ SET value_jsonb = '2'::jsonb, measured_at = now()
 WHERE key = 'catalog_schema_version';
 "#;
 
+/// Catalog migration from v2 to v3: adds stream_table_ownership table and
+/// recoverable_failure status for the migrations table.
+pub const CATALOG_MIGRATE_V2_TO_V3_SQL: &str = r#"
+-- Multi-project ownership registry: tracks which project owns each stream table.
+-- Populated on CreateStreamTable, removed on DropStreamTable.
+CREATE TABLE IF NOT EXISTS aqueduct.stream_table_ownership (
+    project      text        NOT NULL,
+    schema_name  text        NOT NULL,
+    table_name   text        NOT NULL,
+    managed_since timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (schema_name, table_name)
+);
+
+-- Add recoverable_failure status to migrations constraint.
+-- We add the value by temporarily dropping and recreating the constraint.
+ALTER TABLE aqueduct.migrations DROP CONSTRAINT IF EXISTS status_check;
+ALTER TABLE aqueduct.migrations
+    ADD CONSTRAINT status_check
+    CHECK (status IN ('running', 'committed', 'failed', 'rolled_back', 'recoverable_failure'));
+
+-- Bump catalog version to 3.
+UPDATE aqueduct.cluster_profile
+SET value_jsonb = '3'::jsonb, measured_at = now()
+WHERE key = 'catalog_schema_version';
+"#;
+
 /// Combined init SQL for fresh installations (creates v2 schema directly).
-pub const CATALOG_INIT_V2_SQL: &str = r#"
+/// Kept for backward-compatibility; new code should use CATALOG_INIT_V3_SQL.
+pub const CATALOG_INIT_V2_SQL: &str = CATALOG_INIT_V3_SQL;
+
+/// Combined init SQL for fresh installations (creates v3 schema directly).
+pub const CATALOG_INIT_V3_SQL: &str = r#"
 CREATE SCHEMA IF NOT EXISTS aqueduct;
 
 -- Records a full snapshot of the DAG spec at each successful apply.
@@ -136,7 +166,7 @@ CREATE TABLE IF NOT EXISTS aqueduct.migrations (
     progress        jsonb NOT NULL DEFAULT '{}',
     cli_version     text,
     plan_format_version int NOT NULL DEFAULT 1,
-    CONSTRAINT status_check CHECK (status IN ('running', 'committed', 'failed', 'rolled_back'))
+    CONSTRAINT status_check CHECK (status IN ('running', 'committed', 'failed', 'rolled_back', 'recoverable_failure'))
 );
 
 -- Serialises concurrent apply runs per project.
@@ -196,9 +226,19 @@ CREATE TABLE IF NOT EXISTS aqueduct.blue_green_deployments (
     CONSTRAINT bg_status_check CHECK (status IN ('active', 'swapped', 'retired', 'failed'))
 );
 
+-- Multi-project ownership registry: tracks which project owns each stream table.
+-- Populated on CreateStreamTable, removed on DropStreamTable.
+CREATE TABLE IF NOT EXISTS aqueduct.stream_table_ownership (
+    project       text        NOT NULL,
+    schema_name   text        NOT NULL,
+    table_name    text        NOT NULL,
+    managed_since timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (schema_name, table_name)
+);
+
 -- Record the catalog schema version.
 INSERT INTO aqueduct.cluster_profile (key, value_jsonb, measured_at)
-VALUES ('catalog_schema_version', '2'::jsonb, now())
+VALUES ('catalog_schema_version', '3'::jsonb, now())
 ON CONFLICT (key) DO NOTHING;
 "#;
 
@@ -305,8 +345,10 @@ UPDATE aqueduct.migrations SET progress = $2 WHERE id = $1
 "#;
 
 /// SQL to renew (heartbeat) a lock by updating acquired_at.
+/// Includes holder check so a different process cannot renew a lock it doesn't own.
 pub const HEARTBEAT_LOCK_SQL: &str = r#"
-UPDATE aqueduct.locks SET acquired_at = now() WHERE project = $1
+UPDATE aqueduct.locks SET acquired_at = now()
+WHERE project = $1 AND holder = $2
 "#;
 
 /// SQL to look up the running migration for a project and return its progress.
@@ -316,6 +358,42 @@ FROM aqueduct.migrations
 WHERE project = $1 AND status = 'running'
 ORDER BY started_at DESC
 LIMIT 1
+"#;
+
+/// SQL to look up running OR recoverable_failure migrations for resume.
+pub const GET_RUNNING_OR_RECOVERABLE_MIGRATION_SQL: &str = r#"
+SELECT id, progress, plan
+FROM aqueduct.migrations
+WHERE project = $1 AND status IN ('running', 'recoverable_failure')
+ORDER BY started_at DESC
+LIMIT 1
+"#;
+
+/// SQL to register stream table ownership.
+pub const REGISTER_OWNERSHIP_SQL: &str = r#"
+INSERT INTO aqueduct.stream_table_ownership (project, schema_name, table_name, managed_since)
+VALUES ($1, $2, $3, now())
+ON CONFLICT (schema_name, table_name) DO UPDATE
+    SET project = EXCLUDED.project, managed_since = EXCLUDED.managed_since
+"#;
+
+/// SQL to deregister stream table ownership.
+pub const DEREGISTER_OWNERSHIP_SQL: &str = r#"
+DELETE FROM aqueduct.stream_table_ownership
+WHERE schema_name = $1 AND table_name = $2
+"#;
+
+/// SQL to look up the owner of a stream table.
+pub const GET_OWNERSHIP_SQL: &str = r#"
+SELECT project FROM aqueduct.stream_table_ownership
+WHERE schema_name = $1 AND table_name = $2
+"#;
+
+/// SQL to list all stream tables owned by a project.
+pub const LIST_OWNED_TABLES_SQL: &str = r#"
+SELECT schema_name, table_name FROM aqueduct.stream_table_ownership
+WHERE project = $1
+ORDER BY schema_name, table_name
 "#;
 
 /// Ensure the catalog schema is up-to-date with the compiled-in schema version.
@@ -353,6 +431,13 @@ pub async fn ensure_catalog_current(client: &tokio_postgres::Client) -> crate::e
         if current_version < 2 {
             client
                 .batch_execute(CATALOG_MIGRATE_V1_TO_V2_SQL)
+                .await
+                .map_err(|e| crate::error::AqueductError::Catalog(e.to_string()))?;
+        }
+        // Apply the v2→v3 migration if needed.
+        if current_version < 3 {
+            client
+                .batch_execute(CATALOG_MIGRATE_V2_TO_V3_SQL)
                 .await
                 .map_err(|e| crate::error::AqueductError::Catalog(e.to_string()))?;
         }

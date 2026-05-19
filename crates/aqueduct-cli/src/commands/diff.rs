@@ -52,7 +52,7 @@ pub async fn run(args: DiffArgs) -> anyhow::Result<()> {
 
     let files = load_migrations(&args.project_dir, &vars)?;
     let desired = build_dag_state(&files, true)?;
-    let actual = read_live_state(&client).await?;
+    let actual = read_live_state(&client, None).await?;
     let diff = compute_diff(&desired, &actual);
 
     // Filter to a single table if requested.
