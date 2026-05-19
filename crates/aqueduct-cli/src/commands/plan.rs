@@ -47,11 +47,20 @@ pub struct PlanArgs {
     /// Show per-step cost estimates (row count, estimated duration).
     #[arg(long)]
     pub explain_cost: bool,
+
+    /// Allow DSN with embedded plaintext password (not recommended outside CI/dev).
+    #[arg(long)]
+    pub allow_plaintext_password: bool,
 }
 
 pub async fn run(args: PlanArgs) -> anyhow::Result<()> {
-    let dsn =
-        super::resolve_dsn(args.dsn.as_deref(), args.to.as_deref(), &args.project_dir).await?;
+    let dsn = super::resolve_dsn_with_opts(
+        args.dsn.as_deref(),
+        args.to.as_deref(),
+        &args.project_dir,
+        args.allow_plaintext_password,
+    )
+    .await?;
 
     let client = connect_read_only(&dsn).await?;
 
