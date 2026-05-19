@@ -154,7 +154,10 @@ impl<'a> PlanExecutor<'a> {
 
         if self.dry_run {
             tracing::info!("Dry run: not executing plan");
-            return Ok(ExecutionResult { migration_id: 0, dag_version: plan.to_version });
+            return Ok(ExecutionResult {
+                migration_id: 0,
+                dag_version: plan.to_version,
+            });
         }
 
         // Determine starting step index when resuming.
@@ -217,13 +220,21 @@ impl<'a> PlanExecutor<'a> {
         self.client
             .execute(
                 FINISH_MIGRATION_SQL,
-                &[&migration_id, &status, &new_dag_version, &serde_json::json!({})],
+                &[
+                    &migration_id,
+                    &status,
+                    &new_dag_version,
+                    &serde_json::json!({}),
+                ],
             )
             .await
             .ok();
 
         // U-05: Return both migration_id and dag_version separately.
-        result.map(|dag_version| ExecutionResult { migration_id, dag_version })
+        result.map(|dag_version| ExecutionResult {
+            migration_id,
+            dag_version,
+        })
     }
 
     /// Find the step index to resume from by reading progress from the running

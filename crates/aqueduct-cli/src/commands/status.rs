@@ -118,10 +118,21 @@ async fn poll_once(
         "yaml" | "yml" => {
             // U-10: YAML format for status output (no serde_yaml dep needed).
             println!("project: \"{}\"", status.project);
-            println!("version: {}", status.current_version.map_or("null".to_string(), |v| v.to_string()));
+            println!(
+                "version: {}",
+                status
+                    .current_version
+                    .map_or("null".to_string(), |v| v.to_string())
+            );
             println!("stream_tables: {}", status.stream_table_count);
             println!("drift: {}", status.drift_count);
-            println!("pgtrickle_version: {}", status.pgtrickle_version.as_deref().map_or("null".to_string(), |v| format!("\"{}\"", v)));
+            println!(
+                "pgtrickle_version: {}",
+                status
+                    .pgtrickle_version
+                    .as_deref()
+                    .map_or("null".to_string(), |v| format!("\"{}\"", v))
+            );
             println!("polled_at: \"{}\"", chrono::Utc::now().to_rfc3339());
         }
         _ => {

@@ -149,10 +149,7 @@ pub async fn run(args: DiffArgs) -> anyhow::Result<()> {
                     );
                     if let (Some(desired), Some(actual)) = (&d.desired, &d.actual) {
                         if desired.schedule != actual.schedule {
-                            println!(
-                                "      schedule: {} → {}",
-                                actual.schedule, desired.schedule
-                            );
+                            println!("      schedule: {} → {}", actual.schedule, desired.schedule);
                         }
                         if desired.query.trim() != actual.query.trim() {
                             println!("      query changed");

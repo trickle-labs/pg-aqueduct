@@ -55,11 +55,7 @@ pub fn redact_dsn(dsn: &str) -> String {
 /// Connect to PostgreSQL using the given DSN.
 pub async fn connect(dsn: &str) -> Result<tokio_postgres::Client> {
     let (client, connection) = tokio_postgres::connect(dsn, NoTls).await.map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to connect to database ({}): {}",
-            redact_dsn(dsn),
-            e
-        )
+        anyhow::anyhow!("Failed to connect to database ({}): {}", redact_dsn(dsn), e)
     })?;
 
     tokio::spawn(async move {

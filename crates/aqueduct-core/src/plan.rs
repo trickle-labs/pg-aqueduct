@@ -247,7 +247,11 @@ impl PlanStep {
                 stream_table,
                 action,
             } => {
-                format!("{} WAL slot for '{}'", action.to_string().to_uppercase(), stream_table)
+                format!(
+                    "{} WAL slot for '{}'",
+                    action.to_string().to_uppercase(),
+                    stream_table
+                )
             }
             PlanStep::PauseImmediate { name } => {
                 format!("PAUSE IMMEDIATE mode for '{}'", name)
@@ -1125,10 +1129,7 @@ mod tests {
 
         for step in &steps {
             let desc = step.description();
-            assert!(
-                !desc.is_empty(),
-                "PlanStep variant has empty description()"
-            );
+            assert!(!desc.is_empty(), "PlanStep variant has empty description()");
         }
     }
 }

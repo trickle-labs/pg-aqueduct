@@ -194,7 +194,10 @@ pub async fn run(args: ApplyArgs) -> anyhow::Result<()> {
     // Also write to stderr for parsers that read the log stream.
     eprintln!("{}", serde_json::to_string(&migration_metadata)?);
 
-    println!("✓ Applied successfully. New version: v{}", result.dag_version);
+    println!(
+        "✓ Applied successfully. New version: v{}",
+        result.dag_version
+    );
     Ok(())
 }
 
