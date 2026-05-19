@@ -198,6 +198,7 @@ fn aws_signing_key(secret_key: &str, date: &str, region: &str, service: &str) ->
 
 /// Build AWS SigV4 Authorization header.
 /// Returns None when AWS credentials are not available in the environment.
+#[allow(clippy::too_many_arguments)]
 fn aws_sigv4_auth(
     method: &str,
     host: &str,
@@ -405,7 +406,7 @@ fn days_to_ymd(days: u64) -> (u32, u32, u32) {
 }
 
 fn is_leap_year(year: u32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
 // ── GCP Secret Manager HTTP client (SEC-02 / v0.12) ──────────────────────────
@@ -487,7 +488,7 @@ fn base64_decode(input: &str) -> std::result::Result<Vec<u8>, String> {
 
     let bytes: Vec<u8> = input.bytes().collect();
     for chunk in bytes.chunks(4) {
-        let a = if chunk.len() > 0 {
+        let a = if !chunk.is_empty() {
             decode_table[chunk[0] as usize]
         } else {
             0

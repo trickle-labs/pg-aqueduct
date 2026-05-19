@@ -2014,10 +2014,10 @@ implemented but use environment-variable shims. This version closes all of those
 - [x] **Add macOS x86_64 artifact to release matrix (CI-07).** Added `macos-13` (Intel)
   to the release matrix as `macos-amd64`.
 
-- [x] **Add MSRV job pinned to Rust 1.85 (CI-09).** Added `msrv` job to `ci.yml` that
-  pins `toolchain: "1.85"` and runs `cargo check --workspace`. Updated `rust-version`
-  to 1.85 (the effective MSRV given tokio-postgres 0.7 → sha2 v0.11 → block-buffer 0.12
-  which requires Cargo edition 2024, stable since Rust 1.85).
+- [x] **Add MSRV job pinned to Rust 1.88 (CI-09).** Added `msrv` job to `ci.yml` that
+  pins `toolchain: "1.88"` and runs `cargo check --workspace`. Updated `rust-version`
+  to 1.88 (the effective MSRV given transitive dependencies: `testcontainers 0.27`,
+  `tonic 0.14`, `serde_with 3.20` all require Rust 1.88).
 
 #### Performance Improvements
 

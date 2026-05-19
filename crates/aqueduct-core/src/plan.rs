@@ -488,12 +488,11 @@ pub fn plan_stats(steps: &[PlanStep]) -> PlanSummary {
                     description: "alter base table DDL".to_string(),
                 });
             }
-            PlanStep::Backfill { mode, .. } => {
-                if mode == "FULL" {
-                    summary.rebuild_count += 1;
-                    summary.destructive_count += 1;
-                }
+            PlanStep::Backfill { mode, .. } if mode == "FULL" => {
+                summary.rebuild_count += 1;
+                summary.destructive_count += 1;
             }
+            PlanStep::Backfill { .. } => {}
             PlanStep::ManageConsumerView { spec, action } => match action.as_str() {
                 "create" => {
                     summary.consumer_creates += 1;

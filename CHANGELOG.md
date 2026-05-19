@@ -135,10 +135,10 @@ planner performance, and significantly expands the test suite and CI pipeline.
 - **CI-07:** macOS Intel (`macos-13`) added to the release build matrix as
   `macos-amd64`.
 
-- **CI-09:** New `msrv` CI job checks that the workspace compiles on Rust 1.85
-  (the effective MSRV: `tokio-postgres 0.7` → `sha2 v0.11` → `block-buffer 0.12`
-  requires Cargo edition 2024, stable since Rust 1.85). `rust-version` in
-  `Cargo.toml` updated from `1.80` → `1.85`.
+- **CI-09:** New `msrv` CI job checks that the workspace compiles on Rust 1.88
+  (the effective MSRV: `testcontainers 0.27`, `tonic 0.14`, `serde_with 3.20`
+  and other transitive dependencies require Rust 1.88). `rust-version` in
+  `Cargo.toml` set to `1.88`.
 
 - **T-09/CI-01:** New `action-smoke.yml` workflow builds the binary, packages it
   as a versioned archive, and exercises the `plan` and `apply` CLI commands
