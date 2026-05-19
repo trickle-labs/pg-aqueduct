@@ -1,8 +1,21 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use crate::error::{AqueductError, Result};
+
+/// Regex for resolving `${VAR_NAME}` environment variable references.
+static ENV_VAR_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}").expect("valid static regex"));
+
+/// Regex for resolving `{{ var.NAME }}` template variables.
+static TEMPLATE_VAR_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"\{\{\s*var\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}").expect("valid static regex"));
+
+/// Regex for detecting URL-embedded passwords (`://user:pass@host`).
+static PLAINTEXT_PASSWORD_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"://[^:@/]+:[^@/]+@").expect("valid static regex"));
 
 /// Top-level `aqueduct.toml` configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -214,11 +227,10 @@ impl AqueductConfig {
 
 /// Resolve `${VAR_NAME}` references in a string from environment variables.
 pub fn resolve_env_vars(s: &str) -> Result<String> {
-    let re = regex::Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}").unwrap();
     let mut result = s.to_string();
     let mut errors: Vec<String> = Vec::new();
 
-    for cap in re.captures_iter(s) {
+    for cap in ENV_VAR_RE.captures_iter(s) {
         let full_match = cap.get(0).unwrap().as_str();
         let var_name = cap.get(1).unwrap().as_str();
         match std::env::var(var_name) {
@@ -238,13 +250,26 @@ pub fn resolve_env_vars(s: &str) -> Result<String> {
     Ok(result)
 }
 
+/// Check a DSN string for embedded plaintext passwords.
+///
+/// Returns `Err(AqueductError::PlaintextPassword)` if the DSN contains a
+/// URL-embedded password and `allow_plaintext_password` is false.
+pub fn check_plaintext_password(dsn: &str, allow_plaintext_password: bool) -> Result<()> {
+    if allow_plaintext_password {
+        return Ok(());
+    }
+    if PLAINTEXT_PASSWORD_RE.is_match(dsn) {
+        return Err(AqueductError::PlaintextPassword);
+    }
+    Ok(())
+}
+
 /// Substitute `{{ var.NAME }}` template variables in a string.
 pub fn substitute_vars(s: &str, vars: &HashMap<String, String>) -> Result<String> {
-    let re = regex::Regex::new(r"\{\{\s*var\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}").unwrap();
     let mut result = s.to_string();
     let mut errors: Vec<String> = Vec::new();
 
-    for cap in re.captures_iter(s) {
+    for cap in TEMPLATE_VAR_RE.captures_iter(s) {
         let full_match = cap.get(0).unwrap().as_str();
         let var_name = cap.get(1).unwrap().as_str();
 
@@ -357,5 +382,28 @@ name = "x"
         let vars = HashMap::new();
         let result = substitute_vars("{{ var.missing_var }}", &vars);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_check_plaintext_password_clean_dsn() {
+        // A DSN without a password should always pass.
+        let result = check_plaintext_password("postgresql://localhost/db", false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_check_plaintext_password_detects_password() {
+        // A DSN with a password should fail when allow=false.
+        let result =
+            check_plaintext_password("postgresql://user:secret@localhost/db", false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_check_plaintext_password_allowed() {
+        // Same DSN is accepted when allow=true.
+        let result =
+            check_plaintext_password("postgresql://user:secret@localhost/db", true);
+        assert!(result.is_ok());
     }
 }

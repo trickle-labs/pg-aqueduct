@@ -11,11 +11,15 @@ USAGE:
     aqueduct plan [OPTIONS] --to <TARGET>
 
 OPTIONS:
-    --to <TARGET>       Target database (name from aqueduct.toml)
-    --project <NAME>    Project name (defaults to [project].name in aqueduct.toml)
-    --output <FORMAT>   Output format: text (default), json, yaml
-    --no-cost           Suppress cost/class column in output
-    -q, --quiet         Only exit code (0 = empty plan, 1 = non-empty, 2 = error)
+    --to <TARGET>           Target database (name from aqueduct.toml)
+    --project <NAME>        Project name (defaults to [project].name in aqueduct.toml)
+    --format <FORMAT>       Output format: text (default), json, yaml, markdown
+    --no-cost               Suppress cost/class column in output
+    --fail-on-drift         Exit 1 when drift is detected (live ≠ recorded last-apply)
+    --fail-if-changed       Exit 1 when the plan is non-empty (synonym for --fail-on-drift)
+    --validate-ivm          Validate IVM supportability before generating the plan
+    --allow-plaintext-password  Allow DSN with embedded password (not recommended)
+    -q, --quiet             Only exit code (0 = empty plan, 1 = non-empty, 2 = error)
 ```
 
 **Exit codes:** `0` empty plan, `1` non-empty plan, `2` error.
@@ -94,21 +98,42 @@ USAGE:
     aqueduct status [OPTIONS] --to <TARGET>
 
 OPTIONS:
-    --to <TARGET>     Target database
-    --output <FMT>    text (default), json, yaml
-    --watch           Re-poll every 5 seconds (Ctrl-C to stop)
+    --to <TARGET>         Target database
+    --format <FMT>        text (default), json, yaml
+    --watch               Re-poll every 5 seconds; reconnects on network error (Ctrl-C to stop)
 ```
 
 ---
 
 ### `aqueduct diff`
 
-Show the semantic diff between desired state and live state for a specific table.
+Compute and display the semantic diff between desired state (migration files) and
+live database state, without producing a full migration plan.
 
 ```
 USAGE:
-    aqueduct diff --table <NAME> --to <TARGET>
+    aqueduct diff [OPTIONS] --to <TARGET>
+
+OPTIONS:
+    --to <TARGET>           Target database
+    --project-dir <DIR>     Project root (default: current directory)
+    --table <NAME>          Filter to a single table (schema.name)
+    --format <FORMAT>       text (default), json, yaml, markdown
+    --allow-plaintext-password  Allow DSN with embedded password
 ```
+
+**Exit codes:** `0` no drift, `1` drift detected, `2` error.
+
+Each delta is labelled with a kind indicator:
+
+| Kind | Symbol | Meaning |
+|------|--------|--------|
+| `Create` | `+` | Table present in files, absent in live state |
+| `Drop` | `-` | Table present in live state, absent in files |
+| `AlterQuery` | `~` | SQL query changed |
+| `AlterSchedule` | `~` | Schedule changed only |
+| `AlterRefreshMode` | `~` | Refresh mode changed |
+| `Unchanged` | (omitted) | No change |
 
 ---
 
@@ -186,7 +211,8 @@ Front-matter directives are single-line SQL comments at the top of a migration f
 |-----------|---------|--------|-------------|
 | `schedule` | streams | duration string | Refresh interval. Examples: `"30s"`, `"1m"`, `"1h"`. |
 | `refresh_mode` | streams | `"DIFFERENTIAL"` \| `"FULL"` | Refresh strategy. Default: `"DIFFERENTIAL"`. |
-| `cdc_mode` | streams | `"ROW"` \| `"STATEMENT"` \| `"NONE"` | CDC capture granularity. |
+| `cdc_mode` | streams | `"trigger"` \| `"wal"` \| `"none"` | CDC capture granularity. Aliases: `"ROW"` / `"STATEMENT"` → `"trigger"`, `"WAL"` → `"wal"`, `"DISABLED"` → `"none"`. |
+| `cypher_source` | streams | relative file path | Path to a Cypher query file used to drive stream-table population. |
 | `depends_on` | streams | JSON array of `"schema.table"` | Explicit upstream dependencies. |
 | `kind` | consumers | `"consumer"` | Mark file as a consumer-view migration. |
 | `source` | consumers | `"schema.table"` | Upstream stream table for a consumer view. |

@@ -1,10 +1,16 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 
 use crate::config::substitute_vars;
 use crate::error::{AqueductError, Result};
+
+/// Regex for `-- @aqueduct:key = value` front-matter directives.
+static DIRECTIVE_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"^--\s+@aqueduct:([a-z_]+)\s*=\s*(.+)$").expect("valid static regex")
+});
 
 /// The kind of a migration file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -219,10 +225,8 @@ fn parse_front_matter(filename: &str, lines: &[String]) -> Result<(FrontMatter, 
     let mut unknown_keys: Vec<String> = Vec::new();
     let mut known_key_values: HashMap<String, serde_json::Value> = HashMap::new();
 
-    let directive_re = regex::Regex::new(r"^--\s+@aqueduct:([a-z_]+)\s*=\s*(.+)$").unwrap();
-
     for line in lines {
-        if let Some(cap) = directive_re.captures(line.trim()) {
+        if let Some(cap) = DIRECTIVE_RE.captures(line.trim()) {
             let key = cap.get(1).unwrap().as_str();
             let raw_value = cap.get(2).unwrap().as_str().trim();
 
@@ -244,7 +248,8 @@ fn parse_front_matter(filename: &str, lines: &[String]) -> Result<(FrontMatter, 
                     refresh_mode = Some(strip_string_quotes(raw_value).to_string());
                 }
                 "cdc_mode" => {
-                    cdc_mode = Some(strip_string_quotes(raw_value).to_string());
+                    let raw = strip_string_quotes(raw_value).to_string();
+                    cdc_mode = Some(normalise_cdc_mode(filename, &raw)?);
                 }
                 "schema" => {
                     schema = Some(strip_string_quotes(raw_value).to_string());
@@ -293,6 +298,29 @@ fn strip_string_quotes(s: &str) -> &str {
         &s[1..s.len() - 1]
     } else {
         s
+    }
+}
+
+/// Normalise `cdc_mode` values to their canonical internal form.
+///
+/// Accepted spellings → canonical internal value:
+/// - `"trigger"`, `"ROW"`, `"STATEMENT"` → `"trigger"`
+/// - `"wal"`, `"WAL"` → `"wal"`
+/// - `"none"`, `"NONE"` → `"none"`
+///
+/// Returns a parse error for unrecognised values.
+fn normalise_cdc_mode(filename: &str, s: &str) -> Result<String> {
+    match s.to_uppercase().as_str() {
+        "TRIGGER" | "ROW" | "STATEMENT" => Ok("trigger".to_string()),
+        "WAL" => Ok("wal".to_string()),
+        "NONE" | "DISABLED" => Ok("none".to_string()),
+        other => Err(AqueductError::Parse {
+            file: filename.to_string(),
+            message: format!(
+                "unknown cdc_mode '{}'. Valid values: trigger, wal, none",
+                other
+            ),
+        }),
     }
 }
 
@@ -418,5 +446,54 @@ SELECT 1;
     fn test_empty_sql_body() {
         let f = parse("-- @aqueduct:schedule = \"30s\"\n");
         assert_eq!(f.sql_body, "");
+    }
+
+    #[test]
+    fn test_cdc_mode_trigger_canonical() {
+        let f = parse("-- @aqueduct:cdc_mode = \"trigger\"\nSELECT 1;");
+        assert_eq!(f.front_matter.cdc_mode, Some("trigger".to_string()));
+    }
+
+    #[test]
+    fn test_cdc_mode_row_normalises_to_trigger() {
+        let f = parse("-- @aqueduct:cdc_mode = \"ROW\"\nSELECT 1;");
+        assert_eq!(f.front_matter.cdc_mode, Some("trigger".to_string()));
+    }
+
+    #[test]
+    fn test_cdc_mode_statement_normalises_to_trigger() {
+        let f = parse("-- @aqueduct:cdc_mode = \"STATEMENT\"\nSELECT 1;");
+        assert_eq!(f.front_matter.cdc_mode, Some("trigger".to_string()));
+    }
+
+    #[test]
+    fn test_cdc_mode_wal() {
+        let f = parse("-- @aqueduct:cdc_mode = \"wal\"\nSELECT 1;");
+        assert_eq!(f.front_matter.cdc_mode, Some("wal".to_string()));
+    }
+
+    #[test]
+    fn test_cdc_mode_none() {
+        let f = parse("-- @aqueduct:cdc_mode = \"NONE\"\nSELECT 1;");
+        assert_eq!(f.front_matter.cdc_mode, Some("none".to_string()));
+    }
+
+    #[test]
+    fn test_cdc_mode_invalid_is_error() {
+        let result = parse_migration_file(
+            &PathBuf::from("test.sql"),
+            "-- @aqueduct:cdc_mode = \"invalid_mode\"\nSELECT 1;",
+            &HashMap::new(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cypher_source_parsed() {
+        let f = parse("-- @aqueduct:cypher_source = \"queries/my_graph.cypher\"\nSELECT 1;");
+        assert_eq!(
+            f.front_matter.cypher_source,
+            Some("queries/my_graph.cypher".to_string())
+        );
     }
 }

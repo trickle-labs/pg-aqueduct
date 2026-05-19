@@ -97,6 +97,55 @@ pub enum PlanStep {
         /// "create", "alter", or "drop".
         action: String,
     },
+
+    // ── v0.9: Missing plan step variants ──────────────────────────────────────
+    /// Restore RLS / Row Security Policies lost during a Rebuild-class migration.
+    RecreatePolicy {
+        name: QualifiedName,
+        policy_sql: String,
+    },
+
+    /// Unhook a pg_tide outbox attachment before a stream table is dropped.
+    DetachOutbox {
+        stream_table: QualifiedName,
+        outbox_name: String,
+    },
+
+    /// Restore an outbox attachment after the stream table is recreated.
+    ReattachOutbox {
+        stream_table: QualifiedName,
+        outbox_name: String,
+        retention_hours: u32,
+    },
+
+    /// Drop or recreate the logical replication slot for a cdc_mode='wal' table.
+    ManageWalSlot {
+        stream_table: QualifiedName,
+        /// "drop" | "create"
+        action: String,
+    },
+
+    /// Temporarily switch an IMMEDIATE mode stream table to DIFFERENTIAL.
+    PauseImmediate {
+        name: QualifiedName,
+    },
+
+    /// Switch the stream table back to IMMEDIATE mode after a Rebuild.
+    ResumeImmediate {
+        name: QualifiedName,
+    },
+
+    /// Poll pgtrickle.pgt_stream_tables until refresh_status transitions to 'idle'.
+    WaitForRefresh {
+        name: QualifiedName,
+        deadline_secs: u64,
+    },
+
+    /// Execute a user-defined SQL statement as a pre or post migration hook.
+    RunHook {
+        hook_name: String,
+        statement: String,
+    },
 }
 
 impl PlanStep {
@@ -155,6 +204,30 @@ impl PlanStep {
                     spec.expose_as,
                     spec.source
                 )
+            }
+            PlanStep::RecreatePolicy { name, .. } => {
+                format!("RECREATE policy on '{}'", name)
+            }
+            PlanStep::DetachOutbox { stream_table, outbox_name } => {
+                format!("DETACH outbox '{}' from '{}'", outbox_name, stream_table)
+            }
+            PlanStep::ReattachOutbox { stream_table, outbox_name, .. } => {
+                format!("REATTACH outbox '{}' to '{}'", outbox_name, stream_table)
+            }
+            PlanStep::ManageWalSlot { stream_table, action } => {
+                format!("{} WAL slot for '{}'", action.to_uppercase(), stream_table)
+            }
+            PlanStep::PauseImmediate { name } => {
+                format!("PAUSE IMMEDIATE mode for '{}'", name)
+            }
+            PlanStep::ResumeImmediate { name } => {
+                format!("RESUME IMMEDIATE mode for '{}'", name)
+            }
+            PlanStep::WaitForRefresh { name, deadline_secs } => {
+                format!("WAIT for '{}' refresh (deadline {}s)", name, deadline_secs)
+            }
+            PlanStep::RunHook { hook_name, .. } => {
+                format!("RUN hook '{}'", hook_name)
             }
         }
     }
@@ -766,5 +839,82 @@ mod tests {
         assert!(plan.summary.is_empty());
         // Lock + RecordSnapshot + Unlock
         assert_eq!(plan.steps.len(), 3);
+    }
+
+    // ── v0.9 PlanStep variant description tests ───────────────────────────────
+
+    #[test]
+    fn test_recreate_policy_description() {
+        let step = PlanStep::RecreatePolicy {
+            name: QualifiedName::new("public", "orders"),
+            policy_sql: "CREATE POLICY p ON public.orders".to_string(),
+        };
+        assert!(step.description().contains("orders"));
+    }
+
+    #[test]
+    fn test_detach_outbox_description() {
+        let step = PlanStep::DetachOutbox {
+            stream_table: QualifiedName::new("public", "orders"),
+            outbox_name: "orders_outbox".to_string(),
+        };
+        assert!(step.description().contains("orders_outbox"));
+    }
+
+    #[test]
+    fn test_reattach_outbox_description() {
+        let step = PlanStep::ReattachOutbox {
+            stream_table: QualifiedName::new("public", "orders"),
+            outbox_name: "orders_outbox".to_string(),
+            retention_hours: 24,
+        };
+        assert!(step.description().contains("orders_outbox"));
+    }
+
+    #[test]
+    fn test_manage_wal_slot_description() {
+        let step = PlanStep::ManageWalSlot {
+            stream_table: QualifiedName::new("public", "events"),
+            action: "drop".to_string(),
+        };
+        let desc = step.description();
+        assert!(desc.contains("DROP") || desc.contains("drop") || desc.to_uppercase().contains("DROP"));
+        assert!(desc.contains("events"));
+    }
+
+    #[test]
+    fn test_pause_immediate_description() {
+        let step = PlanStep::PauseImmediate {
+            name: QualifiedName::new("public", "orders"),
+        };
+        assert!(step.description().contains("orders"));
+    }
+
+    #[test]
+    fn test_resume_immediate_description() {
+        let step = PlanStep::ResumeImmediate {
+            name: QualifiedName::new("public", "orders"),
+        };
+        assert!(step.description().contains("orders"));
+    }
+
+    #[test]
+    fn test_wait_for_refresh_description() {
+        let step = PlanStep::WaitForRefresh {
+            name: QualifiedName::new("public", "events"),
+            deadline_secs: 120,
+        };
+        let desc = step.description();
+        assert!(desc.contains("events"));
+        assert!(desc.contains("120"));
+    }
+
+    #[test]
+    fn test_run_hook_description() {
+        let step = PlanStep::RunHook {
+            hook_name: "post_migration".to_string(),
+            statement: "ANALYZE;".to_string(),
+        };
+        assert!(step.description().contains("post_migration"));
     }
 }

@@ -1250,7 +1250,7 @@ and an enforced coverage threshold.
 
 #### Missing Commands & Flags
 
-- [ ] **Implement `aqueduct diff` command (H4).**
+- [x] **Implement `aqueduct diff` command (H4).**
   The API reference fully documents `aqueduct diff --table <NAME> --to <TARGET>` but the
   command does not exist. Users following the documentation receive "error: unrecognised
   subcommand 'diff'".
@@ -1259,7 +1259,7 @@ and an enforced coverage threshold.
   between the desired spec (migration files) and the live state. Supports `--format
   text|json|markdown`. Output matches the plan renderer for the affected node only.
 
-- [ ] **Add `--fail-on-drift` to `aqueduct plan` (M14 / H4).**
+- [x] **Add `--fail-on-drift` to `aqueduct plan` (M14 / H4).**
   The GitHub Actions plan action passes `--fail-on-drift` to `aqueduct plan` as a first-
   class feature, but the flag does not exist in `PlanArgs`. Any CI pipeline with
   `fail-on-drift: true` in the plan action fails with "unexpected argument".
@@ -1269,7 +1269,7 @@ and an enforced coverage threshold.
   with a clear message listing the drifted tables. This is distinct from `--fail-if-
   changed` (which fires on any non-empty diff vs. desired state).
 
-- [ ] **Add interactive confirmation prompt and `--yes/-y` flag to `aqueduct apply` (H5).**
+- [x] **Add interactive confirmation prompt and `--yes/-y` flag to `aqueduct apply` (H5).**
   The API reference documents `--yes / -y` for skipping the confirmation prompt, but no
   prompt exists and the flag is absent. Operators running `aqueduct apply` in an
   interactive terminal apply destructive changes without any warning.
@@ -1278,7 +1278,7 @@ and an enforced coverage threshold.
   TTY and `--yes` is not set). Prompt "Apply these N changes to <target>? [y/N]". Add
   `--yes/-y` to `ApplyArgs` to skip. In non-TTY mode (CI), proceed without prompting.
 
-- [ ] **Add `--confirm` flag to `aqueduct destroy` (M7).**
+- [x] **Add `--confirm` flag to `aqueduct destroy` (M7).**
   The API reference documents `--confirm` as required for `aqueduct destroy`. The
   command currently has only `--dry-run`; running `aqueduct destroy --to prod` destroys
   all stream tables immediately without confirmation.
@@ -1287,7 +1287,7 @@ and an enforced coverage threshold.
   with a message listing what would be destroyed and instructing the user to pass
   `--confirm`.
 
-- [ ] **Implement `--allow-plaintext-password` guard (M8).**
+- [x] **Implement `--allow-plaintext-password` guard (M8).**
   ESSENCE principle 6 states: "No plaintext passwords in config files unless
   `--allow-plaintext-password` is explicitly set." Config loading never checks for
   embedded passwords in DSN strings.
@@ -1297,13 +1297,13 @@ and an enforced coverage threshold.
   is not set, return `AqueductError::PlaintextPassword` with a message directing the
   user to use a secret backend instead.
 
-- [ ] **Implement `--quiet` / `--porcelain` global flag (M11).**
+- [x] **Implement `--quiet` / `--porcelain` global flag (M11).**
   Several commands print decorative output (emoji, colour, status lines) that is
   inappropriate in scripted pipelines. Add a global `--quiet` flag that suppresses all
   non-error output. Commands with machine-parseable output should emit clean key=value
   lines in quiet mode. Add `--porcelain` as a synonym for shell-script-friendly output.
 
-- [ ] **Correct `aqueduct plan` exit codes to match API reference (M3).**
+- [x] **Correct `aqueduct plan` exit codes to match API reference (M3).**
   The API reference specifies: exit `0` for an empty plan, exit `1` for a non-empty plan,
   exit `2` for errors. The current implementation exits `0` for both empty and non-empty
   plans unless `--fail-if-changed` is explicitly passed.
@@ -1312,11 +1312,11 @@ and an enforced coverage threshold.
   `--fail-if-changed`. Retain `--fail-if-changed` as a flag synonym for backwards
   compatibility. Update the `plan` action to not require `--fail-if-changed` explicitly.
 
-- [ ] **Add `--strict` mode to `aqueduct validate` (API reference parity).**
+- [x] **Add `--strict` mode to `aqueduct validate` (API reference parity).**
   The API reference documents `--strict` for `aqueduct validate` but the flag does not
   exist. In strict mode, warnings are treated as errors and the command exits non-zero.
 
-- [ ] **Fix `status --watch` to reconnect between polls (H9).**
+- [x] **Fix `status --watch` to reconnect between polls (H9).**
   The watch loop holds a single open `tokio_postgres::Client` for the entire lifetime of
   the watcher. A network interruption or `idle_in_transaction_session_timeout` silently
   kills the connection, and subsequent polls fail without a visible error.
@@ -1329,35 +1329,35 @@ and an enforced coverage threshold.
 The v0.2 roadmap table specified eight plan step variants that are absent from the
 `PlanStep` enum and `PlanExecutor`:
 
-- [ ] **`RecreatePolicy { name, policy_sql }`** — restores RLS/Row Security Policies lost
+- [x] **`RecreatePolicy { name, policy_sql }`** — restores RLS/Row Security Policies lost
   during Rebuild-class migrations. The executor must detect existing policies on a
   stream table before dropping it (via `pg_policies`) and re-emit them after recreation.
 
-- [ ] **`DetachOutbox { stream_table, outbox_name }`** — unhooks a `pg_tide` outbox
+- [x] **`DetachOutbox { stream_table, outbox_name }`** — unhooks a `pg_tide` outbox
   attachment before a stream table is dropped. Calls `pg_tide.detach_outbox()`. Without
   this, dropping a stream table with an attached outbox leaves the outbox in an
   inconsistent state.
 
-- [ ] **`ReattachOutbox { stream_table, outbox_name, retention_hours }`** — restores the
+- [x] **`ReattachOutbox { stream_table, outbox_name, retention_hours }`** — restores the
   outbox attachment after the stream table is recreated.
 
-- [ ] **`ManageWalSlot { stream_table, action }`** — drops or recreates the logical
+- [x] **`ManageWalSlot { stream_table, action }`** — drops or recreates the logical
   replication slot for `cdc_mode = 'wal'` stream tables. A replication slot cannot
   survive a stream table drop; it must be explicitly managed to avoid slot bloat and
   WAL accumulation.
 
-- [ ] **`PauseImmediate { name }`** — temporarily switches an `IMMEDIATE` mode stream table
+- [x] **`PauseImmediate { name }`** — temporarily switches an `IMMEDIATE` mode stream table
   to `DIFFERENTIAL` during a Rebuild-class migration. Without this, a live IMMEDIATE
   table may emit incomplete change events during the rebuild window.
 
-- [ ] **`ResumeImmediate { name }`** — switches the stream table back to `IMMEDIATE` mode
+- [x] **`ResumeImmediate { name }`** — switches the stream table back to `IMMEDIATE` mode
   after the Rebuild is complete.
 
-- [ ] **`WaitForRefresh { name, deadline }`** — polls `pgtrickle.pgt_stream_tables` until
+- [x] **`WaitForRefresh { name, deadline }`** — polls `pgtrickle.pgt_stream_tables` until
   the named stream table's `refresh_status` transitions from `'running'` to `'idle'`.
   Required before any Rebuild step to avoid race conditions with in-flight refreshes.
 
-- [ ] **`RunHook { name, statement }`** — executes a user-defined SQL statement as a
+- [x] **`RunHook { name, statement }`** — executes a user-defined SQL statement as a
   pre or post migration hook. Hooks are declared in `aqueduct.toml` under
   `[apply.hooks] pre = "..."` / `[apply.hooks] post = "..."`.
 
@@ -1366,7 +1366,7 @@ a test in `integration.rs`, and a renderer in `render_plan_text()`.
 
 #### Active Secret Injection (M1)
 
-- [ ] **Wire `${secret:BACKEND:KEY}` inline syntax into connection resolution.**
+- [x] **Wire `${secret:BACKEND:KEY}` inline syntax into connection resolution.**
   The `resolve_dsn_secrets()` function in `secrets.rs` is fully implemented but never
   called. The inline syntax is documented in the security guide as a delivered v0.6
   feature, but DSN strings with `${secret:...}` patterns are passed to `libpq` verbatim,
@@ -1377,7 +1377,7 @@ a test in `integration.rs`, and a renderer in `render_plan_text()`.
   `env` backend (resolvable in CI without external services) and a negative test for a
   missing secret.
 
-- [ ] **Add path validation for Sops and Age subprocess arguments.**
+- [x] **Add path validation for Sops and Age subprocess arguments.**
   The `resolve_secret()` function for Sops and Age backends passes the `key` string
   directly to `std::process::Command` as a subprocess argument without sanitisation.
   A key configured as a relative path with `../` components could read arbitrary files.
@@ -1388,35 +1388,35 @@ a test in `integration.rs`, and a renderer in `render_plan_text()`.
 
 #### API Reference & Documentation Parity
 
-- [ ] **Align flag names between API reference and implementation.**
+- [x] **Align flag names between API reference and implementation.**
   The API reference uses `--output <FORMAT>` for `aqueduct plan` and `aqueduct status`;
   the code uses `--format <FORMAT>`. Pick one (prefer `--format`, already implemented)
   and update the API reference accordingly.
 
-- [ ] **Add `yaml` format to plan and status (documented, not implemented).**
+- [x] **Add `yaml` format to plan and status (documented, not implemented).**
   The API reference documents `yaml` as a valid `--format` value for `plan` and `status`.
   Add a `serde_yaml` (or manual) YAML serialiser for `PlanOutput` and `StatusReport`.
 
-- [ ] **Correct `cdc_mode` values in API reference.**
+- [x] **Correct `cdc_mode` values in API reference.**
   The API reference documents `cdc_mode` values as `"ROW" | "STATEMENT" | "NONE"`. The
   code and tests use `"trigger"` and `"wal"`. Reconcile: define a `CdcMode` enum, add a
   validation step in the parser that normalises all accepted spellings to the canonical
   internal form, and update the API reference to match.
 
-- [ ] **Add `cypher_source` directive to the API reference directive table.**
+- [x] **Add `cypher_source` directive to the API reference directive table.**
   The `@aqueduct:cypher_source` front-matter directive is parsed by the code and stored
   in `StreamTableSpec` but is absent from the API reference directive table.
 
-- [ ] **Document `aqueduct diff` command in API reference.**
+- [x] **Document `aqueduct diff` command in API reference.**
   Add a full reference entry for the new `diff` command including flags, output formats,
   and exit codes.
 
-- [ ] **Fix CI plan action to mask DSN before use.**
+- [x] **Fix CI plan action to mask DSN before use.**
   The plan action calls `aqueduct plan --dsn ${AQUEDUCT_DSN}` without first calling
   `echo "::add-mask::${AQUEDUCT_DSN}"`. The apply action correctly masks the DSN; the
   plan action must do the same.
 
-- [ ] **Fix CI apply action `migration_id` output extraction.**
+- [x] **Fix CI apply action `migration_id` output extraction.**
   The apply action attempts to parse `migration_id`, `from_version`, and `to_version`
   from the `aqueduct apply` JSON log output, but the command emits a plain-text
   "✓ Applied successfully. New version: v{}" message, not a structured JSON event.
@@ -1428,14 +1428,14 @@ a test in `integration.rs`, and a renderer in `render_plan_text()`.
 
 #### CI & Supply Chain Hardening
 
-- [ ] **Add `cargo audit` to CI and release workflows (L9).**
+- [x] **Add `cargo audit` to CI and release workflows (L9).**
   Neither `ci.yml` nor `release.yml` runs `cargo audit`. Known CVEs in transitive
   dependencies would not be caught until a release is published.
 
   Fix: add a `security-audit` job to `ci.yml` that runs `cargo audit --deny warnings`.
   Add the same step to `release.yml` before the build matrix.
 
-- [ ] **Add PostgreSQL version matrix to CI (H10).**
+- [x] **Add PostgreSQL version matrix to CI (H10).**
   Integration tests run only against the Testcontainers default image (PG 16). Features
   may work on PG 16 but fail silently on PG 14 or PG 17.
 
@@ -1443,7 +1443,7 @@ a test in `integration.rs`, and a renderer in `render_plan_text()`.
   `[14, 15, 16, 17]`. Use `postgres:${pg-version}-alpine` as the Testcontainers image.
   Pin the Testcontainers image tag in `aqueduct-testkit` rather than using `:latest` (L11).
 
-- [ ] **Implement an enforced code coverage threshold (L9 follow-on).**
+- [x] **Implement an enforced code coverage threshold (L9 follow-on).**
   The Codecov upload uses `fail_ci_if_error: false`. There is no minimum coverage
   threshold. Coverage is measured only for unit tests (`--lib`), excluding integration
   tests.
@@ -1452,19 +1452,19 @@ a test in `integration.rs`, and a renderer in `render_plan_text()`.
   tarpaulin --all-targets` to include integration tests. Change `fail_ci_if_error` to
   `true`. Add a `--minimum-coverage 70` gate to the tarpaulin invocation.
 
-- [ ] **Remove unused `deadpool-postgres` dependency.**
+- [x] **Remove unused `deadpool-postgres` dependency.**
   `deadpool-postgres = "0.14"` is declared in `Cargo.toml` but imported nowhere in the
   source. Remove it. Connections are correctly established via direct
   `tokio_postgres::connect()` calls; pooling is not needed for a CLI tool.
 
-- [ ] **Move static regex patterns to `LazyLock` (L1).**
+- [x] **Move static regex patterns to `LazyLock` (L1).**
   `regex::Regex::new(...)` is called inside `resolve_env_vars()` and `diff.rs::
   normalise_sql()` on every invocation, recompiling the regex each time. Use
   `std::sync::LazyLock<Regex>` (stabilised in Rust 1.80, which is the project's MSRV)
   for all static patterns. Replace `.unwrap()` with `.expect("valid static regex")` for
   clarity.
 
-- [ ] **Pin Testcontainers image versions (L11).**
+- [x] **Pin Testcontainers image versions (L11).**
   `Postgres::default()` uses the `:latest` tag. Replace with an explicit pinned version
   (e.g., `postgres:16-alpine`) so that image updates do not silently change test
   behaviour.

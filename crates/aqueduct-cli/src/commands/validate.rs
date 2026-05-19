@@ -15,6 +15,10 @@ pub struct ValidateArgs {
     /// Output format: text or json.
     #[arg(long, default_value = "text")]
     pub format: String,
+
+    /// Treat warnings as errors and exit non-zero if any are present.
+    #[arg(long)]
+    pub strict: bool,
 }
 
 pub async fn run(args: ValidateArgs) -> anyhow::Result<()> {
@@ -59,7 +63,7 @@ pub async fn run(args: ValidateArgs) -> anyhow::Result<()> {
             for e in &file_result.errors {
                 println!("  error:   {}", e);
             }
-            if file_result.is_ok() {
+            if file_result.is_ok() && (!args.strict || file_result.warnings.is_empty()) {
                 println!("✓ All checks passed.");
             }
         }
@@ -74,6 +78,15 @@ pub async fn run(args: ValidateArgs) -> anyhow::Result<()> {
             } else {
                 "s"
             }
+        );
+    }
+
+    // In --strict mode, warnings are treated as errors.
+    if args.strict && !file_result.warnings.is_empty() {
+        anyhow::bail!(
+            "Strict mode: validation failed with {} warning{} (treated as errors).",
+            file_result.warnings.len(),
+            if file_result.warnings.len() == 1 { "" } else { "s" }
         );
     }
 

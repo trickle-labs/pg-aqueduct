@@ -1,6 +1,12 @@
+use std::sync::LazyLock;
+
 use serde::{Deserialize, Serialize};
 
 use crate::dag::{ConsumerSpec, DagState, QualifiedName, StreamTableSpec};
+
+/// Regex for collapsing whitespace during SQL normalisation.
+static WHITESPACE_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"\s+").expect("valid static regex"));
 
 /// The kind of change for a single stream table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -364,8 +370,10 @@ fn classify_change(desired: &StreamTableSpec, actual: &StreamTableSpec) -> Delta
 /// This is a simple normalisation — not a full AST comparison.
 fn normalise_sql(sql: &str) -> String {
     // Collapse whitespace sequences to a single space.
-    let re = regex::Regex::new(r"\s+").unwrap();
-    let s = re.replace_all(sql.trim(), " ").to_string().to_lowercase();
+    let s = WHITESPACE_RE
+        .replace_all(sql.trim(), " ")
+        .to_string()
+        .to_lowercase();
     // Strip trailing semicolons (migration files include them; live catalog doesn't).
     s.trim_end_matches(';').trim().to_string()
 }

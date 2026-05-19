@@ -3,8 +3,8 @@ use tracing_subscriber::EnvFilter;
 
 mod commands;
 use commands::{
-    apply, destroy, fmt, import, ingest, init, lint, plan, preview, promote, rollback, status,
-    unlock, validate,
+    apply, destroy, diff, fmt, import, ingest, init, lint, plan, preview, promote, rollback,
+    status, unlock, validate,
 };
 
 /// Declarative schema evolution and migration for stream-table DAGs.
@@ -23,6 +23,14 @@ struct Cli {
     /// Verbosity: error, warn, info (default), debug, trace.
     #[arg(long, default_value = "info", global = true, env = "AQUEDUCT_LOG")]
     log_level: String,
+
+    /// Suppress all non-error output (useful for scripted pipelines).
+    #[arg(long, global = true)]
+    quiet: bool,
+
+    /// Emit machine-parseable key=value output on stdout (implies --quiet for decorative output).
+    #[arg(long, global = true)]
+    porcelain: bool,
 
     #[command(subcommand)]
     command: Commands,
@@ -71,11 +79,17 @@ enum Commands {
 
     /// Destroy all stream tables, consumer views, and catalog entries for a project.
     Destroy(destroy::DestroyArgs),
+
+    /// Show per-table diff between desired (migration files) and actual (live) state.
+    Diff(diff::DiffArgs),
 }
 
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+
+    // Suppress all non-error output when --quiet or --porcelain is set.
+    let quiet = cli.quiet || cli.porcelain;
 
     // Initialise structured logging.
     let is_ci = std::env::var("CI").is_ok()
@@ -85,7 +99,10 @@ async fn main() {
 
     let use_json = cli.log_format == "json" || is_ci;
 
-    let filter = EnvFilter::try_new(&cli.log_level).unwrap_or_else(|_| EnvFilter::new("info"));
+    // In quiet mode, only show errors.
+    let log_level_str = if quiet { "error" } else { &cli.log_level };
+    let filter =
+        EnvFilter::try_new(log_level_str).unwrap_or_else(|_| EnvFilter::new("info"));
 
     if use_json {
         tracing_subscriber::fmt()
@@ -111,10 +128,12 @@ async fn main() {
         Commands::Ingest(args) => ingest::run(args).await,
         Commands::Promote(args) => promote::run(args).await,
         Commands::Destroy(args) => destroy::run(args).await,
+        Commands::Diff(args) => diff::run(args).await,
     };
 
     if let Err(e) = result {
         eprintln!("error: {}", e);
-        std::process::exit(1);
+        // Exit 2 for errors (plan exit codes: 0=empty, 1=non-empty, 2=error)
+        std::process::exit(2);
     }
 }

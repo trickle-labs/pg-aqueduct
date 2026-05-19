@@ -573,6 +573,199 @@ impl<'a> PlanExecutor<'a> {
                             }
                         }
                     }
+
+                    // ── v0.9: New plan step variants ────────────────────────
+                    PlanStep::RecreatePolicy { name, policy_sql } => {
+                        tracing::info!("Recreating policy on '{}'", name);
+                        self.client.execute(policy_sql.as_str(), &[]).await?;
+                    }
+
+                    PlanStep::DetachOutbox { stream_table, outbox_name } => {
+                        tracing::info!(
+                            "Detaching outbox '{}' from '{}'",
+                            outbox_name,
+                            stream_table
+                        );
+                        // Call pg_tide.detach_outbox() if available, otherwise no-op.
+                        if let Err(e) = self
+                            .client
+                            .execute(
+                                "SELECT pg_tide.detach_outbox($1, $2)",
+                                &[&stream_table.name, outbox_name],
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                "detach_outbox() failed (non-fatal — pg_tide may not be installed): {}",
+                                e
+                            );
+                        }
+                    }
+
+                    PlanStep::ReattachOutbox {
+                        stream_table,
+                        outbox_name,
+                        retention_hours,
+                    } => {
+                        tracing::info!(
+                            "Reattaching outbox '{}' to '{}' (retention {}h)",
+                            outbox_name,
+                            stream_table,
+                            retention_hours
+                        );
+                        if let Err(e) = self
+                            .client
+                            .execute(
+                                "SELECT pg_tide.attach_outbox($1, $2, $3)",
+                                &[
+                                    &stream_table.name,
+                                    outbox_name,
+                                    &(*retention_hours as i32),
+                                ],
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                "attach_outbox() failed (non-fatal — pg_tide may not be installed): {}",
+                                e
+                            );
+                        }
+                    }
+
+                    PlanStep::ManageWalSlot { stream_table, action } => {
+                        tracing::info!(
+                            "{} WAL replication slot for '{}'",
+                            action.to_uppercase(),
+                            stream_table
+                        );
+                        match action.as_str() {
+                            "drop" => {
+                                let slot_name = format!(
+                                    "aqueduct_{}_{}_wal",
+                                    stream_table.schema, stream_table.name
+                                );
+                                self.client
+                                    .execute(
+                                        "SELECT pg_drop_replication_slot(slot_name) \
+                                         FROM pg_replication_slots \
+                                         WHERE slot_name = $1",
+                                        &[&slot_name],
+                                    )
+                                    .await
+                                    .ok();
+                            }
+                            "create" => {
+                                // Replication slot creation is managed by pg_trickle on
+                                // the next CREATE STREAM TABLE call; this step is a
+                                // no-op for the executor.
+                                tracing::debug!(
+                                    "WAL slot for '{}' will be created by pg_trickle on next apply",
+                                    stream_table
+                                );
+                            }
+                            _ => {
+                                tracing::warn!("Unknown ManageWalSlot action: '{}'", action);
+                            }
+                        }
+                    }
+
+                    PlanStep::PauseImmediate { name } => {
+                        tracing::info!(
+                            "Switching '{}' from IMMEDIATE to DIFFERENTIAL for rebuild window",
+                            name
+                        );
+                        if pgtrickle_available {
+                            if let Err(e) = self
+                                .client
+                                .execute(
+                                    "SELECT pgtrickle.alter_stream_table($1, $2, $3, $4, $5, $6)",
+                                    &[
+                                        &name.schema,
+                                        &name.name,
+                                        &Option::<String>::None,
+                                        &Some("DIFFERENTIAL"),
+                                        &Option::<String>::None,
+                                        &Option::<String>::None,
+                                    ],
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    "PauseImmediate alter_stream_table failed (non-fatal): {}",
+                                    e
+                                );
+                            }
+                        }
+                    }
+
+                    PlanStep::ResumeImmediate { name } => {
+                        tracing::info!(
+                            "Restoring '{}' to IMMEDIATE mode after rebuild",
+                            name
+                        );
+                        if pgtrickle_available {
+                            if let Err(e) = self
+                                .client
+                                .execute(
+                                    "SELECT pgtrickle.alter_stream_table($1, $2, $3, $4, $5, $6)",
+                                    &[
+                                        &name.schema,
+                                        &name.name,
+                                        &Option::<String>::None,
+                                        &Some("IMMEDIATE"),
+                                        &Option::<String>::None,
+                                        &Option::<String>::None,
+                                    ],
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    "ResumeImmediate alter_stream_table failed (non-fatal): {}",
+                                    e
+                                );
+                            }
+                        }
+                    }
+
+                    PlanStep::WaitForRefresh { name, deadline_secs } => {
+                        tracing::info!(
+                            "Waiting for '{}' to become idle (deadline {}s)",
+                            name,
+                            deadline_secs
+                        );
+                        if pgtrickle_available {
+                            let deadline =
+                                std::time::Instant::now()
+                                    + std::time::Duration::from_secs(*deadline_secs);
+                            loop {
+                                let row = self
+                                    .client
+                                    .query_opt(
+                                        "SELECT refresh_status FROM pgtrickle.pgt_stream_tables \
+                                         WHERE schema_name = $1 AND table_name = $2",
+                                        &[&name.schema, &name.name],
+                                    )
+                                    .await?;
+                                let status: Option<String> =
+                                    row.as_ref().and_then(|r| r.try_get(0).ok());
+                                if status.as_deref() != Some("running") {
+                                    break;
+                                }
+                                if std::time::Instant::now() >= deadline {
+                                    return Err(AqueductError::Other(format!(
+                                        "WaitForRefresh: '{}' did not become idle within {}s",
+                                        name, deadline_secs
+                                    )));
+                                }
+                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            }
+                        }
+                    }
+
+                    PlanStep::RunHook { hook_name, statement } => {
+                        tracing::info!("Running hook '{}'", hook_name);
+                        self.client.execute(statement.as_str(), &[]).await?;
+                    }
                 }
 
                 // Record step progress so `--resume` can skip completed steps.

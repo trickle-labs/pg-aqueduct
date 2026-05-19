@@ -32,6 +32,25 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+  # ── Security Audit ──────────────────────────────────────────────────────────
+  security-audit:
+    name: Security audit (cargo audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Run cargo audit
+        run: cargo audit --deny warnings
+
   # ── Unit Tests ──────────────────────────────────────────────────────────────
   unit-tests:
     name: Unit tests (${{ matrix.os }})
@@ -56,8 +75,13 @@ jobs:
 
   # ── Integration Tests ───────────────────────────────────────────────────────
   integration-tests:
-    name: Integration tests (Testcontainers)
+    name: Integration tests (PG ${{ matrix.pg-version }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        pg-version: [ "14", "15", "16", "17" ]
+    env:
+      AQUEDUCT_TEST_PG_IMAGE: postgres:${{ matrix.pg-version }}-alpine
     steps:
       - uses: actions/checkout@v4
 
@@ -109,14 +133,14 @@ jobs:
       - name: Install cargo-tarpaulin
         run: cargo install cargo-tarpaulin --locked
 
-      - name: Run coverage (unit tests only)
+      - name: Run coverage (all targets including integration tests)
         run: >
           cargo tarpaulin
           --packages aqueduct-core
-          --lib
+          --all-targets
           --out Xml
-          --timeout 120
-          --ignore-tests
+          --timeout 300
+          --minimum-coverage 70
         env:
           RUST_LOG: info
 
@@ -124,5 +148,5 @@ jobs:
         uses: codecov/codecov-action@v4
         with:
           files: cobertura.xml
-          fail_ci_if_error: false
-        continue-on-error: true
+          fail_ci_if_error: true
+        continue-on-error: false

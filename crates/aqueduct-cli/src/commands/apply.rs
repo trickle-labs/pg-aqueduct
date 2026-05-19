@@ -42,6 +42,10 @@ pub struct ApplyArgs {
     /// Print the plan before applying.
     #[arg(long, default_value = "true")]
     pub print_plan: bool,
+
+    /// Skip the interactive confirmation prompt (for CI and scripted use).
+    #[arg(long, short = 'y')]
+    pub yes: bool,
 }
 
 pub async fn run(args: ApplyArgs) -> anyhow::Result<()> {
@@ -90,13 +94,37 @@ pub async fn run(args: ApplyArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    if args.print_plan {
+    if args.print_plan || !args.yes {
         println!("{}", render_plan_text(&plan, None, None));
     }
 
     if args.dry_run {
         println!("Dry run: no changes applied.");
         return Ok(());
+    }
+
+    // Interactive confirmation prompt when running in a TTY and --yes not passed.
+    if !args.yes && is_interactive_tty() {
+        use std::io::Write;
+        let target_label = args.to.as_deref().unwrap_or("target");
+        print!(
+            "Apply {} change{} to '{}'? [y/N] ",
+            plan.summary.creates + plan.summary.drops + plan.summary.alters,
+            if plan.summary.creates + plan.summary.drops + plan.summary.alters == 1 {
+                ""
+            } else {
+                "s"
+            },
+            target_label
+        );
+        std::io::stdout().flush()?;
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        let answer = input.trim().to_lowercase();
+        if answer != "y" && answer != "yes" {
+            println!("Aborted.");
+            return Ok(());
+        }
     }
 
     // Check allow_full_refresh setting.
@@ -138,6 +166,31 @@ pub async fn run(args: ApplyArgs) -> anyhow::Result<()> {
         .with_desired_state(desired);
     let new_version = executor.execute(&plan).await?;
 
+    // Emit a structured JSON event for CI parsers to extract migration metadata.
+    let migration_metadata = serde_json::json!({
+        "event": "apply_complete",
+        "migration_id": new_version,
+        "from_version": plan.from_version,
+        "to_version": new_version,
+        "project": project_name,
+    });
+    tracing::info!(
+        event = "apply_complete",
+        migration_id = new_version,
+        from_version = plan.from_version,
+        to_version = new_version,
+        project = %project_name,
+        "Migration applied successfully"
+    );
+    // Also write to stdout for parsers that read stdout rather than the log stream.
+    eprintln!("{}", serde_json::to_string(&migration_metadata)?);
+
     println!("✓ Applied successfully. New version: v{}", new_version);
     Ok(())
+}
+
+/// Returns true if stdout is an interactive terminal (not piped or redirected).
+fn is_interactive_tty() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal()
 }

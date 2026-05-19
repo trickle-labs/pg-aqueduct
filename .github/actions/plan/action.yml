@@ -123,7 +123,9 @@ runs:
 
         DSN_FLAG=""
         if [ -n "${AQUEDUCT_DSN:-}" ]; then
-          DSN_FLAG="--dsn $AQUEDUCT_DSN"
+          # Mask the DSN so it is never printed in CI logs.
+          echo "::add-mask::${AQUEDUCT_DSN}"
+          DSN_FLAG="--dsn ${AQUEDUCT_DSN}"
         fi
 
         PLAN_OUTPUT="$(aqueduct plan \
@@ -137,14 +139,24 @@ runs:
         echo "$PLAN_OUTPUT" >> "$GITHUB_OUTPUT"
         echo "EOF" >> "$GITHUB_OUTPUT"
 
-        # Detect whether the plan is a no-op.
-        if echo "$PLAN_OUTPUT" | grep -q "No changes"; then
+        # Detect whether the plan is a no-op (exit 0 = empty plan).
+        if [ "${EXIT_CODE:-0}" = "0" ]; then
           echo "is_empty=true" >> "$GITHUB_OUTPUT"
         else
           echo "is_empty=false" >> "$GITHUB_OUTPUT"
         fi
 
-        exit "${EXIT_CODE:-0}"
+        # Exit 0 regardless of whether the plan is empty or non-empty — the
+        # fail-if-changed / fail-on-drift flags control whether the step fails.
+        # Exit code 2 (error) is propagated; exit code 1 (non-empty plan) is
+        # surfaced only when fail-if-changed=true.
+        if [ "${EXIT_CODE:-0}" = "2" ]; then
+          exit 2
+        fi
+        if [ "${{ inputs.fail-if-changed }}" = "true" ] && [ "${EXIT_CODE:-0}" = "1" ]; then
+          exit 1
+        fi
+        exit 0
 
     - name: Post plan comment to PR
       if: github.event_name == 'pull_request'

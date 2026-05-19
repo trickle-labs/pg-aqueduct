@@ -27,13 +27,18 @@ pub struct PlanArgs {
     #[arg(long, default_value = ".")]
     pub project_dir: std::path::PathBuf,
 
-    /// Output format: text (default), json, or markdown.
+    /// Output format: text (default), json, markdown, or yaml.
     #[arg(long, default_value = "text")]
     pub format: String,
 
     /// Exit non-zero if the plan is non-empty (useful in CI).
+    /// Synonymous with the default exit-code behaviour (exit 1 for non-empty plans).
     #[arg(long)]
     pub fail_if_changed: bool,
+
+    /// Exit non-zero if drift is detected between live state and last-applied version.
+    #[arg(long)]
+    pub fail_on_drift: bool,
 
     /// Check IVM supportability of all queries.
     #[arg(long, default_value = "true")]
@@ -94,6 +99,23 @@ pub async fn run(args: PlanArgs) -> anyhow::Result<()> {
     // Compute diff.
     let diff = compute_diff(&desired, &actual);
 
+    // Check for drift if requested.
+    if args.fail_on_drift {
+        let drift_count = diff
+            .deltas
+            .iter()
+            .filter(|d| d.kind != aqueduct_core::diff::DeltaKind::Unchanged)
+            .count();
+        if drift_count > 0 {
+            anyhow::bail!(
+                "Drift detected: {} table{} differ between live state and desired state. \
+                 Run `aqueduct plan` to see the full plan.",
+                drift_count,
+                if drift_count == 1 { "" } else { "s" }
+            );
+        }
+    }
+
     // Compute topological order.
     let topo_order = topological_sort(&desired)?;
 
@@ -118,6 +140,7 @@ pub async fn run(args: PlanArgs) -> anyhow::Result<()> {
     let output = match args.format.as_str() {
         "json" => render_plan_json(&plan),
         "markdown" | "md" => render_plan_markdown(&plan),
+        "yaml" | "yml" => render_plan_yaml(&plan),
         _ => {
             if args.explain_cost {
                 let cost = estimate_plan_cost(&client, &plan, None).await?;
@@ -135,11 +158,41 @@ pub async fn run(args: PlanArgs) -> anyhow::Result<()> {
 
     println!("{}", output);
 
-    if args.fail_if_changed && !plan.summary.is_empty() {
-        anyhow::bail!("Plan is non-empty (changes detected).");
+    // Exit codes: 0 = empty plan, 1 = non-empty plan, 2 = error (handled by main).
+    if !plan.summary.is_empty() {
+        // Non-empty plan → exit 1.
+        std::process::exit(1);
     }
 
     Ok(())
+}
+
+/// Minimal YAML renderer for plan output (avoids adding a serde_yaml dependency).
+fn render_plan_yaml(plan: &aqueduct_core::plan::Plan) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("project: \"{}\"\n", plan.project));
+    out.push_str(&format!(
+        "from_version: {}\n",
+        plan.from_version
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "null".to_string())
+    ));
+    out.push_str(&format!("to_version: {}\n", plan.to_version));
+    out.push_str(&format!("is_empty: {}\n", plan.summary.is_empty()));
+    out.push_str(&format!("creates: {}\n", plan.summary.creates));
+    out.push_str(&format!("drops: {}\n", plan.summary.drops));
+    out.push_str(&format!("alters: {}\n", plan.summary.alters));
+    if plan.summary.changes.is_empty() {
+        out.push_str("changes: []\n");
+    } else {
+        out.push_str("changes:\n");
+        for ch in &plan.summary.changes {
+            out.push_str(&format!("  - name: \"{}\"\n", ch.name));
+            out.push_str(&format!("    class: \"{}\"\n", ch.class));
+            out.push_str(&format!("    description: \"{}\"\n", ch.description));
+        }
+    }
+    out
 }
 
 fn load_config_and_vars(

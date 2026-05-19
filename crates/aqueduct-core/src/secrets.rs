@@ -11,7 +11,14 @@
 //! All backends ultimately produce a plain-text secret value that is used
 //! once and never written to disk.
 
+use std::sync::LazyLock;
+
 use crate::error::{AqueductError, Result};
+
+/// Regex for `${secret:BACKEND:KEY}` inline syntax.
+static SECRET_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"\$\{secret:([^:]+):([^}]+)\}").expect("valid static regex")
+});
 
 /// The secret backend to use for resolving secrets.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,6 +164,8 @@ pub async fn resolve_secret(backend: &SecretBackend, key: &str) -> Result<String
         }
 
         SecretBackend::Sops => {
+            // Validate that the key path does not escape via `../`.
+            validate_secret_path(key)?;
             // Attempt to run `sops -d <key>` where key is a file path.
             tracing::info!(backend = "sops", file = %key, "Decrypting with SOPS");
             let output = std::process::Command::new("sops")
@@ -181,6 +190,8 @@ pub async fn resolve_secret(backend: &SecretBackend, key: &str) -> Result<String
         }
 
         SecretBackend::Age { identity_file } => {
+            // Validate that the key path does not escape via `../`.
+            validate_secret_path(key)?;
             tracing::info!(
                 backend = "age",
                 file = %key,
@@ -210,6 +221,22 @@ pub async fn resolve_secret(backend: &SecretBackend, key: &str) -> Result<String
     }
 }
 
+/// Validate that a secret file path does not contain path traversal components.
+///
+/// Rejects any key that contains `..` as a path component.
+fn validate_secret_path(key: &str) -> Result<()> {
+    use std::path::Path;
+    let p = Path::new(key);
+    for component in p.components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            return Err(AqueductError::InvalidSecretPath {
+                path: key.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Inject secrets into a DSN string by resolving `${secret:BACKEND:KEY}` references.
 ///
 /// Syntax: `postgresql://user:${secret:vault:database/dsn}@host/db`
@@ -217,11 +244,9 @@ pub async fn resolve_secret(backend: &SecretBackend, key: &str) -> Result<String
 /// For compatibility, plain `${VAR}` references are resolved from environment
 /// variables as before (delegated to `config::resolve_env_vars`).
 pub async fn resolve_dsn_secrets(dsn: &str, backend: &SecretBackend) -> Result<String> {
-    let secret_re = regex::Regex::new(r"\$\{secret:([^:]+):([^}]+)\}").expect("valid regex");
-
     let mut result = dsn.to_string();
 
-    for cap in secret_re.captures_iter(dsn) {
+    for cap in SECRET_RE.captures_iter(dsn) {
         let full_match = cap.get(0).unwrap().as_str();
         let backend_name = cap.get(1).unwrap().as_str();
         let secret_key = cap.get(2).unwrap().as_str();
@@ -309,5 +334,37 @@ mod tests {
     fn test_backend_from_str_vault() {
         let b = SecretBackend::from_str("vault").unwrap();
         assert!(matches!(b, SecretBackend::HashicorpVault { .. }));
+    }
+
+    #[test]
+    fn test_validate_secret_path_safe() {
+        assert!(validate_secret_path("secrets/my-secret.enc").is_ok());
+        assert!(validate_secret_path("my-secret.enc").is_ok());
+        assert!(validate_secret_path("/absolute/path/secret.enc").is_ok());
+    }
+
+    #[test]
+    fn test_validate_secret_path_traversal() {
+        let err = validate_secret_path("../etc/passwd").unwrap_err();
+        assert!(err.to_string().contains("Invalid secret path"));
+        let err2 = validate_secret_path("secrets/../../etc/passwd").unwrap_err();
+        assert!(err2.to_string().contains("Invalid secret path"));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_dsn_secrets_inline_env() {
+        std::env::set_var("AQUEDUCT_INLINE_SECRET_TEST", "mypassword");
+        let dsn = "postgresql://user:${secret:env:AQUEDUCT_INLINE_SECRET_TEST}@localhost/db";
+        let resolved = resolve_dsn_secrets(dsn, &SecretBackend::Env).await.unwrap();
+        assert_eq!(resolved, "postgresql://user:mypassword@localhost/db");
+        std::env::remove_var("AQUEDUCT_INLINE_SECRET_TEST");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_dsn_secrets_missing_env_secret() {
+        std::env::remove_var("AQUEDUCT_INLINE_SECRET_MISSING_XYZ");
+        let dsn = "postgresql://user:${secret:env:AQUEDUCT_INLINE_SECRET_MISSING_XYZ}@localhost/db";
+        let err = resolve_dsn_secrets(dsn, &SecretBackend::Env).await.unwrap_err();
+        assert!(err.to_string().contains("not set") || err.to_string().contains("AQUEDUCT_INLINE_SECRET_MISSING_XYZ"));
     }
 }

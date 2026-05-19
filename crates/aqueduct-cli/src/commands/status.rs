@@ -200,23 +200,34 @@ pub async fn run(args: StatusArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Watch mode: poll repeatedly.
+    // Watch mode: poll repeatedly, reconnecting on each iteration to handle
+    // network interruptions and idle_in_transaction_session_timeout.
     let interval = parse_interval(&args.interval)?;
     let mut consecutive_drift: u32 = 0;
 
     loop {
-        let drift = poll_once(
-            &client,
-            &project_name,
-            &args.project_dir,
-            &args.format,
-            false,
-        )
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!("Status poll error: {}", e);
-            0
-        });
+        // Create a fresh connection each poll to handle reconnections gracefully.
+        let poll_result = async {
+            let client = connect(&dsn).await?;
+            poll_once(
+                &client,
+                &project_name,
+                &args.project_dir,
+                &args.format,
+                false,
+            )
+            .await
+        }
+        .await;
+
+        let drift = match poll_result {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!("Status poll error (will retry): {}", e);
+                // Exponential back-off is handled by the sleep at the bottom of the loop.
+                0
+            }
+        };
 
         if drift > 0 {
             consecutive_drift += 1;

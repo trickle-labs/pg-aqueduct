@@ -9,6 +9,8 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 <!-- TOC start -->
 **Released**
 - [v0.1.0 — Initial Implementation](#v010--initial-implementation)
+- [v0.8.0 — Core Correctness & Safety Hardening](#v080--core-correctness--safety-hardening)
+- [v0.9.0 — Feature Completeness & Ergonomics](#v090--feature-completeness--ergonomics)
 
 **Planned**
 - [v0.2.0 — Online Schema Evolution](#v020--online-schema-evolution)
@@ -17,11 +19,118 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [v0.5.0 — dbt Interop](#v050--dbt-interop)
 - [v0.6.0 — Production Hardening](#v060--production-hardening)
 - [v0.7.0 — Documentation & Cookbook](#v070--documentation--cookbook)
-- [v0.8.0 — Core Correctness & Safety Hardening](#v080--core-correctness--safety-hardening)
 
 **Archive**
 - [Unreleased — Repository Bootstrap](#unreleased--repository-bootstrap)
 <!-- TOC end -->
+
+---
+
+## [v0.9.0] — Feature Completeness & Ergonomics
+
+**Status:** Released
+
+All roadmap items for v0.9 "Phase 11 — Feature Completeness & Ergonomics" are
+complete. This release adds the missing `aqueduct diff` command, hardens the CLI
+with new flags, improves CI integration with structured events and exit codes,
+and tightens security around secret handling.
+
+### What's new
+
+**E1 — `aqueduct diff` command**  
+New `aqueduct diff` subcommand computes a per-table diff between the desired
+state (migration files) and the live database state without generating a full
+migration plan. Supports `--table` (filter to one table), `--format text|json|yaml|markdown`.
+
+**E2 — `--fail-on-drift` for `aqueduct plan`**  
+`aqueduct plan --fail-on-drift` exits with code 1 when any changes are detected
+and code 0 when the DAG is already up-to-date. Code 2 is reserved for errors.
+
+**E3 — Interactive confirmation for `aqueduct apply`**  
+When running in a TTY, `aqueduct apply` now prompts "Apply N changes to
+'target'? [y/N]" before executing. Pass `--yes`/`-y` to skip the prompt (ideal
+for CI).
+
+**E4 — Structured `apply_complete` event**  
+After a successful apply, a JSON line is emitted on stderr:
+`{"event":"apply_complete","migration_id":N,"from_version":M,"to_version":N,"project":"..."}`.
+The CI composite action reads this line to populate `migration_id`,
+`from_version`, and `to_version` output variables.
+
+**E5 — `--strict` mode for `aqueduct validate`**  
+`aqueduct validate --strict` promotes warnings to errors. The command exits
+non-zero and reports the number of warnings treated as errors.
+
+**E6 — `yaml`/`yml` plan output format**  
+`aqueduct plan --format yaml` now works without adding a `serde_yaml` dependency.
+The plan is serialised to YAML manually, mirroring the JSON structure.
+
+**E7 — `status --watch` reconnect fix**  
+The watch loop now creates a fresh database connection on each poll tick.
+Network errors are caught and logged as warnings so a transient disconnect
+does not abort the watch.
+
+**S1 — `${secret:BACKEND:KEY}` inline secret syntax**  
+Inline `${secret:BACKEND:KEY}` tokens in DSN strings are now resolved via the
+configured secret backend before the connection is established. Supported
+backends: `env`, `aws`, `gcp`, `vault`, `sops`, `age`.
+
+**S2 — Path traversal guard for SOPS/Age secrets**  
+`validate_secret_path()` rejects key arguments containing `..` components to
+prevent path traversal in SOPS and Age subprocess invocations.
+
+**S3 — Plaintext password guard**  
+`aqueduct plan` / `apply` / `diff` reject DSN strings containing cleartext
+passwords (detected via a regex matching `://user:password@`). Pass
+`--allow-plaintext-password` to override, or use `${env:DSN}` / a secret
+backend instead.
+
+**P1 — `--quiet` / `--porcelain` global flags**  
+`--quiet` and `--porcelain` suppress info-level log output (log level set to
+`error`). Useful for scripted and machine-readable workflows.
+
+**P2 — LazyLock for compiled regexes**  
+All `regex::Regex` patterns across `config.rs`, `secrets.rs`, `diff.rs`, and
+`parser.rs` are now compiled once via `std::sync::LazyLock` rather than on
+every call.
+
+**P3 — `cdc_mode` normalization**  
+The parser now normalises `cdc_mode` values: `"ROW"` and `"STATEMENT"` map to
+`"trigger"`, `"WAL"` maps to `"wal"`, `"NONE"` / `"DISABLED"` map to `"none"`.
+Unknown values are rejected at parse time with a clear error message.
+
+**P4 — 8 missing PlanStep variants**  
+Added `RecreatePolicy`, `DetachOutbox`, `ReattachOutbox`, `ManageWalSlot`,
+`PauseImmediate`, `ResumeImmediate`, `WaitForRefresh`, and `RunHook` to
+`PlanStep`. All have `description()` implementations, cost estimates, and
+executor handlers.
+
+**P5 — PostgreSQL version matrix in CI**  
+Integration tests now run against PostgreSQL 14, 15, 16, and 17 using a matrix
+job. The test helper reads `AQUEDUCT_TEST_PG_IMAGE` to override the container
+image.
+
+**P6 — `cargo audit` security-audit job in CI**  
+A dedicated `security-audit` job runs `cargo audit --deny warnings` on every
+push and pull request.
+
+**P7 — Coverage threshold enforced at 70%**  
+The coverage job uses `--all-targets` and sets `minimum-coverage: 70` with
+`fail_ci_if_error: true`.
+
+**P8 — DSN masking in CI composite plan action**  
+The `plan` composite action now masks `AQUEDUCT_DSN` before running any steps
+(`echo "::add-mask::${AQUEDUCT_DSN}"`), consistent with the `apply` action.
+
+### Breaking changes
+
+- `aqueduct plan` exit codes changed: `0` = no changes, `1` = changes detected
+  (or `--fail-on-drift` set), `2` = error. Previous behaviour was to always
+  exit 0 on success.
+- CLI errors now exit with code `2` instead of `1`, reserving `1` for the
+  semantic "changes detected" signal.
+- DSN strings containing plaintext passwords are now rejected unless
+  `--allow-plaintext-password` is passed.
 
 ---
 

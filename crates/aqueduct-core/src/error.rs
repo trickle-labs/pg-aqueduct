@@ -59,6 +59,12 @@ pub enum AqueductError {
     #[error("TOML error: {0}")]
     Toml(String),
 
+    #[error("Plaintext password detected in DSN. Use a secret backend or pass --allow-plaintext-password to override.")]
+    PlaintextPassword,
+
+    #[error("Invalid secret path '{path}': must be within the allowed root")]
+    InvalidSecretPath { path: String },
+
     #[error("{0}")]
     Other(String),
 }

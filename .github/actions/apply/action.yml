@@ -154,16 +154,23 @@ runs:
           --to "${{ inputs.target }}" \
           --project-dir "${{ inputs.project-dir }}" \
           --log-format json \
+          --yes \
           $DSN_FLAG \
-          $EXTRA_FLAGS | tee /tmp/aqueduct-apply-output.json
+          $EXTRA_FLAGS 2>/tmp/aqueduct-apply-stderr.json
 
-        # Extract migration metadata from the last JSON log line.
-        LAST_LINE="$(tail -1 /tmp/aqueduct-apply-output.json)"
-        if echo "$LAST_LINE" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('migration_id',''))" 2>/dev/null; then
-          MIG_ID="$(echo "$LAST_LINE" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('migration_id',''))" 2>/dev/null || echo '')"
-          FROM_VER="$(echo "$LAST_LINE" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('from_version',''))" 2>/dev/null || echo '')"
-          TO_VER="$(echo "$LAST_LINE" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('to_version',''))" 2>/dev/null || echo '')"
-          echo "migration_id=${MIG_ID}" >> "$GITHUB_OUTPUT"
-          echo "from_version=${FROM_VER}" >> "$GITHUB_OUTPUT"
-          echo "to_version=${TO_VER}" >> "$GITHUB_OUTPUT"
+        # Extract migration metadata from the structured apply_complete JSON event
+        # emitted on stderr by `aqueduct apply`.
+        if [ -f /tmp/aqueduct-apply-stderr.json ]; then
+          APPLY_COMPLETE_LINE="$(grep '"event":"apply_complete"' /tmp/aqueduct-apply-stderr.json | tail -1 || true)"
+          if [ -n "$APPLY_COMPLETE_LINE" ]; then
+            MIG_ID="$(echo "$APPLY_COMPLETE_LINE" | python3 -c \
+              "import sys, json; d=json.loads(sys.stdin.read()); print(d.get('migration_id',''))" 2>/dev/null || echo '')"
+            FROM_VER="$(echo "$APPLY_COMPLETE_LINE" | python3 -c \
+              "import sys, json; d=json.loads(sys.stdin.read()); print(d.get('from_version') or '')" 2>/dev/null || echo '')"
+            TO_VER="$(echo "$APPLY_COMPLETE_LINE" | python3 -c \
+              "import sys, json; d=json.loads(sys.stdin.read()); print(d.get('to_version',''))" 2>/dev/null || echo '')"
+            echo "migration_id=${MIG_ID}" >> "$GITHUB_OUTPUT"
+            echo "from_version=${FROM_VER}" >> "$GITHUB_OUTPUT"
+            echo "to_version=${TO_VER}" >> "$GITHUB_OUTPUT"
+          fi
         fi

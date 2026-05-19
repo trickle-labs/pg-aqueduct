@@ -135,6 +135,25 @@ pub async fn estimate_plan_cost(
                 estimated_rows: None,
                 estimated_duration: "< 1s".to_string(),
             },
+            // v0.9: New plan step variants — all low-cost housekeeping steps.
+            PlanStep::RecreatePolicy { .. }
+            | PlanStep::DetachOutbox { .. }
+            | PlanStep::ReattachOutbox { .. }
+            | PlanStep::ManageWalSlot { .. }
+            | PlanStep::PauseImmediate { .. }
+            | PlanStep::ResumeImmediate { .. }
+            | PlanStep::RunHook { .. } => StepCost {
+                step: step.description(),
+                class: "free".to_string(),
+                estimated_rows: None,
+                estimated_duration: "< 1s".to_string(),
+            },
+            PlanStep::WaitForRefresh { .. } => StepCost {
+                step: step.description(),
+                class: "free".to_string(),
+                estimated_rows: None,
+                estimated_duration: "variable".to_string(),
+            },
         };
         steps.push(cost);
     }
