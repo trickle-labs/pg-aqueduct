@@ -186,8 +186,14 @@ pub async fn run(args: StatusArgs) -> anyhow::Result<()> {
         .unwrap_or_else(|| "unknown".to_string());
 
     if !args.watch {
-        let drift_count =
-            poll_once(&client, &project_name, &args.project_dir, &args.format, args.fail_on_drift).await?;
+        let drift_count = poll_once(
+            &client,
+            &project_name,
+            &args.project_dir,
+            &args.format,
+            args.fail_on_drift,
+        )
+        .await?;
         if args.fail_on_drift && drift_count > 0 {
             anyhow::bail!("Drift detected ({} tables)", drift_count);
         }
@@ -199,12 +205,18 @@ pub async fn run(args: StatusArgs) -> anyhow::Result<()> {
     let mut consecutive_drift: u32 = 0;
 
     loop {
-        let drift = poll_once(&client, &project_name, &args.project_dir, &args.format, false)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!("Status poll error: {}", e);
-                0
-            });
+        let drift = poll_once(
+            &client,
+            &project_name,
+            &args.project_dir,
+            &args.format,
+            false,
+        )
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!("Status poll error: {}", e);
+            0
+        });
 
         if drift > 0 {
             consecutive_drift += 1;

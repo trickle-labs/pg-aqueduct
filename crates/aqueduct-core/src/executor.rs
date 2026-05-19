@@ -350,10 +350,11 @@ impl<'a> PlanExecutor<'a> {
                         let spec_json = self
                             .desired_state
                             .as_ref()
-                            .map(|s| serde_json::to_value(s).unwrap_or_else(|_| serde_json::json!({})))
+                            .map(|s| {
+                                serde_json::to_value(s).unwrap_or_else(|_| serde_json::json!({}))
+                            })
                             .unwrap_or_else(|| serde_json::json!({}));
-                        let plan_json =
-                            serde_json::to_value(plan).map_err(AqueductError::Json)?;
+                        let plan_json = serde_json::to_value(plan).map_err(AqueductError::Json)?;
                         let spec_hash: Vec<u8> =
                             Sha256::digest(spec_json.to_string().as_bytes()).to_vec();
 
@@ -390,10 +391,7 @@ impl<'a> PlanExecutor<'a> {
                         tracing::info!("Creating green schema '{}'", schema);
                         self.client
                             .execute(
-                                &format!(
-                                    "CREATE SCHEMA IF NOT EXISTS {}",
-                                    quote_ident(schema)
-                                ),
+                                &format!("CREATE SCHEMA IF NOT EXISTS {}", quote_ident(schema)),
                                 &[],
                             )
                             .await?;
@@ -607,7 +605,10 @@ impl<'a> PlanExecutor<'a> {
             scheduler_paused = false;
             if let Err(e) = self
                 .client
-                .execute("SELECT pgtrickle.resume_scheduler($1::text[])", &[&affected_nodes])
+                .execute(
+                    "SELECT pgtrickle.resume_scheduler($1::text[])",
+                    &[&affected_nodes],
+                )
                 .await
             {
                 tracing::warn!("resume_scheduler() failed (non-fatal): {}", e);
@@ -701,7 +702,8 @@ async fn run_heartbeat(dsn: String, project: String, mut cancel_rx: oneshot::Rec
 
 fn quote_ident(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
-}/// Import stream tables from the live pg_trickle catalog into a migrations directory.
+}
+/// Import stream tables from the live pg_trickle catalog into a migrations directory.
 pub async fn import_from_live(
     client: &tokio_postgres::Client,
     project: &str,

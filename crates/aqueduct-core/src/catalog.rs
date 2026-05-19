@@ -323,9 +323,7 @@ LIMIT 1
 /// Every command that opens a database connection should call this before doing
 /// anything else. It reads `catalog_schema_version` from `aqueduct.cluster_profile`
 /// and applies any pending catalog migrations from the embedded SQL bundle.
-pub async fn ensure_catalog_current(
-    client: &tokio_postgres::Client,
-) -> crate::error::Result<()> {
+pub async fn ensure_catalog_current(client: &tokio_postgres::Client) -> crate::error::Result<()> {
     // If the aqueduct schema does not exist yet, nothing to do — the user must
     // run `aqueduct init` first.
     let schema_exists: bool = client
@@ -341,9 +339,7 @@ pub async fn ensure_catalog_current(
     }
 
     // Read the current catalog version.
-    let row = client
-        .query_opt(CATALOG_VERSION_SQL, &[])
-        .await?;
+    let row = client.query_opt(CATALOG_VERSION_SQL, &[]).await?;
 
     let current_version: i32 = row.map(|r| r.get::<_, i32>(0)).unwrap_or(1);
 

@@ -115,7 +115,10 @@ pub async fn run(args: ApplyArgs) -> anyhow::Result<()> {
     // Check maintenance window.
     if !args.ignore_maintenance_window {
         if let Some(ref cfg) = config {
-            if cfg.apply.plan_requires_window(plan.summary.rebuild_count, plan.summary.blue_green_count) {
+            if cfg
+                .apply
+                .plan_requires_window(plan.summary.rebuild_count, plan.summary.blue_green_count)
+            {
                 let now = chrono::Utc::now();
                 if !cfg.apply.is_in_maintenance_window(now) {
                     anyhow::bail!(

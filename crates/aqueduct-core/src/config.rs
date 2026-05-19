@@ -97,8 +97,14 @@ impl ApplyConfig {
 
     /// Returns true if the plan's migration classes require maintenance window gating.
     pub fn plan_requires_window(&self, rebuild_count: usize, blue_green_count: usize) -> bool {
-        let has_rebuild = rebuild_count > 0 && self.maintenance_window_applies_to.contains(&"rebuild".to_string());
-        let has_bg = blue_green_count > 0 && self.maintenance_window_applies_to.contains(&"blue-green".to_string());
+        let has_rebuild = rebuild_count > 0
+            && self
+                .maintenance_window_applies_to
+                .contains(&"rebuild".to_string());
+        let has_bg = blue_green_count > 0
+            && self
+                .maintenance_window_applies_to
+                .contains(&"blue-green".to_string());
         has_rebuild || has_bg
     }
 }

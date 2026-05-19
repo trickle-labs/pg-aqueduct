@@ -310,7 +310,8 @@ async fn test_rollback() {
     let actual_after_v2 = read_live_state(&db.client).await.expect("actual after v2");
     let diff_rollback = compute_diff(&desired_v1, &actual_after_v2);
     let topo_rb = topological_sort(&desired_v1).expect("topo rb");
-    let plan_rollback = build_plan("rollback-test", Some(2), 3, &diff_rollback, &topo_rb).expect("build_plan");
+    let plan_rollback =
+        build_plan("rollback-test", Some(2), 3, &diff_rollback, &topo_rb).expect("build_plan");
 
     executor
         .execute(&plan_rollback)
@@ -1362,7 +1363,8 @@ async fn test_planner_fuzzing_random_mutations() {
                 .await
                 .expect("get version");
         let next_version = current_version.map(|v| v + 1).unwrap_or(1);
-        let plan = build_plan(project, current_version, next_version, &diff, &topo).expect("build_plan");
+        let plan =
+            build_plan(project, current_version, next_version, &diff, &topo).expect("build_plan");
 
         let executor = PlanExecutor::new(&db.client, project, "0.6.0", false);
         executor
@@ -2907,11 +2909,7 @@ fn test_diamond_dag_consistency_promotion() {
     let delta_c = NodeDelta {
         qualified_name: qc.clone(),
         kind: DeltaKind::AlterQuery,
-        desired: Some(make_spec(
-            "c",
-            vec![qa.clone()],
-            "SELECT 3 AS z, 4 AS w",
-        )),
+        desired: Some(make_spec("c", vec![qa.clone()], "SELECT 3 AS z, 4 AS w")),
         actual: Some(make_spec("c", vec![qa.clone()], "SELECT 3 AS z")),
     };
     // D: depends on B + C (convergence node), mid-column removal → Rebuild (not trailing)
@@ -3031,7 +3029,8 @@ SELECT customer_id, SUM(amount) AS total FROM raw_orders GROUP BY customer_id;
     let actual_v1 = read_live_state(&db.client).await.expect("actual v1");
     let diff_v1 = compute_diff(&desired_v1, &actual_v1);
     let topo_v1 = topological_sort(&desired_v1).expect("topo v1");
-    let plan_v1 = build_plan("rollback-spec-test", None, 1, &diff_v1, &topo_v1).expect("build_plan");
+    let plan_v1 =
+        build_plan("rollback-spec-test", None, 1, &diff_v1, &topo_v1).expect("build_plan");
 
     let executor = PlanExecutor::new(&db.client, "rollback-spec-test", "0.8.0", false)
         .with_desired_state(desired_v1.clone())

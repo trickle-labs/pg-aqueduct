@@ -251,16 +251,12 @@ fn apply_diamond_consistency_promotion(
     for conv_node in convergence_nodes {
         // Collect the diamond group: conv_node + all its transitive ancestors
         // within classified nodes.
-        let mut group: std::collections::HashSet<QualifiedName> =
-            std::collections::HashSet::new();
+        let mut group: std::collections::HashSet<QualifiedName> = std::collections::HashSet::new();
         let mut stack = vec![conv_node.clone()];
         while let Some(n) = stack.pop() {
             if group.insert(n.clone()) {
                 // Find which delta has this name and add its depends_on.
-                if let Some(delta) = ordered_deltas
-                    .iter()
-                    .find(|d| d.qualified_name == n)
-                {
+                if let Some(delta) = ordered_deltas.iter().find(|d| d.qualified_name == n) {
                     if let Some(spec) = &delta.desired {
                         for dep in &spec.depends_on {
                             if classifications.contains_key(dep) {
@@ -423,9 +419,16 @@ pub fn build_plan(
         // Generate the plan steps for this delta.
         match &delta.kind {
             DeltaKind::Create => {
-                let spec = delta.desired.as_ref().ok_or_else(|| AqueductError::InvariantViolation {
-                    context: format!("Create delta for '{}' has no desired spec", delta.qualified_name),
-                })?;
+                let spec =
+                    delta
+                        .desired
+                        .as_ref()
+                        .ok_or_else(|| AqueductError::InvariantViolation {
+                            context: format!(
+                                "Create delta for '{}' has no desired spec",
+                                delta.qualified_name
+                            ),
+                        })?;
 
                 // Validate query first.
                 if !spec.query.is_empty() {
@@ -468,12 +471,26 @@ pub fn build_plan(
             | DeltaKind::AlterRefreshMode
             | DeltaKind::AlterCdcMode
             | DeltaKind::AlterMetadata => {
-                let desired = delta.desired.as_ref().ok_or_else(|| AqueductError::InvariantViolation {
-                    context: format!("Alter delta for '{}' has no desired spec", delta.qualified_name),
-                })?;
-                let actual = delta.actual.as_ref().ok_or_else(|| AqueductError::InvariantViolation {
-                    context: format!("Alter delta for '{}' has no actual spec", delta.qualified_name),
-                })?;
+                let desired =
+                    delta
+                        .desired
+                        .as_ref()
+                        .ok_or_else(|| AqueductError::InvariantViolation {
+                            context: format!(
+                                "Alter delta for '{}' has no desired spec",
+                                delta.qualified_name
+                            ),
+                        })?;
+                let actual =
+                    delta
+                        .actual
+                        .as_ref()
+                        .ok_or_else(|| AqueductError::InvariantViolation {
+                            context: format!(
+                                "Alter delta for '{}' has no actual spec",
+                                delta.qualified_name
+                            ),
+                        })?;
 
                 // For FULL→DIFF refresh_mode change, the classifier returns Rebuild.
                 if class == MigrationClass::Rebuild {
@@ -529,12 +546,26 @@ pub fn build_plan(
                 });
             }
             DeltaKind::AlterQuery => {
-                let desired = delta.desired.as_ref().ok_or_else(|| AqueductError::InvariantViolation {
-                    context: format!("AlterQuery delta for '{}' has no desired spec", delta.qualified_name),
-                })?;
-                let _actual = delta.actual.as_ref().ok_or_else(|| AqueductError::InvariantViolation {
-                    context: format!("AlterQuery delta for '{}' has no actual spec", delta.qualified_name),
-                })?;
+                let desired =
+                    delta
+                        .desired
+                        .as_ref()
+                        .ok_or_else(|| AqueductError::InvariantViolation {
+                            context: format!(
+                                "AlterQuery delta for '{}' has no desired spec",
+                                delta.qualified_name
+                            ),
+                        })?;
+                let _actual =
+                    delta
+                        .actual
+                        .as_ref()
+                        .ok_or_else(|| AqueductError::InvariantViolation {
+                            context: format!(
+                                "AlterQuery delta for '{}' has no actual spec",
+                                delta.qualified_name
+                            ),
+                        })?;
 
                 if !desired.query.is_empty() {
                     steps.push(PlanStep::ValidateQuery {
