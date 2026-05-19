@@ -35,12 +35,12 @@ versions build on earlier ones without breaking the established CLI surface.
 | [v0.7](#v07--documentation--cookbook) | Documentation & cookbook | 8 | 1 week |
 | [v0.8](#v08--core-correctness--safety-hardening) | Core correctness & safety hardening | 10 | 3–4 weeks |
 | [v0.9](#v09--feature-completeness--ergonomics) | Feature completeness & ergonomics | 11 | 3–4 weeks |
-| [v1.0](#v10--safety-contract-repair--multi-project-isolation) | Safety contract repair & multi-project isolation | 13 | 5–6 weeks |
-| [v1.1](#v11--documentation-truthfulness-cli-surface--code-quality) | Documentation truthfulness, CLI surface & code quality | 14 | 3–4 weeks |
-| [v1.2](#v12--real-pgtrickle-integration-security--cicd-hardening) | Real pg_trickle integration, security & CI/CD hardening | 15 | 4–5 weeks |
-| [v1.3](#v13--bluegreen-end-to-end-immediate-mode--advanced-features) | Blue/green end-to-end, IMMEDIATE mode & advanced features | 16 | 6–8 weeks |
-| [v1.4](#v14--release-engineering) | Release engineering | 17 | 2 weeks |
-| [v1.5](#v15--consumer-layer-management) | Consumer layer management | — | TBD |
+| [v0.10](#v010--safety-contract-repair--multi-project-isolation) | Safety contract repair & multi-project isolation | 13 | 5–6 weeks |
+| [v0.11](#v011--documentation-truthfulness-cli-surface--code-quality) | Documentation truthfulness, CLI surface & code quality | 14 | 3–4 weeks |
+| [v0.12](#v012--real-pgtrickle-integration-security--cicd-hardening) | Real pg_trickle integration, security & CI/CD hardening | 15 | 4–5 weeks |
+| [v0.13](#v013--bluegreen-end-to-end-immediate-mode--advanced-features) | Blue/green end-to-end, IMMEDIATE mode & advanced features | 16 | 6–8 weeks |
+| [v1.0](#v10--release-engineering) | Release engineering | 17 | 2 weeks |
+| [v1.1](#v11--consumer-layer-management) | Consumer layer management | — | TBD |
 | [v2.0](#v20--multi-executor-support) | Multi-executor support | — | TBD |
 
 ---
@@ -1490,7 +1490,7 @@ a test in `integration.rs`, and a renderer in `render_plan_text()`.
 
 ---
 
-## v1.0 — Safety Contract Repair & Multi-Project Isolation
+## v0.10 — Safety Contract Repair & Multi-Project Isolation
 
 **Target effort:** 5–6 weeks.
 **Builds on:** v0.9 complete.
@@ -1538,8 +1538,8 @@ PostgreSQL deployments.
   with a comment saying it is mock-only. Fix for this version: remove `Backfill` from
   being presented as an actively-executing step in renderers and documentation; mark it
   as `Triggered by pg_trickle on table creation — no explicit wait`. Real backfill
-  completion waiting is implemented end-to-end in v1.3 once the pg_trickle compatibility
-  layer (v1.2) is in place.
+  completion waiting is implemented end-to-end in v0.13 once the pg_trickle compatibility
+  layer (v0.12) is in place.
 
 - [ ] **Enforce project scoping on stream-table live state (C-06, C-07, M-11).**
   `read_live_state` scans `pgtrickle.pgt_stream_tables` without a project filter and
@@ -1692,7 +1692,7 @@ PostgreSQL deployments.
 - [ ] Heartbeat loss aborts migration: set TTL to 1 s; externally delete the lock row
   mid-migration; assert the executor aborts with `LockLost`.
 
-**v1.0 release criteria.**
+**v0.10 release criteria.**
 - Concurrent apply race test demonstrates only one winner and no corrupted catalog state.
 - Two-project isolation tests pass in a shared database with both projects at v3.
 - Consumer-only apply test succeeds end-to-end.
@@ -1703,10 +1703,10 @@ PostgreSQL deployments.
 
 ---
 
-## v1.1 — Documentation Truthfulness, CLI Surface & Code Quality
+## v0.11 — Documentation Truthfulness, CLI Surface & Code Quality
 
 **Target effort:** 3–4 weeks.
-**Builds on:** v1.0 complete.
+**Builds on:** v0.10 complete.
 
 The second audit found that documentation, CLI flags, and GitHub Actions describe features
 that do not exist (`--strategy blue-green`, YAML format, read-only transactions, AWS/GCP/
@@ -1789,8 +1789,8 @@ the internal code structure to prevent future divergence between code and docume
   input and passes `--strategy blue-green` to the CLI, which does not accept it. Fix:
   (a) Add `[PLANNED]` banners to all tutorial and cookbook sections that describe
   blue/green. (b) Remove the `strategy` input from the apply action or document it as a
-  no-op until v1.3. (c) Remove `--strategy blue-green` from cookbook recipe 10 and link
-  to the v1.3 planned feature instead.
+  no-op until v0.13. (c) Remove `--strategy blue-green` from cookbook recipe 10 and link
+  to the v0.13 planned feature instead.
 
 - [ ] **Fix `aqueduct import --from` to resolve target-or-DSN with clear precedence
   (D-06).** The README and 30-minute tutorial use `aqueduct import --from prod` (passing
@@ -1810,7 +1810,7 @@ the internal code structure to prevent future divergence between code and docume
 - [ ] **Split secret-store docs into implemented and planned sections (D-09, SEC-02).**
   Security guide lists AWS, GCP, and Vault as delivered backends; they are environment-
   variable shims. Fix: clearly separate "Implemented: env, SOPS, age" from "Planned
-  (v1.2): AWS Secrets Manager SDK, GCP Secret Manager API, HashiCorp Vault API".
+  (v0.12): AWS Secrets Manager SDK, GCP Secret Manager API, HashiCorp Vault API".
 
 - [ ] **Redefine roadmap "done" criteria (D-10).** A checkbox in this roadmap must satisfy:
   (1) parsing and configuration wired end-to-end, (2) planner generates the step type,
@@ -1821,7 +1821,7 @@ the internal code structure to prevent future divergence between code and docume
 - [ ] **Remove blue/green maintenance gate from HA docs until planner support exists
   (D-11).** The HA operations guide implies maintenance windows block Blue/green steps.
   The planner never produces them. Fix: remove Blue/green from the gate description and
-  add a note linking to v1.3.
+  add a note linking to v0.13.
 
 - [ ] **Update example workflow version pins in GitHub Actions examples (D-12, CI-08).**
   `aqueduct-plan.yml` and `aqueduct-apply.yml` both reference `@v0.4.0`. Bump to current
@@ -1878,7 +1878,7 @@ the internal code structure to prevent future divergence between code and docume
   versions. Make stale version references a CI lint failure.
 
 - [ ] **Define hook security policy and enforce it (SEC-06).** Before `RunHook` is wired
-  into planner generation (v1.3), document and enforce: (a) hooks run in a separate
+  into planner generation (v0.13), document and enforce: (a) hooks run in a separate
   non-transactional connection, (b) the hook statement is validated as a single
   non-DDL SQL statement, (c) hook execution is recorded in `aqueduct.migrations` with
   the SQL text, the role, and the wall time, (d) a `hooks.allowed_statements` allowlist
@@ -1909,7 +1909,7 @@ the internal code structure to prevent future divergence between code and docume
   `ci.yml` that runs `mdbook build` and `mdbook test`. Add a `just docs-links` recipe
   that runs a link checker (e.g., `lychee`) against the generated HTML.
 
-**v1.1 release criteria.**
+**v0.11 release criteria.**
 - `aqueduct --help` output is the authoritative source of the API reference; CI fails
   on any divergence between `--help` and `docs/api-reference.md`.
 - Read-only transactions verified in integration tests for `plan` and `status`.
@@ -1920,10 +1920,10 @@ the internal code structure to prevent future divergence between code and docume
 
 ---
 
-## v1.2 — Real pg_trickle Integration, Security & CI/CD Hardening
+## v0.12 — Real pg_trickle Integration, Security & CI/CD Hardening
 
 **Target effort:** 4–5 weeks.
-**Builds on:** v1.1 complete.
+**Builds on:** v0.11 complete.
 
 The test suite runs against a mock pg_trickle implementation that correctly models
 aqueduct's catalog contract but does not exercise real extension behavior around
@@ -2046,7 +2046,7 @@ implemented but use environment-variable shims. This version closes all of those
 - [ ] **Wrap all read-only commands in `BEGIN READ ONLY` with `statement_timeout` (P-03).**
   Connect read-only commands with `SET LOCAL statement_timeout = '30s'; BEGIN READ ONLY`.
   Make the timeout configurable via `read_timeout` in `aqueduct.toml`. This also
-  fulfills the security guide's read-only transaction claim (now implemented in v1.1).
+  fulfills the security guide's read-only transaction claim (now implemented in v0.11).
 
 - [ ] **Derive plan summaries from the step stream (P-06).** Remove the parallel
   counter-tracking in the planner in favour of a single `plan_stats(steps: &[PlanStep])
@@ -2090,7 +2090,7 @@ implemented but use environment-variable shims. This version closes all of those
   AWS credential injection when `aws-role-arn` is set. Document the equivalent for GCP
   and Vault.
 
-**v1.2 release criteria.**
+**v0.12 release criteria.**
 - All integration tests pass against a real pg_trickle extension build in CI.
 - Composite action artifact smoke test passes end-to-end.
 - AWS Secrets Manager backend tested against LocalStack in CI.
@@ -2102,13 +2102,13 @@ implemented but use environment-variable shims. This version closes all of those
 
 ---
 
-## v1.3 — Blue/Green End-to-End, IMMEDIATE Mode & Advanced Features
+## v0.13 — Blue/Green End-to-End, IMMEDIATE Mode & Advanced Features
 
 **Target effort:** 6–8 weeks.
-**Builds on:** v1.2 complete.
+**Builds on:** v0.12 complete.
 
-With the safety contract repaired (v1.0), the surface truthful (v1.1), and the
-extension compatibility proven (v1.2), this version implements the advanced migration
+With the safety contract repaired (v0.10), the surface truthful (v0.11), and the
+extension compatibility proven (v0.12), this version implements the advanced migration
 features that were described in docs and partially scaffolded in earlier versions but
 never end-to-end wired: blue/green planner generation, IMMEDIATE mode, config-driven
 hooks, a first-class observability model, immutable plan artifacts, and full preview
@@ -2177,7 +2177,7 @@ described in the original pg-aqueduct-plan.
   `hooks: Hooks { pre: Option<String>, post: Option<String> }` struct to `ApplyConfig`.
   When `hooks.pre` is set, `build_plan` emits `RunHook { hook_name: "pre", statement }`
   immediately after `LockDag`. When `hooks.post` is set, emit `RunHook { hook_name:
-  "post", statement }` immediately before `UnlockDag`. The security policy from v1.1
+  "post", statement }` immediately before `UnlockDag`. The security policy from v0.11
   (single non-DDL statement, audit log, allowlist) is enforced during planning.
   Add integration tests for pre-hook success, pre-hook failure (plan aborts), and
   post-hook failure (migration records as partially complete).
@@ -2247,15 +2247,15 @@ described in the original pg-aqueduct-plan.
   to `aqueduct.dag_versions`. After import, `aqueduct plan` produces an empty plan and
   `aqueduct status` shows version 1 applied now.
 
-#### Step Registry Enforcement (via v1.1 contract)
+#### Step Registry Enforcement (via v0.11 contract)
 
-- [ ] **Verify all previously-scaffolded step variants satisfy the v1.1 "done" definition.**
+- [ ] **Verify all previously-scaffolded step variants satisfy the v0.11 "done" definition.**
   `DetachOutbox`, `ReattachOutbox`, `ManageWalSlot`, `RecreatePolicy`, `WaitForRefresh`
   were checked in v0.9 but the planner never generated them. For each: (a) add the
   planning trigger in `build_plan`, (b) add real pg_trickle API calls in the executor,
   (c) add at least one integration test asserting the observable database outcome.
 
-**v1.3 release criteria.**
+**v0.13 release criteria.**
 - Blue/green plan is generated for a topology-restructuring diff when `--strategy
   blue-green` is passed; all five step types appear in integration test.
 - IMMEDIATE mode is parsed, stored, classified, and generates PauseImmediate/
@@ -2266,14 +2266,14 @@ described in the original pg-aqueduct-plan.
 - `aqueduct.migration_steps` rows are written for every step in integration tests.
 - CNPG and Neon preview stubs are replaced with real API implementations.
 - Import records version 1; subsequent plan is empty in integration test.
-- All v1.0–v1.2 tests continue to pass.
+- All v0.10–v0.12 tests continue to pass.
 
 ---
 
-## v1.4 — Release Engineering
+## v1.0 — Release Engineering
 
 **Target effort:** ~2 weeks.
-**Builds on:** v1.3 complete.
+**Builds on:** v0.13 complete.
 **Milestone:** Public 1.0 release — the first version declared production-ready.
 
 This version produces the release artefacts and performs the final gate checks needed
@@ -2292,7 +2292,7 @@ Every cookbook example in `docs/cookbook/` is run end-to-end against a Testconta
 cluster as part of the release gate. This supersedes the v0.7 claim of 30 verified
 cookbook patterns (which was incomplete — only ~15 integration scenarios existed).
 
-**v1.4 release criteria.**
+**v1.0 release criteria.**
 - Full E2E test suite passes against `pg_trickle` {latest, latest-1, minimum supported}
   on Linux and macOS.
 - All 30 cookbook patterns verified end-to-end as part of the CI release gate.
@@ -2301,15 +2301,15 @@ cookbook patterns (which was incomplete — only ~15 integration scenarios exist
 - `aqueduct plan` + `aqueduct apply` roundtrip verified against all 30 cookbook patterns.
 - No known data-loss bugs.
 - CHANGELOG accurately reflects all shipped features as released (not "planned").
-- All safety, documentation, compatibility, and advanced-feature work from v1.0–v1.3 is
+- All safety, documentation, compatibility, and advanced-feature work from v0.10–v0.13 is
   verified end-to-end in the release CI pipeline.
 
 ---
 
-## v1.5 — Consumer Layer Management
+## v1.1 — Consumer Layer Management
 
-**Target effort:** TBD (post-v1.4).
-**Builds on:** v1.4 complete.
+**Target effort:** TBD (post-v1.0).
+**Builds on:** v1.0 complete.
 
 This version extends `pg_aqueduct`'s management scope to the consumer layer: the sinks
 and connectors that read from stream tables and relay their output to external systems.
@@ -2345,14 +2345,14 @@ their source stream tables, and their current drift status.
 
 ## v2.0 — Multi-Executor Support
 
-**Target effort:** TBD (post-v1.4).
-**Builds on:** v1.4 complete.
+**Target effort:** TBD (post-v1.0).
+**Builds on:** v1.0 complete.
 **Note:** The pluggable `StreamExecutor` trait (§7.7) is designed from v0.1 to
 accommodate these executors cleanly. v2.0 validates and ships the first non-pg_trickle
 executors.
 
 The following IVM systems are the hot-candidate executor targets. None are in scope
-before v1.4, but the trait boundary is designed so that each can be implemented without
+before v1.0, but the trait boundary is designed so that each can be implemented without
 restructuring the planning logic.
 
 ### RisingWave Executor
