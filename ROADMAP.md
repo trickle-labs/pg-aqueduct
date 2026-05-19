@@ -33,7 +33,9 @@ versions build on earlier ones without breaking the established CLI surface.
 | [v0.5](#v05--dbt-interop) | dbt interop | 6 | 1 week |
 | [v0.6](#v06--production-hardening) | Production hardening | 7 | 3 weeks |
 | [v0.7](#v07--documentation--cookbook) | Documentation & cookbook | 8 | 1 week |
-| [v1.0](#v10--release-engineering) | Release engineering | 9 | 1 week |
+| [v0.8](#v08--core-correctness--safety-hardening) | Core correctness & safety hardening | 10 | 3–4 weeks |
+| [v0.9](#v09--feature-completeness--ergonomics) | Feature completeness & ergonomics | 11 | 3–4 weeks |
+| [v1.0](#v10--release-engineering) | Release engineering | 12 | 2 weeks |
 | [v1.1](#v11--consumer-layer-management) | Consumer layer management | — | TBD |
 | [v2.0](#v20--multi-executor-support) | Multi-executor support | — | TBD |
 
@@ -1030,29 +1032,491 @@ This version produces all the documentation and worked examples that make
 
 ---
 
+## v0.8 — Core Correctness & Safety Hardening
+
+**Target effort:** 3–4 weeks.
+**Builds on:** v0.7 complete.
+**Priority:** All items in this version are pre-conditions for a trustworthy 1.0 release.
+A comprehensive engineering audit of the v0.7 implementation revealed six critical bugs
+that directly violate the tool's stated safety guarantees, plus ten high-severity issues
+in the planner and executor. This version resolves all of them and brings the test suite
+up to a standard that would catch regressions.
+
+### Phase 10 — Core Correctness & Safety Hardening (3–4 weeks)
+
+#### Critical Bug Fixes
+
+- [ ] **Fix `aqueduct rollback` to restore from the recorded prior spec (C1).**
+  The v0.7 implementation reads `spec_jsonb` from `aqueduct.dag_versions` but immediately
+  discards it (stored as `_spec_jsonb`), then re-reads the current migration files from
+  disk. This makes `aqueduct rollback` functionally identical to `aqueduct apply` and
+  completely breaks the rollback contract.
+
+  Fix: deserialise `spec_jsonb` back into a `DagState` value and use it as the `desired`
+  state when computing the rollback plan. Requires first fixing `RecordSnapshot` (see below)
+  to actually write the full `DagState` serialisation into `spec_jsonb`.
+
+- [ ] **Fix `RecordSnapshot` to store the full `DagState` in `spec_jsonb` (M9).**
+  The v0.7 executor writes `serde_json::json!({})` (an empty object) for `spec_jsonb`
+  in every `RecordSnapshot` step. Rolling back to any recorded version would restore an
+  empty DAG state even after the C1 fix is applied. Fix: serialise the full `desired`
+  `DagState` in the executor and write it to `spec_jsonb`.
+
+- [ ] **Implement `--resume` step progress tracking (C2).**
+  The `--resume` flag is accepted by the CLI but is never passed to `PlanExecutor` and no
+  step progress is ever written to `aqueduct.migrations.progress`. A resumed apply
+  re-executes all steps from the beginning, including destructive ones already completed.
+
+  Fix: pass `resume: bool` to `PlanExecutor::new()`. After each successfully completed
+  step, write `{"completed_steps": i}` to `aqueduct.migrations.progress` via an `UPDATE`.
+  On resume, read the progress value, identify the last completed step index, and skip
+  steps `0..=last_completed`. For steps that are idempotent (e.g., `ValidateQuery`,
+  `UnlockDag`) safe re-execution is acceptable; for non-idempotent steps (drop, create,
+  backfill) the skip is mandatory.
+
+- [ ] **Implement lock heartbeat to prevent TTL expiry on long migrations (C5).**
+  The lock TTL is never renewed after acquisition. Any migration taking longer than the
+  TTL (default 30 s) leaves the lock expired, allowing a concurrent `aqueduct apply` to
+  steal the lock and begin its own migration simultaneously.
+
+  Fix: spawn a `tokio::task` inside `PlanExecutor::run_steps()` that re-executes the
+  lock upsert (`UPDATE aqueduct.locks SET acquired_at = now() WHERE project = $1`) every
+  `ttl / 3` seconds. Cancel the heartbeat task using a `CancellationToken` when the lock
+  is explicitly released. Use `tokio::select!` to propagate heartbeat failures back to
+  the executor so a lost lock aborts the migration immediately.
+
+- [ ] **Fix `aqueduct init` to install the v2 catalog schema (C6).**
+  `commands/init.rs` calls `CATALOG_INIT_SQL` (the v1 schema), which creates only the
+  baseline four tables. The v2 tables required by features shipped in v0.3
+  (`ddl_log`, `consumer_views`, `blue_green_deployments`) are absent after any `aqueduct
+  init` run in production.
+
+  Fix: change `init.rs` to call `CATALOG_INIT_V2_SQL`. Verify that the testkit and
+  `init.rs` use the same SQL source to prevent future divergence.
+
+- [ ] **Implement catalog self-migration (C6 follow-on).**
+  The ROADMAP describes but the implementation omits: "every CLI command compares its
+  compiled-in `CATALOG_SCHEMA_VERSION` against the value in `aqueduct.cluster_profile`
+  and applies any pending catalog migrations." No such check exists anywhere.
+
+  Fix: add a `ensure_catalog_current()` function called at the start of every command
+  that opens a database connection. It reads `catalog_schema_version` from
+  `aqueduct.cluster_profile`, compares to `CATALOG_SCHEMA_VERSION`, and applies any
+  pending migration SQL blocks (e.g., `CATALOG_MIGRATE_V1_TO_V2_SQL`).
+
+- [ ] **Replace panickable `.unwrap()` calls in `plan.rs` (C3).**
+  `build_plan()` calls `.unwrap()` on `delta.desired` and `delta.actual` at five locations
+  (lines 312, 355, 356, 412, 413). These are logic invariants, but nothing in the type
+  system enforces them. Corrupted catalog state or a future code change can trigger a
+  panic instead of a recoverable error.
+
+  Fix: replace all five calls with `ok_or_else(|| AqueductError::Other(format!(...)))?`.
+  Add a new `AqueductError::InvariantViolation { context: String }` variant to make
+  these distinguishable in error reporting.
+
+- [ ] **Remove SQL injection path in executor fallback (C4).**
+  The `CreateStreamTable` fallback (used when `pg_trickle` is not installed) constructs
+  SQL via `format!("... SELECT * FROM ({}) q LIMIT 0", spec.query)`, embedding
+  `spec.query` without any escaping or quoting.
+
+  Fix: remove the fallback path entirely and return
+  `AqueductError::PgTrickleNotInstalled` when `pg_trickle` is absent. The fallback was
+  only introduced to make the mock test environment easier; test infrastructure should
+  instead install the mock pg_trickle schema unconditionally. The `preview.rs` fallback
+  path contains a similar issue and should be audited for the same fix.
+
+#### High-Severity Correctness Fixes
+
+- [ ] **Fix `AlterStreamTable` to apply `new_query` changes (H1).**
+  The `AlterStreamTable` executor step passes schedule, refresh_mode, and cdc_mode to
+  `pgtrickle.alter_stream_table()` but ignores the `new_query` field entirely. Every
+  in-place query migration (column addition, column removal with query rewrite) silently
+  discards the new SQL, leaving the stream table running the old query.
+
+  Fix: extend the `pgtrickle.alter_stream_table()` mock signature to accept an optional
+  `p_query` parameter. Pass `new_query` when set. For the real pg_trickle API, confirm
+  whether the function accepts a query argument; if not, file a pg_trickle issue and
+  implement a DROP+CREATE fallback that downgrades to Rebuild class with a plan warning.
+
+- [ ] **Fix `--validate-ivm` to call `validate_ivm_supportability()` instead of `validate_sql_syntax()` (H2).**
+  In `commands/plan.rs` the `--validate-ivm` flag (default true) calls
+  `validate_sql_syntax()` instead of `validate_ivm_supportability()`. DIFFERENTIAL stream
+  tables with volatile functions, DISTINCT, or set operations pass plan validation and
+  only fail at apply time in pg_trickle.
+
+  Fix: replace the call with `validate_ivm_supportability()`. Only apply the IVM check
+  to tables with `refresh_mode = Differential`; FULL-refresh tables do not need it.
+
+- [ ] **Fix column-removal classifier to reject mid-list drops (H3).**
+  `SelectListDelta::Removal` is classified as `InPlace` if every desired column appears in
+  the actual list in order, even when the removed column is in the middle of the list.
+  Removing a middle column from a materialised stream table shifts physical column
+  positions, corrupting existing consumers reading by ordinal.
+
+  Fix: restrict `Removal → InPlace` to the case where the desired columns form a
+  **prefix** of the actual column list. Any removal from a non-tail position must be
+  classified as `Rebuild`.
+
+- [ ] **Implement diamond DAG consistency class promotion (H7).**
+  Each node in a diamond DAG is currently classified independently. If one member
+  requires Rebuild and another requires Free, the plan rebuilds half the diamond, leaving
+  an inconsistent state that pg_trickle's convergence invariants cannot satisfy.
+
+  Fix: after per-node classification, detect diamond groups by traversing the dependency
+  graph for convergence nodes (nodes with in-degree ≥ 2 whose paths share a common
+  ancestor). Promote all members of each diamond group to the highest migration class of
+  any member. Emit a plan renderer note explaining the promotion.
+
+- [ ] **Implement drain-then-pause protocol before migration steps (H6).**
+  The ROADMAP describes calling `pgtrickle.pause_scheduler(nodes => [...])` before any
+  migration step. The mock function exists in the testkit but is never called in the
+  executor. Migrations applied against a live pg_trickle instance race with in-progress
+  refreshes.
+
+  Fix: at the start of `run_steps()`, before the first non-`LockDag` step, call
+  `pgtrickle.pause_scheduler()` with the list of affected node names. After all steps
+  complete (or on any error path), call `pgtrickle.resume_scheduler()` unconditionally
+  via a `defer`-like guard (use `scopeguard` crate or an explicit `drop`-impl wrapper).
+
+- [ ] **Implement real drift detection in `aqueduct status` (H8).**
+  `poll_once()` constructs `StatusReport` with `drift_count: 0` hardcoded. The
+  `--fail-on-drift` flag therefore never triggers.
+
+  Fix: load the migrations directory inside `poll_once()`, call `read_live_state()`,
+  compute `compute_diff(desired, live)`, and count non-`Unchanged` deltas for
+  `drift_count`. If loading the migrations directory fails (e.g., no `aqueduct.toml`),
+  emit a warning and skip drift computation rather than panicking.
+
+#### Test Coverage Gaps
+
+- [ ] **Tests for `--resume` behaviour.** Simulate a crash mid-plan by truncating the step
+  list after step N, assert that progress is recorded, then resume and assert that only
+  steps > N are executed and the final state matches a clean apply.
+
+- [ ] **Tests for rollback via prior spec.** Apply a 3-node DAG, modify a table, apply again,
+  then rollback to v1. Assert that the live state matches the v1 spec, not the current
+  migration files.
+
+- [ ] **Tests for lock heartbeat.** Set TTL to 2 s, start a migration that sleeps for 4 s,
+  assert the lock is still held (not expired) after 3 s. Assert that a concurrent apply
+  receives `LockContention`.
+
+- [ ] **Tests for column-removal classifier.** Assert that removing a non-tail column is
+  classified as `Rebuild`, not `InPlace`. Assert that removing only trailing columns is
+  classified as `InPlace`.
+
+- [ ] **Tests for diamond DAG consistency promotion.** Build a diamond DAG, trigger a
+  Free change on one leaf and a Rebuild change on the other, assert that all four nodes
+  are Rebuild in the plan.
+
+- [ ] **Tests for drift detection.** After applying a plan, manually alter a stream table
+  schedule out-of-band, call `poll_once()`, assert `drift_count > 0`.
+
+- [ ] **Tests for `AlterStreamTable` query update.** Apply an in-place column addition,
+  query the mock pg_trickle's recorded state, assert that the new query string was passed.
+
+- [ ] **Tests for maintenance window enforcement.** Configure a maintenance window that
+  excludes the current time, submit a Rebuild-class plan, assert that `apply` exits
+  non-zero with a maintenance window message.
+
+- [ ] **Tests for `allow_full_refresh = false` enforcement.** Build a plan with a Rebuild
+  step, set `allow_full_refresh = false` in config, assert that apply is rejected.
+
+**v0.8 release criteria.**
+- All six critical bugs resolved and verified by new integration tests.
+- All five high-severity correctness issues resolved.
+- `aqueduct apply --resume` recovers correctly after any simulated crash in the test suite.
+- `aqueduct rollback` restores the prior recorded spec in all test cases.
+- Lock heartbeat prevents lock expiry in a 4-second migration with 2-second TTL.
+- Diamond DAG consistency tests pass.
+- Drift detection returns a non-zero count in the status tests.
+- All existing tests continue to pass.
+
+---
+
+## v0.9 — Feature Completeness & Ergonomics
+
+**Target effort:** 3–4 weeks.
+**Builds on:** v0.8 complete.
+
+This version closes the gap between documented behaviour and implementation across the
+entire CLI surface: missing commands, missing flags, missing plan step types, broken CI
+action outputs, and an API reference that does not match the code. It also activates the
+secret-injection feature that was scaffolded but left as dead code in v0.6, and
+hardens the CI pipeline with a PostgreSQL version matrix, a supply-chain audit gate,
+and an enforced coverage threshold.
+
+### Phase 11 — Feature Completeness & Ergonomics (3–4 weeks)
+
+#### Missing Commands & Flags
+
+- [ ] **Implement `aqueduct diff` command (H4).**
+  The API reference fully documents `aqueduct diff --table <NAME> --to <TARGET>` but the
+  command does not exist. Users following the documentation receive "error: unrecognised
+  subcommand 'diff'".
+
+  Deliverable: a new `commands/diff.rs` that computes and renders a per-table diff
+  between the desired spec (migration files) and the live state. Supports `--format
+  text|json|markdown`. Output matches the plan renderer for the affected node only.
+
+- [ ] **Add `--fail-on-drift` to `aqueduct plan` (M14 / H4).**
+  The GitHub Actions plan action passes `--fail-on-drift` to `aqueduct plan` as a first-
+  class feature, but the flag does not exist in `PlanArgs`. Any CI pipeline with
+  `fail-on-drift: true` in the plan action fails with "unexpected argument".
+
+  Fix: add `--fail-on-drift` as a flag to `PlanArgs`. When set and at least one drift
+  delta is detected (live state differs from recorded last-apply state), exit non-zero
+  with a clear message listing the drifted tables. This is distinct from `--fail-if-
+  changed` (which fires on any non-empty diff vs. desired state).
+
+- [ ] **Add interactive confirmation prompt and `--yes/-y` flag to `aqueduct apply` (H5).**
+  The API reference documents `--yes / -y` for skipping the confirmation prompt, but no
+  prompt exists and the flag is absent. Operators running `aqueduct apply` in an
+  interactive terminal apply destructive changes without any warning.
+
+  Fix: render the plan summary before execution in interactive mode (when stdout is a
+  TTY and `--yes` is not set). Prompt "Apply these N changes to <target>? [y/N]". Add
+  `--yes/-y` to `ApplyArgs` to skip. In non-TTY mode (CI), proceed without prompting.
+
+- [ ] **Add `--confirm` flag to `aqueduct destroy` (M7).**
+  The API reference documents `--confirm` as required for `aqueduct destroy`. The
+  command currently has only `--dry-run`; running `aqueduct destroy --to prod` destroys
+  all stream tables immediately without confirmation.
+
+  Fix: require either `--confirm` or `--dry-run`. Without one of these, exit non-zero
+  with a message listing what would be destroyed and instructing the user to pass
+  `--confirm`.
+
+- [ ] **Implement `--allow-plaintext-password` guard (M8).**
+  ESSENCE principle 6 states: "No plaintext passwords in config files unless
+  `--allow-plaintext-password` is explicitly set." Config loading never checks for
+  embedded passwords in DSN strings.
+
+  Fix: in `config.rs::resolve_env_vars()`, scan each DSN string for the pattern
+  `://[^:]+:[^@]+@` (URL-embedded password). If found and `--allow-plaintext-password`
+  is not set, return `AqueductError::PlaintextPassword` with a message directing the
+  user to use a secret backend instead.
+
+- [ ] **Implement `--quiet` / `--porcelain` global flag (M11).**
+  Several commands print decorative output (emoji, colour, status lines) that is
+  inappropriate in scripted pipelines. Add a global `--quiet` flag that suppresses all
+  non-error output. Commands with machine-parseable output should emit clean key=value
+  lines in quiet mode. Add `--porcelain` as a synonym for shell-script-friendly output.
+
+- [ ] **Correct `aqueduct plan` exit codes to match API reference (M3).**
+  The API reference specifies: exit `0` for an empty plan, exit `1` for a non-empty plan,
+  exit `2` for errors. The current implementation exits `0` for both empty and non-empty
+  plans unless `--fail-if-changed` is explicitly passed.
+
+  Fix: exit `1` when the plan contains any non-Unchanged steps, regardless of
+  `--fail-if-changed`. Retain `--fail-if-changed` as a flag synonym for backwards
+  compatibility. Update the `plan` action to not require `--fail-if-changed` explicitly.
+
+- [ ] **Add `--strict` mode to `aqueduct validate` (API reference parity).**
+  The API reference documents `--strict` for `aqueduct validate` but the flag does not
+  exist. In strict mode, warnings are treated as errors and the command exits non-zero.
+
+- [ ] **Fix `status --watch` to reconnect between polls (H9).**
+  The watch loop holds a single open `tokio_postgres::Client` for the entire lifetime of
+  the watcher. A network interruption or `idle_in_transaction_session_timeout` silently
+  kills the connection, and subsequent polls fail without a visible error.
+
+  Fix: move connection creation inside the loop. Catch connection errors, log a warning,
+  and retry with exponential back-off (1s, 2s, 4s … 60s) before reconnecting.
+
+#### Missing Plan Step Variants (v0.2 table)
+
+The v0.2 roadmap table specified eight plan step variants that are absent from the
+`PlanStep` enum and `PlanExecutor`:
+
+- [ ] **`RecreatePolicy { name, policy_sql }`** — restores RLS/Row Security Policies lost
+  during Rebuild-class migrations. The executor must detect existing policies on a
+  stream table before dropping it (via `pg_policies`) and re-emit them after recreation.
+
+- [ ] **`DetachOutbox { stream_table, outbox_name }`** — unhooks a `pg_tide` outbox
+  attachment before a stream table is dropped. Calls `pg_tide.detach_outbox()`. Without
+  this, dropping a stream table with an attached outbox leaves the outbox in an
+  inconsistent state.
+
+- [ ] **`ReattachOutbox { stream_table, outbox_name, retention_hours }`** — restores the
+  outbox attachment after the stream table is recreated.
+
+- [ ] **`ManageWalSlot { stream_table, action }`** — drops or recreates the logical
+  replication slot for `cdc_mode = 'wal'` stream tables. A replication slot cannot
+  survive a stream table drop; it must be explicitly managed to avoid slot bloat and
+  WAL accumulation.
+
+- [ ] **`PauseImmediate { name }`** — temporarily switches an `IMMEDIATE` mode stream table
+  to `DIFFERENTIAL` during a Rebuild-class migration. Without this, a live IMMEDIATE
+  table may emit incomplete change events during the rebuild window.
+
+- [ ] **`ResumeImmediate { name }`** — switches the stream table back to `IMMEDIATE` mode
+  after the Rebuild is complete.
+
+- [ ] **`WaitForRefresh { name, deadline }`** — polls `pgtrickle.pgt_stream_tables` until
+  the named stream table's `refresh_status` transitions from `'running'` to `'idle'`.
+  Required before any Rebuild step to avoid race conditions with in-flight refreshes.
+
+- [ ] **`RunHook { name, statement }`** — executes a user-defined SQL statement as a
+  pre or post migration hook. Hooks are declared in `aqueduct.toml` under
+  `[apply.hooks] pre = "..."` / `[apply.hooks] post = "..."`.
+
+Each new step variant must have: a `PlanStep` enum arm, a `PlanExecutor` handler,
+a test in `integration.rs`, and a renderer in `render_plan_text()`.
+
+#### Active Secret Injection (M1)
+
+- [ ] **Wire `${secret:BACKEND:KEY}` inline syntax into connection resolution.**
+  The `resolve_dsn_secrets()` function in `secrets.rs` is fully implemented but never
+  called. The inline syntax is documented in the security guide as a delivered v0.6
+  feature, but DSN strings with `${secret:...}` patterns are passed to `libpq` verbatim,
+  causing connection failures.
+
+  Fix: call `resolve_dsn_secrets(&dsn)` inside `commands/mod.rs::resolve_dsn()` before
+  passing the DSN to `tokio_postgres::connect()`. Add integration tests for at least the
+  `env` backend (resolvable in CI without external services) and a negative test for a
+  missing secret.
+
+- [ ] **Add path validation for Sops and Age subprocess arguments.**
+  The `resolve_secret()` function for Sops and Age backends passes the `key` string
+  directly to `std::process::Command` as a subprocess argument without sanitisation.
+  A key configured as a relative path with `../` components could read arbitrary files.
+
+  Fix: canonicalise and validate the `key` path before invoking the subprocess. Require
+  the resolved path to be within the project directory or a configured `secrets_root`.
+  Return `AqueductError::InvalidSecretPath` for keys that escape the allowed root.
+
+#### API Reference & Documentation Parity
+
+- [ ] **Align flag names between API reference and implementation.**
+  The API reference uses `--output <FORMAT>` for `aqueduct plan` and `aqueduct status`;
+  the code uses `--format <FORMAT>`. Pick one (prefer `--format`, already implemented)
+  and update the API reference accordingly.
+
+- [ ] **Add `yaml` format to plan and status (documented, not implemented).**
+  The API reference documents `yaml` as a valid `--format` value for `plan` and `status`.
+  Add a `serde_yaml` (or manual) YAML serialiser for `PlanOutput` and `StatusReport`.
+
+- [ ] **Correct `cdc_mode` values in API reference.**
+  The API reference documents `cdc_mode` values as `"ROW" | "STATEMENT" | "NONE"`. The
+  code and tests use `"trigger"` and `"wal"`. Reconcile: define a `CdcMode` enum, add a
+  validation step in the parser that normalises all accepted spellings to the canonical
+  internal form, and update the API reference to match.
+
+- [ ] **Add `cypher_source` directive to the API reference directive table.**
+  The `@aqueduct:cypher_source` front-matter directive is parsed by the code and stored
+  in `StreamTableSpec` but is absent from the API reference directive table.
+
+- [ ] **Document `aqueduct diff` command in API reference.**
+  Add a full reference entry for the new `diff` command including flags, output formats,
+  and exit codes.
+
+- [ ] **Fix CI plan action to mask DSN before use.**
+  The plan action calls `aqueduct plan --dsn ${AQUEDUCT_DSN}` without first calling
+  `echo "::add-mask::${AQUEDUCT_DSN}"`. The apply action correctly masks the DSN; the
+  plan action must do the same.
+
+- [ ] **Fix CI apply action `migration_id` output extraction.**
+  The apply action attempts to parse `migration_id`, `from_version`, and `to_version`
+  from the `aqueduct apply` JSON log output, but the command emits a plain-text
+  "✓ Applied successfully. New version: v{}" message, not a structured JSON event.
+
+  Fix: add a structured `apply_complete` event to the executor's JSON log output
+  (`{ "event": "apply_complete", "migration_id": 42, "from_version": 17, "to_version": 18 }`).
+  Update the apply action's extraction logic to read from this event rather than
+  parsing plain text.
+
+#### CI & Supply Chain Hardening
+
+- [ ] **Add `cargo audit` to CI and release workflows (L9).**
+  Neither `ci.yml` nor `release.yml` runs `cargo audit`. Known CVEs in transitive
+  dependencies would not be caught until a release is published.
+
+  Fix: add a `security-audit` job to `ci.yml` that runs `cargo audit --deny warnings`.
+  Add the same step to `release.yml` before the build matrix.
+
+- [ ] **Add PostgreSQL version matrix to CI (H10).**
+  Integration tests run only against the Testcontainers default image (PG 16). Features
+  may work on PG 16 but fail silently on PG 14 or PG 17.
+
+  Fix: add a `pg-version` matrix dimension to the integration test job in `ci.yml`:
+  `[14, 15, 16, 17]`. Use `postgres:${pg-version}-alpine` as the Testcontainers image.
+  Pin the Testcontainers image tag in `aqueduct-testkit` rather than using `:latest` (L11).
+
+- [ ] **Implement an enforced code coverage threshold (L9 follow-on).**
+  The Codecov upload uses `fail_ci_if_error: false`. There is no minimum coverage
+  threshold. Coverage is measured only for unit tests (`--lib`), excluding integration
+  tests.
+
+  Fix: set a minimum threshold of 70% line coverage for `aqueduct-core`. Use `cargo
+  tarpaulin --all-targets` to include integration tests. Change `fail_ci_if_error` to
+  `true`. Add a `--minimum-coverage 70` gate to the tarpaulin invocation.
+
+- [ ] **Remove unused `deadpool-postgres` dependency.**
+  `deadpool-postgres = "0.14"` is declared in `Cargo.toml` but imported nowhere in the
+  source. Remove it. Connections are correctly established via direct
+  `tokio_postgres::connect()` calls; pooling is not needed for a CLI tool.
+
+- [ ] **Move static regex patterns to `LazyLock` (L1).**
+  `regex::Regex::new(...)` is called inside `resolve_env_vars()` and `diff.rs::
+  normalise_sql()` on every invocation, recompiling the regex each time. Use
+  `std::sync::LazyLock<Regex>` (stabilised in Rust 1.80, which is the project's MSRV)
+  for all static patterns. Replace `.unwrap()` with `.expect("valid static regex")` for
+  clarity.
+
+- [ ] **Pin Testcontainers image versions (L11).**
+  `Postgres::default()` uses the `:latest` tag. Replace with an explicit pinned version
+  (e.g., `postgres:16-alpine`) so that image updates do not silently change test
+  behaviour.
+
+**v0.9 release criteria.**
+- `aqueduct diff` implemented, documented, and tested.
+- `--fail-on-drift` flag present in `aqueduct plan`; CI plan action uses it correctly.
+- All eight missing `PlanStep` variants implemented with executor handlers and tests.
+- `${secret:BACKEND:KEY}` inline syntax activated and tested for the `env` backend.
+- `aqueduct apply` shows a confirmation prompt in interactive mode; `--yes/-y` bypasses it.
+- `aqueduct destroy` requires `--confirm` or `--dry-run`.
+- Plan exit code `1` for non-empty plan, `0` for empty plan, `2` for errors.
+- `cargo audit` passes in CI with no warnings.
+- CI integration tests run against PG 14, 15, 16, and 17 with no failures.
+- Coverage threshold enforced at ≥ 70% for `aqueduct-core`.
+- DSN masking present in both plan and apply CI actions.
+- Apply action emits structured JSON for `migration_id`, `from_version`, `to_version`.
+- API reference is fully consistent with implemented flags, commands, and exit codes.
+
+---
+
 ## v1.0 — Release Engineering
 
-**Target effort:** ~1 week.
-**Builds on:** v0.7 complete.
+**Target effort:** ~2 weeks.
+**Builds on:** v0.9 complete.
 **Milestone:** Public 1.0 release.
 
 This version produces the release artefacts and performs the final gate checks needed
 for the public 1.0 announcement.
 
-### Phase 9 — Release Engineering (1 week)
+### Phase 12 — Release Engineering (2 weeks)
 
 #### Deliverables
 
 **Reproducible release builds.** SHA256-verified binaries for Linux (x86_64, aarch64),
 macOS (x86_64, aarch64), and a Docker image. Build provenance attestation via
-`slsa-github-generator`.
+`slsa-github-generator`. Windows (x86_64) binary included in the release matrix.
+
+**`aqueduct plan` + `aqueduct apply` verified against all 30 cookbook patterns.**
+Every cookbook example in `docs/cookbook/` is run end-to-end against a Testcontainers
+cluster as part of the release gate. This supersedes the v0.7 claim of 30 verified
+cookbook patterns (which was incomplete — only ~15 integration scenarios existed).
 
 **v1.0 release criteria.**
 - Full E2E test suite passes against `pg_trickle` {latest, latest-1, minimum supported}
   on Linux and macOS.
-- Reproducible release builds published with SHA256 checksums.
+- All 30 cookbook patterns verified end-to-end as part of the CI release gate.
+- Reproducible release builds published with SHA256 checksums and SLSA provenance.
+- `cargo audit` passes with no warnings in the release pipeline.
 - `aqueduct plan` + `aqueduct apply` roundtrip verified against all 30 cookbook patterns.
 - No known data-loss bugs.
+- CHANGELOG accurately reflects all shipped features as released (not "planned").
 
 ---
 
