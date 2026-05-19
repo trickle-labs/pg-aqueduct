@@ -3385,10 +3385,9 @@ async fn test_two_project_isolation() {
         .expect("install catalog");
 
     db.client
-        .execute(
+        .batch_execute(
             "CREATE TABLE IF NOT EXISTS raw_a (id bigint); \
              CREATE TABLE IF NOT EXISTS raw_b (id bigint)",
-            &[],
         )
         .await
         .expect("create source tables");

@@ -1121,9 +1121,9 @@ fn test_allow_full_refresh_false_enforcement() {
     use aqueduct_core::diff::{DagDiff, DeltaKind, NodeDelta};
     use aqueduct_core::plan::build_plan;
 
-    let spec = StreamTableSpec {
+    let desired_spec = StreamTableSpec {
         qualified_name: QualifiedName::new("public", "t"),
-        query: "SELECT 1 AS x, 2 AS y".to_string(),
+        query: "SELECT id AS user_id FROM t".to_string(),
         refresh_mode: RefreshMode::Differential,
         schedule: "30s".to_string(),
         cdc_mode: None,
@@ -1131,15 +1131,16 @@ fn test_allow_full_refresh_false_enforcement() {
         depends_on: vec![],
         cypher_source: None,
     };
-    // Use AlterQuery delta (not Create) so that rebuild_count is incremented (S-12).
+    let actual_spec = StreamTableSpec {
+        query: "SELECT id FROM t".to_string(),
+        ..desired_spec.clone()
+    };
+    // Column rename: same count, different alias → classifies as Rebuild (S-12).
     let delta = NodeDelta {
         qualified_name: QualifiedName::new("public", "t"),
         kind: DeltaKind::AlterQuery,
-        desired: Some(spec.clone()),
-        actual: Some(StreamTableSpec {
-            query: "SELECT 1 AS x".to_string(),
-            ..spec
-        }),
+        desired: Some(desired_spec),
+        actual: Some(actual_spec),
     };
     let diff = DagDiff {
         deltas: vec![delta],
