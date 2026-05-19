@@ -58,5 +58,5 @@ indexmap = { version = "2", features = ["serde"] }
 tempfile = "3"
 
 # Testing
-testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["postgres"] }
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["postgres"] }

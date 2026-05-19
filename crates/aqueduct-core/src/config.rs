@@ -6,12 +6,14 @@ use std::sync::LazyLock;
 use crate::error::{AqueductError, Result};
 
 /// Regex for resolving `${VAR_NAME}` environment variable references.
-static ENV_VAR_RE: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}").expect("valid static regex"));
+static ENV_VAR_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}").expect("valid static regex")
+});
 
 /// Regex for resolving `{{ var.NAME }}` template variables.
-static TEMPLATE_VAR_RE: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r"\{\{\s*var\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}").expect("valid static regex"));
+static TEMPLATE_VAR_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"\{\{\s*var\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}").expect("valid static regex")
+});
 
 /// Regex for detecting URL-embedded passwords (`://user:pass@host`).
 static PLAINTEXT_PASSWORD_RE: LazyLock<regex::Regex> =
@@ -394,16 +396,14 @@ name = "x"
     #[test]
     fn test_check_plaintext_password_detects_password() {
         // A DSN with a password should fail when allow=false.
-        let result =
-            check_plaintext_password("postgresql://user:secret@localhost/db", false);
+        let result = check_plaintext_password("postgresql://user:secret@localhost/db", false);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_check_plaintext_password_allowed() {
         // Same DSN is accepted when allow=true.
-        let result =
-            check_plaintext_password("postgresql://user:secret@localhost/db", true);
+        let result = check_plaintext_password("postgresql://user:secret@localhost/db", true);
         assert!(result.is_ok());
     }
 }

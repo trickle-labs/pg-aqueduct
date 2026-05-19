@@ -101,8 +101,7 @@ async fn main() {
 
     // In quiet mode, only show errors.
     let log_level_str = if quiet { "error" } else { &cli.log_level };
-    let filter =
-        EnvFilter::try_new(log_level_str).unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_new(log_level_str).unwrap_or_else(|_| EnvFilter::new("info"));
 
     if use_json {
         tracing_subscriber::fmt()

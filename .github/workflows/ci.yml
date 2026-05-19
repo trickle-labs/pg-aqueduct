@@ -140,7 +140,7 @@ jobs:
           --all-targets
           --out Xml
           --timeout 300
-          --minimum-coverage 70
+          --fail-under 70
         env:
           RUST_LOG: info
 

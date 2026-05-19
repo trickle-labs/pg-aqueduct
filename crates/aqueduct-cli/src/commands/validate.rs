@@ -86,7 +86,11 @@ pub async fn run(args: ValidateArgs) -> anyhow::Result<()> {
         anyhow::bail!(
             "Strict mode: validation failed with {} warning{} (treated as errors).",
             file_result.warnings.len(),
-            if file_result.warnings.len() == 1 { "" } else { "s" }
+            if file_result.warnings.len() == 1 {
+                ""
+            } else {
+                "s"
+            }
         );
     }
 

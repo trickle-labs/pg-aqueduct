@@ -60,8 +60,7 @@ pub async fn run(args: DiffArgs) -> anyhow::Result<()> {
         diff.deltas
             .iter()
             .filter(|d| {
-                d.qualified_name.name == *table_name
-                    || d.qualified_name.to_string() == *table_name
+                d.qualified_name.name == *table_name || d.qualified_name.to_string() == *table_name
             })
             .collect()
     } else {
@@ -137,14 +136,13 @@ pub async fn run(args: DiffArgs) -> anyhow::Result<()> {
                 };
                 println!(
                     "  {} {:40}  {:?}",
-                    symbol, d.qualified_name.to_string(), d.kind
+                    symbol,
+                    d.qualified_name.to_string(),
+                    d.kind
                 );
                 if let (Some(desired), Some(actual)) = (&d.desired, &d.actual) {
                     if desired.schedule != actual.schedule {
-                        println!(
-                            "      schedule: {} → {}",
-                            actual.schedule, desired.schedule
-                        );
+                        println!("      schedule: {} → {}", actual.schedule, desired.schedule);
                     }
                     if desired.query.trim() != actual.query.trim() {
                         println!("      query changed");

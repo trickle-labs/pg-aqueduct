@@ -208,13 +208,23 @@ impl PlanStep {
             PlanStep::RecreatePolicy { name, .. } => {
                 format!("RECREATE policy on '{}'", name)
             }
-            PlanStep::DetachOutbox { stream_table, outbox_name } => {
+            PlanStep::DetachOutbox {
+                stream_table,
+                outbox_name,
+            } => {
                 format!("DETACH outbox '{}' from '{}'", outbox_name, stream_table)
             }
-            PlanStep::ReattachOutbox { stream_table, outbox_name, .. } => {
+            PlanStep::ReattachOutbox {
+                stream_table,
+                outbox_name,
+                ..
+            } => {
                 format!("REATTACH outbox '{}' to '{}'", outbox_name, stream_table)
             }
-            PlanStep::ManageWalSlot { stream_table, action } => {
+            PlanStep::ManageWalSlot {
+                stream_table,
+                action,
+            } => {
                 format!("{} WAL slot for '{}'", action.to_uppercase(), stream_table)
             }
             PlanStep::PauseImmediate { name } => {
@@ -223,7 +233,10 @@ impl PlanStep {
             PlanStep::ResumeImmediate { name } => {
                 format!("RESUME IMMEDIATE mode for '{}'", name)
             }
-            PlanStep::WaitForRefresh { name, deadline_secs } => {
+            PlanStep::WaitForRefresh {
+                name,
+                deadline_secs,
+            } => {
                 format!("WAIT for '{}' refresh (deadline {}s)", name, deadline_secs)
             }
             PlanStep::RunHook { hook_name, .. } => {
@@ -878,7 +891,9 @@ mod tests {
             action: "drop".to_string(),
         };
         let desc = step.description();
-        assert!(desc.contains("DROP") || desc.contains("drop") || desc.to_uppercase().contains("DROP"));
+        assert!(
+            desc.contains("DROP") || desc.contains("drop") || desc.to_uppercase().contains("DROP")
+        );
         assert!(desc.contains("events"));
     }
 

@@ -36,10 +36,13 @@ impl TestDb {
             Postgres::default().with_tag("16-alpine")
         };
 
-        let container = pg_image
-            .start()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to start Postgres container (image={}): {}", image_tag, e))?;
+        let container = pg_image.start().await.map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to start Postgres container (image={}): {}",
+                image_tag,
+                e
+            )
+        })?;
 
         let host = container.get_host().await?;
         let port = container.get_host_port_ipv4(5432).await?;

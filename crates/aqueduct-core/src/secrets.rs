@@ -364,7 +364,14 @@ mod tests {
     async fn test_resolve_dsn_secrets_missing_env_secret() {
         std::env::remove_var("AQUEDUCT_INLINE_SECRET_MISSING_XYZ");
         let dsn = "postgresql://user:${secret:env:AQUEDUCT_INLINE_SECRET_MISSING_XYZ}@localhost/db";
-        let err = resolve_dsn_secrets(dsn, &SecretBackend::Env).await.unwrap_err();
-        assert!(err.to_string().contains("not set") || err.to_string().contains("AQUEDUCT_INLINE_SECRET_MISSING_XYZ"));
+        let err = resolve_dsn_secrets(dsn, &SecretBackend::Env)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("not set")
+                || err
+                    .to_string()
+                    .contains("AQUEDUCT_INLINE_SECRET_MISSING_XYZ")
+        );
     }
 }
