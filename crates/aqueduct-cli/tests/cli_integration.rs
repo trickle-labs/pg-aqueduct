@@ -952,6 +952,8 @@ fn test_destroy_options_dry_run_flag() {
     let opts = DestroyOptions {
         project: "my-project".to_string(),
         dry_run: true,
+        force_cascade: false,
+        force_unowned: false,
     };
     assert!(opts.dry_run);
 }
@@ -1095,6 +1097,8 @@ async fn test_destroy_project_dry_run_cli() {
     let opts = DestroyOptions {
         project: "destroy-cli-test".to_string(),
         dry_run: true,
+        force_cascade: false,
+        force_unowned: false,
     };
     let result = destroy_project(&db.client, &opts).await.unwrap();
 

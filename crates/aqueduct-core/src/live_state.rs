@@ -115,7 +115,9 @@ pub async fn read_live_state(
     };
 
     // C-07: filter consumers by project too.
-    let consumers = read_live_consumers(client, project).await.unwrap_or_default();
+    let consumers = read_live_consumers(client, project)
+        .await
+        .unwrap_or_default();
 
     Ok(DagState {
         stream_tables,

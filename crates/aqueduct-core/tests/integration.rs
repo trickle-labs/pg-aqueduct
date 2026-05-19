@@ -155,7 +155,9 @@ SELECT customer_id, SUM(amount) AS total FROM raw_orders GROUP BY customer_id;
     assert_eq!(new_version, 1);
 
     // Verify the stream table was "created" in the mock catalog.
-    let state_after = read_live_state(&db.client, None).await.expect("read state after");
+    let state_after = read_live_state(&db.client, None)
+        .await
+        .expect("read state after");
     assert_eq!(state_after.stream_tables.len(), 1);
     assert_eq!(
         state_after.stream_tables[0].qualified_name.name,
@@ -169,7 +171,9 @@ SELECT customer_id, SUM(amount) AS total FROM raw_orders GROUP BY customer_id;
     assert_eq!(version, Some(1));
 
     // Now a second plan should be a no-op.
-    let actual2 = read_live_state(&db.client, None).await.expect("read actual2");
+    let actual2 = read_live_state(&db.client, None)
+        .await
+        .expect("read actual2");
     let diff2 = compute_diff(&desired, &actual2);
     assert!(diff2.is_empty());
 }
@@ -202,7 +206,9 @@ async fn test_plan_detects_schedule_change() {
         "-- @aqueduct:schedule = \"1m\"\nSELECT 1 AS val;",
     )];
     let desired = build_dag_state(&files, false).expect("build desired");
-    let actual = read_live_state(&db.client, None).await.expect("read actual");
+    let actual = read_live_state(&db.client, None)
+        .await
+        .expect("read actual");
 
     let diff = compute_diff(&desired, &actual);
     assert!(!diff.is_empty());
@@ -307,7 +313,9 @@ async fn test_rollback() {
     assert_eq!(state_v2.stream_tables.len(), 2);
 
     // Rollback to v1: desired state is files_v1.
-    let actual_after_v2 = read_live_state(&db.client, None).await.expect("actual after v2");
+    let actual_after_v2 = read_live_state(&db.client, None)
+        .await
+        .expect("actual after v2");
     let diff_rollback = compute_diff(&desired_v1, &actual_after_v2);
     let topo_rb = topological_sort(&desired_v1).expect("topo rb");
     let plan_rollback =
@@ -1194,6 +1202,8 @@ async fn test_destroy_project_dry_run() {
     let opts = DestroyOptions {
         project: "destroy-dry-run-test".to_string(),
         dry_run: true,
+        force_cascade: false,
+        force_unowned: false,
     };
     let result = destroy_project(&db.client, &opts)
         .await
@@ -1254,6 +1264,8 @@ async fn test_destroy_project_full() {
     let opts = DestroyOptions {
         project: "destroy-full-test".to_string(),
         dry_run: false,
+        force_cascade: false,
+        force_unowned: false,
     };
     let result = destroy_project(&db.client, &opts)
         .await
@@ -1350,7 +1362,9 @@ async fn test_planner_fuzzing_random_mutations() {
             consumers: vec![],
         };
 
-        let actual = read_live_state(&db.client, None).await.expect("read live state");
+        let actual = read_live_state(&db.client, None)
+            .await
+            .expect("read live state");
         let diff = compute_diff(&desired_state, &actual);
 
         if diff.is_empty() {
@@ -2129,7 +2143,9 @@ SELECT id, AVG(score) AS avg_score FROM raw_c18 GROUP BY id;
     let version = executor.execute(&plan).await.expect("execute");
     assert_eq!(version, 1);
 
-    let state_after = read_live_state(&db.client, None).await.expect("state after");
+    let state_after = read_live_state(&db.client, None)
+        .await
+        .expect("state after");
     assert_eq!(state_after.stream_tables.len(), 1);
     assert_eq!(
         state_after.stream_tables[0].qualified_name.name,
@@ -2222,7 +2238,9 @@ SELECT COUNT(*) AS num_customers FROM public.c20_totals;
     let executor = PlanExecutor::new(&db.client, "cookbook-20", "0.7.0", false);
     executor.execute(&plan).await.expect("execute");
 
-    let state = read_live_state(&db.client, None).await.expect("state after");
+    let state = read_live_state(&db.client, None)
+        .await
+        .expect("state after");
     assert_eq!(state.stream_tables.len(), 2);
 }
 
@@ -2694,7 +2712,9 @@ async fn test_cookbook_29_rollback_to_prior_state() {
     assert_eq!(plan_rb.summary.drops, 1, "Rollback should drop c29_extra");
     executor.execute(&plan_rb).await.expect("rollback");
 
-    let state_after_rb = read_live_state(&db.client, None).await.expect("state after rb");
+    let state_after_rb = read_live_state(&db.client, None)
+        .await
+        .expect("state after rb");
     assert_eq!(state_after_rb.stream_tables.len(), 1);
     assert_eq!(
         state_after_rb.stream_tables[0].qualified_name.name,
@@ -2770,6 +2790,8 @@ SELECT id, SUM(amount) AS total, COUNT(*) AS order_count FROM raw_c30 GROUP BY i
     let opts = DestroyOptions {
         project: "cookbook-30".to_string(),
         dry_run: false,
+        force_cascade: false,
+        force_unowned: false,
     };
     let result = destroy_project(&db.client, &opts).await.expect("destroy");
     assert!(!result.dry_run);
@@ -2979,7 +3001,9 @@ SELECT customer_id, SUM(amount) AS total FROM raw_orders GROUP BY customer_id;
 "#,
     )];
     let desired = build_dag_state(&files, true).expect("build desired");
-    let actual = read_live_state(&db.client, None).await.expect("actual state");
+    let actual = read_live_state(&db.client, None)
+        .await
+        .expect("actual state");
     let diff = compute_diff(&desired, &actual);
     let topo = topological_sort(&desired).expect("topo sort");
     let plan = build_plan("resume-test", None, 1, &diff, &topo).expect("build_plan");
@@ -3154,7 +3178,9 @@ async fn test_alter_stream_table_query_update() {
 async fn test_consumer_only_apply_end_to_end() {
     let db = TestDb::new().await.expect("start test db");
     db.install_mock_pgtrickle().await.expect("install mock");
-    db.install_aqueduct_catalog().await.expect("install catalog");
+    db.install_aqueduct_catalog()
+        .await
+        .expect("install catalog");
 
     let files_v1 = vec![parse_file(
         "orders",
@@ -3187,18 +3213,18 @@ async fn test_consumer_only_apply_end_to_end() {
             actual_source: None,
         }],
     };
-    let plan_consumer = build_plan(
-        "consumer-test",
-        Some(1),
-        2,
-        &diff_consumer,
-        &[],
-    )
-    .expect("plan with consumer");
+    let plan_consumer =
+        build_plan("consumer-test", Some(1), 2, &diff_consumer, &[]).expect("plan with consumer");
 
-    assert_eq!(plan_consumer.summary.consumer_creates, 1, "consumer_creates == 1");
+    assert_eq!(
+        plan_consumer.summary.consumer_creates, 1,
+        "consumer_creates == 1"
+    );
     assert_eq!(plan_consumer.summary.creates, 0, "no stream table creates");
-    assert!(!plan_consumer.summary.is_empty(), "plan should not be empty");
+    assert!(
+        !plan_consumer.summary.is_empty(),
+        "plan should not be empty"
+    );
 
     PlanExecutor::new(&db.client, "consumer-test", "0.10.0", false)
         .with_desired_state(desired_v1)
@@ -3214,7 +3240,9 @@ async fn test_concurrent_apply_race() {
 
     let db = TestDb::new().await.expect("start test db");
     db.install_mock_pgtrickle().await.expect("install mock");
-    db.install_aqueduct_catalog().await.expect("install catalog");
+    db.install_aqueduct_catalog()
+        .await
+        .expect("install catalog");
 
     let files = vec![parse_file(
         "orders",
@@ -3258,7 +3286,10 @@ async fn test_concurrent_apply_race() {
     );
 
     db.client
-        .execute("DELETE FROM aqueduct.locks WHERE project = 'race-test'", &[])
+        .execute(
+            "DELETE FROM aqueduct.locks WHERE project = 'race-test'",
+            &[],
+        )
         .await
         .ok();
 }
@@ -3268,7 +3299,9 @@ async fn test_concurrent_apply_race() {
 async fn test_stale_plan_detection() {
     let db = TestDb::new().await.expect("start test db");
     db.install_mock_pgtrickle().await.expect("install mock");
-    db.install_aqueduct_catalog().await.expect("install catalog");
+    db.install_aqueduct_catalog()
+        .await
+        .expect("install catalog");
 
     let files_v1 = vec![parse_file(
         "orders",
@@ -3325,7 +3358,9 @@ async fn test_two_project_isolation() {
 
     let db = TestDb::new().await.expect("start test db");
     db.install_mock_pgtrickle().await.expect("install mock");
-    db.install_aqueduct_catalog().await.expect("install catalog");
+    db.install_aqueduct_catalog()
+        .await
+        .expect("install catalog");
 
     let files_a = vec![parse_file(
         "orders_a",
@@ -3392,11 +3427,15 @@ async fn test_two_project_isolation() {
     .await
     .expect("destroy A");
 
-    let state_b = read_live_state(&db.client, Some("project-b")).await.expect("state B");
+    let state_b = read_live_state(&db.client, Some("project-b"))
+        .await
+        .expect("state B");
     assert_eq!(state_b.stream_tables.len(), 1, "project B table survives");
     assert_eq!(state_b.stream_tables[0].qualified_name.name, "orders_b");
 
-    let state_a = read_live_state(&db.client, Some("project-a")).await.expect("state A after");
+    let state_a = read_live_state(&db.client, Some("project-a"))
+        .await
+        .expect("state A after");
     assert_eq!(state_a.stream_tables.len(), 0, "project A tables destroyed");
 }
 
@@ -3405,7 +3444,9 @@ async fn test_two_project_isolation() {
 async fn test_resume_skips_non_safety_steps() {
     let db = TestDb::new().await.expect("start test db");
     db.install_mock_pgtrickle().await.expect("install mock");
-    db.install_aqueduct_catalog().await.expect("install catalog");
+    db.install_aqueduct_catalog()
+        .await
+        .expect("install catalog");
 
     let files = vec![parse_file(
         "orders",
@@ -3453,7 +3494,9 @@ async fn test_resume_skips_non_safety_steps() {
 #[tokio::test]
 async fn test_heartbeat_lock_is_holder_bound() {
     let db = TestDb::new().await.expect("start test db");
-    db.install_aqueduct_catalog().await.expect("install catalog");
+    db.install_aqueduct_catalog()
+        .await
+        .expect("install catalog");
 
     let holder = "aqueduct/0.10.0/test-host/1234/0";
     db.client
@@ -3465,7 +3508,8 @@ async fn test_heartbeat_lock_is_holder_bound() {
         .await
         .expect("insert lock");
 
-    let ok = db.client
+    let ok = db
+        .client
         .execute(
             aqueduct_core::catalog::HEARTBEAT_LOCK_SQL,
             &[&"hb-test", &holder],
@@ -3474,7 +3518,8 @@ async fn test_heartbeat_lock_is_holder_bound() {
         .expect("heartbeat correct holder");
     assert_eq!(ok, 1, "correct holder should update 1 row");
 
-    let bad = db.client
+    let bad = db
+        .client
         .execute(
             aqueduct_core::catalog::HEARTBEAT_LOCK_SQL,
             &[&"hb-test", &"impostor"],

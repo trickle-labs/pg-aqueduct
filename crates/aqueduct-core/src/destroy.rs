@@ -168,7 +168,11 @@ pub async fn destroy_project(
         } else {
             // S-10: No CASCADE by default to avoid silently destroying
             // dependent objects. Use `--force-cascade` to opt in.
-            let cascade_clause = if options.force_cascade { " CASCADE" } else { "" };
+            let cascade_clause = if options.force_cascade {
+                " CASCADE"
+            } else {
+                ""
+            };
             if let Err(e) = client
                 .execute(
                     &format!(
@@ -183,9 +187,7 @@ pub async fn destroy_project(
             {
                 // If the error is about dependent objects and cascade is not enabled,
                 // return a clear error message.
-                if !options.force_cascade
-                    && e.to_string().contains("depends on")
-                {
+                if !options.force_cascade && e.to_string().contains("depends on") {
                     return Err(AqueductError::Other(format!(
                         "Cannot drop '{}': dependent objects exist. \
                          Use --force-cascade to also drop them.",

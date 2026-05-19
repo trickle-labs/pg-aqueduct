@@ -898,7 +898,12 @@ impl<'a> PlanExecutor<'a> {
 /// Background task that renews the advisory lock every `interval` until cancelled.
 /// If the lock row disappears (rows_affected == 0), the task logs a warning —
 /// the main loop will detect the lost lock on the next DB operation (S-04).
-async fn run_heartbeat(dsn: String, project: String, holder: String, mut cancel_rx: oneshot::Receiver<()>) {
+async fn run_heartbeat(
+    dsn: String,
+    project: String,
+    holder: String,
+    mut cancel_rx: oneshot::Receiver<()>,
+) {
     // Parse TTL from environment or use a sensible default (10 seconds).
     let interval = tokio::time::Duration::from_secs(10);
     let mut ticker = tokio::time::interval(interval);
@@ -919,7 +924,7 @@ async fn run_heartbeat(dsn: String, project: String, holder: String, mut cancel_
                     Err(e) => {
                         tracing::warn!("Heartbeat: lock renewal failed: {}", e);
                     }
-                    Ok(rows_affected) if rows_affected == 0 => {
+                    Ok(0) => {
                         // Lock row is gone — stolen or expired.  The main
                         // connection will surface this as LockLost on the next
                         // catalog operation (S-04).

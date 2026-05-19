@@ -76,7 +76,9 @@ pub enum AqueductError {
 
     /// Returned when `destroy` cannot verify ownership and `--force-unowned`
     /// was not passed.
-    #[error("Cannot verify ownership for stream table '{table}'. Pass --force-unowned to proceed.")]
+    #[error(
+        "Cannot verify ownership for stream table '{table}'. Pass --force-unowned to proceed."
+    )]
     OwnershipRequired { table: String },
 
     #[error("{0}")]
