@@ -1,4 +1,4 @@
-use aqueduct_core::catalog::CATALOG_INIT_V2_SQL;
+use aqueduct_core::catalog::CATALOG_INIT_V4_SQL;
 use clap::Args;
 
 use super::connect;
@@ -41,8 +41,8 @@ pub async fn run(args: InitArgs) -> anyhow::Result<()> {
         anyhow::bail!("Cannot initialise aqueduct catalog on a hot standby.");
     }
 
-    // Create the catalog schema (v2 — includes all tables from v0.3+).
-    client.batch_execute(CATALOG_INIT_V2_SQL).await?;
+    // Create the catalog schema (v4 — includes all tables and performance indexes).
+    client.batch_execute(CATALOG_INIT_V4_SQL).await?;
 
     let pg_version: String = client.query_one("SELECT version()", &[]).await?.get(0);
 

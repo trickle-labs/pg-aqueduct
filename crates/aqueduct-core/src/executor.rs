@@ -11,6 +11,104 @@ use crate::dag::DagState;
 use crate::error::{AqueductError, Result};
 use crate::plan::{Plan, PlanStep};
 
+/// Capabilities detected in the live pg_trickle installation (M-07 / v0.12).
+///
+/// Probed once at executor startup by [`probe_pgtrickle_capabilities`] and
+/// cached for the lifetime of the executor.  Allows executor code to gate
+/// behaviour on actual API availability rather than a boolean flag.
+#[derive(Debug, Clone, Default)]
+pub struct PgtrickleCaps {
+    /// pg_trickle schema is present on the target database.
+    pub installed: bool,
+    /// `pgtrickle.create_stream_table` function exists.
+    pub has_create: bool,
+    /// `pgtrickle.alter_stream_table` function exists.
+    pub has_alter: bool,
+    /// `pgtrickle.drop_stream_table` function exists.
+    pub has_drop: bool,
+    /// `pgtrickle.pause_scheduler` function exists.
+    pub has_pause_scheduler: bool,
+    /// `pgtrickle.resume_scheduler` function exists.
+    pub has_resume_scheduler: bool,
+    /// `pgtrickle.pgt_stream_tables.refresh_status` column is present.
+    pub has_refresh_status: bool,
+}
+
+impl PgtrickleCaps {
+    /// Returns true if the core pg_trickle API (create, alter, drop) is available.
+    pub fn is_fully_installed(&self) -> bool {
+        self.installed && self.has_create && self.has_alter && self.has_drop
+    }
+}
+
+/// Probe the live database for pg_trickle capabilities (M-07 / v0.12).
+///
+/// Uses `to_regprocedure` to check whether each expected function signature
+/// resolves in the current search path, then checks for the
+/// `pgtrickle.pgt_stream_tables.refresh_status` column.
+///
+/// Never returns an error — a failed probe simply marks capabilities as absent.
+pub async fn probe_pgtrickle_capabilities(
+    client: &tokio_postgres::Client,
+) -> PgtrickleCaps {
+    let installed: bool = client
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = 'pgtrickle')",
+            &[],
+        )
+        .await
+        .map(|r| r.get::<_, bool>(0))
+        .unwrap_or(false);
+
+    if !installed {
+        return PgtrickleCaps::default();
+    }
+
+    // Check individual functions with to_regprocedure.
+    let check = async |sig: &str| -> bool {
+        client
+            .query_one(
+                "SELECT to_regprocedure($1::text) IS NOT NULL",
+                &[&sig],
+            )
+            .await
+            .map(|r| r.get::<_, bool>(0))
+            .unwrap_or(false)
+    };
+
+    let has_create = check("pgtrickle.create_stream_table(text, text, text, text, text, text)").await;
+    let has_alter  = check("pgtrickle.alter_stream_table(text, text, text, text, text, text)").await;
+    let has_drop   = check("pgtrickle.drop_stream_table(text, text)").await;
+    let has_pause_scheduler = check("pgtrickle.pause_scheduler(text[])").await;
+    let has_resume_scheduler = check("pgtrickle.resume_scheduler(text[])").await;
+
+    // Check for refresh_status column.
+    let has_refresh_status: bool = client
+        .query_one(
+            "SELECT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'pgtrickle'
+                  AND table_name = 'pgt_stream_tables'
+                  AND column_name = 'refresh_status'
+            )",
+            &[],
+        )
+        .await
+        .map(|r| r.get::<_, bool>(0))
+        .unwrap_or(false);
+
+    PgtrickleCaps {
+        installed,
+        has_create,
+        has_alter,
+        has_drop,
+        has_pause_scheduler,
+        has_resume_scheduler,
+        has_refresh_status,
+    }
+}
+
+
 /// Result of a successful plan execution (U-05).
 ///
 /// Separates the `migration_id` (row id in `aqueduct.migrations`) from the
@@ -300,7 +398,8 @@ impl<'a> PlanExecutor<'a> {
             })
             .collect();
 
-        let pgtrickle_available = self.pgtrickle_exists().await;
+        // Gate WaitForRefresh on capability probe (M-07/C-04).
+        let pgtrickle_caps = probe_pgtrickle_capabilities(self.client).await;
 
         // Guard: always resume the scheduler, even on error.
         let mut scheduler_paused = false;
@@ -325,7 +424,7 @@ impl<'a> PlanExecutor<'a> {
                         // the lock so that no refresh can start between the
                         // pause and the DDL.  Failure to pause is fatal (S-14):
                         // better to refuse than to corrupt data.
-                        if pgtrickle_available && !affected_nodes.is_empty() {
+                        if pgtrickle_caps.has_pause_scheduler && !affected_nodes.is_empty() {
                             self.client
                                 .execute(
                                     "SELECT pgtrickle.pause_scheduler($1::text[])",
@@ -349,8 +448,14 @@ impl<'a> PlanExecutor<'a> {
                     }
 
                     PlanStep::CreateStreamTable { spec } => {
-                        if !pgtrickle_available {
+                        if !pgtrickle_caps.installed {
                             return Err(AqueductError::PgTrickleNotInstalled);
+                        }
+                        if !pgtrickle_caps.has_create {
+                            return Err(AqueductError::PgtrickleApiMismatch {
+                                expected: "pgtrickle.create_stream_table(text, text, text, text, text, text)".to_string(),
+                                found: "function not found".to_string(),
+                            });
                         }
                         self.client
                             .execute(
@@ -387,7 +492,7 @@ impl<'a> PlanExecutor<'a> {
                         cdc_mode,
                         new_query,
                     } => {
-                        if pgtrickle_available {
+                        if pgtrickle_caps.has_alter {
                             // Pass new_query when present so query changes are applied.
                             self.client
                                 .execute(
@@ -406,7 +511,7 @@ impl<'a> PlanExecutor<'a> {
                     }
 
                     PlanStep::DropStreamTable { name, cascade: _ } => {
-                        if pgtrickle_available {
+                        if pgtrickle_caps.has_drop {
                             self.client
                                 .execute(
                                     "SELECT pgtrickle.drop_stream_table($1, $2)",
@@ -513,7 +618,7 @@ impl<'a> PlanExecutor<'a> {
                             spec.qualified_name,
                             green_schema
                         );
-                        if pgtrickle_available {
+                        if pgtrickle_caps.has_create {
                             self.client
                                 .execute(
                                     "SELECT pgtrickle.create_stream_table($1, $2, $3, $4, $5, $6)",
@@ -782,7 +887,7 @@ impl<'a> PlanExecutor<'a> {
                             "Switching '{}' from IMMEDIATE to DIFFERENTIAL for rebuild window",
                             name
                         );
-                        if pgtrickle_available {
+                        if pgtrickle_caps.has_alter {
                             if let Err(e) = self
                                 .client
                                 .execute(
@@ -811,7 +916,7 @@ impl<'a> PlanExecutor<'a> {
                             "Restoring '{}' to IMMEDIATE mode after rebuild",
                             name
                         );
-                        if pgtrickle_available {
+                        if pgtrickle_caps.has_alter {
                             if let Err(e) = self
                                 .client
                                 .execute(
@@ -841,7 +946,9 @@ impl<'a> PlanExecutor<'a> {
                             name,
                             deadline_secs
                         );
-                        if pgtrickle_available {
+                        // C-04: gate on capability probe — only poll if pg_trickle
+                        // actually exposes the refresh_status column (M-07/v0.12).
+                        if pgtrickle_caps.installed && pgtrickle_caps.has_refresh_status {
                             let deadline =
                                 std::time::Instant::now()
                                     + std::time::Duration::from_secs(*deadline_secs);
@@ -925,14 +1032,14 @@ impl<'a> PlanExecutor<'a> {
             }
         }
         let _ = scheduler_paused; // suppress unused warning
-
-        // Cancel the heartbeat task.
         drop(heartbeat_cancel);
 
         result
     }
 
     /// Check if the pgtrickle schema is available.
+    /// Kept for backward compatibility; prefer `probe_pgtrickle_capabilities()`.
+    #[allow(dead_code)]
     async fn pgtrickle_exists(&self) -> bool {
         self.client
             .query_one(

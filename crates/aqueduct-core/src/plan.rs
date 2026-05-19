@@ -435,6 +435,109 @@ fn apply_diamond_consistency_promotion(
     }
 }
 
+/// Derive a `PlanSummary` from an already-built step slice (P-06 / v0.12).
+///
+/// This function allows callers to recompute the summary after the fact (e.g.,
+/// when deserializing a plan from disk) without having to track counters inline
+/// during plan construction.
+///
+/// Invariant: `plan_stats(plan.steps) == plan.summary` for any `Plan` produced
+/// by `build_plan`.
+pub fn plan_stats(steps: &[PlanStep]) -> PlanSummary {
+    let mut summary = PlanSummary::default();
+
+    for step in steps {
+        match step {
+            PlanStep::CreateStreamTable { spec } => {
+                summary.creates += 1;
+                summary.create_count += 1;
+                summary.changes.push(PlanChange {
+                    symbol: "+".to_string(),
+                    name: spec.qualified_name.to_string(),
+                    class: "create".to_string(),
+                    description: "create stream table".to_string(),
+                });
+            }
+            PlanStep::DropStreamTable { name, .. } => {
+                summary.drops += 1;
+                summary.destructive_count += 1;
+                summary.changes.push(PlanChange {
+                    symbol: "-".to_string(),
+                    name: name.to_string(),
+                    class: "drop".to_string(),
+                    description: "drop stream table".to_string(),
+                });
+            }
+            PlanStep::AlterStreamTable { name, .. } => {
+                summary.alters += 1;
+                summary.in_place_count += 1;
+                summary.changes.push(PlanChange {
+                    symbol: "~".to_string(),
+                    name: name.to_string(),
+                    class: "in-place".to_string(),
+                    description: "alter stream table (in-place)".to_string(),
+                });
+            }
+            PlanStep::AlterBaseTable { name, .. } => {
+                summary.alters += 1;
+                // Cascades are reflected as subsequent Create/Drop/Alter steps.
+                summary.changes.push(PlanChange {
+                    symbol: "~".to_string(),
+                    name: name.to_string(),
+                    class: "base-table".to_string(),
+                    description: "alter base table DDL".to_string(),
+                });
+            }
+            PlanStep::Backfill { mode, .. } => {
+                if mode == "FULL" {
+                    summary.rebuild_count += 1;
+                    summary.destructive_count += 1;
+                }
+            }
+            PlanStep::ManageConsumerView { spec, action } => match action.as_str() {
+                "create" => {
+                    summary.consumer_creates += 1;
+                    summary.changes.push(PlanChange {
+                        symbol: "+".to_string(),
+                        name: spec.expose_as.to_string(),
+                        class: "consumer-view".to_string(),
+                        description: "create consumer view".to_string(),
+                    });
+                }
+                "alter" => {
+                    summary.consumer_alters += 1;
+                    summary.changes.push(PlanChange {
+                        symbol: "~".to_string(),
+                        name: spec.expose_as.to_string(),
+                        class: "consumer-view".to_string(),
+                        description: "alter consumer view".to_string(),
+                    });
+                }
+                "drop" => {
+                    summary.consumer_drops += 1;
+                    summary.changes.push(PlanChange {
+                        symbol: "-".to_string(),
+                        name: spec.expose_as.to_string(),
+                        class: "consumer-view".to_string(),
+                        description: "drop consumer view".to_string(),
+                    });
+                }
+                _ => {}
+            },
+            PlanStep::CreateGreenSchema { .. }
+            | PlanStep::CreateStreamTableInGreen { .. }
+            | PlanStep::WaitForConvergence { .. }
+            | PlanStep::SwapConsumerViews { .. }
+            | PlanStep::RetireBlueSchema { .. } => {
+                summary.blue_green_count += 1;
+            }
+            _ => {} // LockDag, UnlockDag, RecordSnapshot, ValidateQuery, etc. — no summary impact.
+        }
+    }
+
+    summary
+}
+
 /// Build a Plan from a DagDiff.
 pub fn build_plan(
     project: &str,
@@ -930,6 +1033,30 @@ mod tests {
         assert!(plan.summary.is_empty());
         // Lock + RecordSnapshot + Unlock
         assert_eq!(plan.steps.len(), 3);
+    }
+
+    /// P-06: plan_stats derives a consistent summary from an existing step slice.
+    #[test]
+    fn test_plan_stats_create() {
+        let diff = DagDiff {
+            deltas: vec![make_create_delta("order_totals")],
+            source_deltas: vec![],
+            consumer_deltas: vec![],
+        };
+        let topo = vec![QualifiedName::new("public", "order_totals")];
+        let plan = build_plan("test-project", Some(0), 1, &diff, &topo).expect("build plan");
+
+        let stats = plan_stats(&plan.steps);
+        assert_eq!(stats.creates, plan.summary.creates);
+        assert_eq!(stats.drops, plan.summary.drops);
+        assert_eq!(stats.alters, plan.summary.alters);
+    }
+
+    /// P-06: plan_stats on an empty step slice returns empty summary.
+    #[test]
+    fn test_plan_stats_empty() {
+        let stats = plan_stats(&[]);
+        assert!(stats.is_empty());
     }
 
     // ── v0.9 PlanStep variant description tests ───────────────────────────────

@@ -1,9 +1,9 @@
 use aqueduct_core::{
     config::AqueductConfig,
-    dag::build_dag_state,
+    dag::{build_dag_state, QualifiedName},
     preview::{
-        create_preview_cnpg, create_preview_native, create_preview_neon, drop_preview_native,
-        list_preview_schemas, PreviewBackend, PreviewConfig,
+        collect_subgraph, create_preview_cnpg, create_preview_native, create_preview_neon,
+        drop_preview_native, list_preview_schemas, PreviewBackend, PreviewConfig,
     },
 };
 use clap::Args;
@@ -60,6 +60,14 @@ pub struct PreviewArgs {
     /// Neon project ID (required for --backend neon).
     #[arg(long, env = "NEON_PROJECT_ID")]
     pub neon_project_id: Option<String>,
+
+    /// Restrict the preview to the subgraph anchored at this table name (P-07 / v0.12).
+    ///
+    /// Only the named table, its ancestors (dependencies), and its descendants
+    /// (tables that depend on it) are included in the preview.
+    /// Example: `--table public.order_totals`
+    #[arg(long)]
+    pub table: Option<String>,
 }
 
 pub async fn run(args: PreviewArgs) -> anyhow::Result<()> {
@@ -140,6 +148,25 @@ pub async fn run(args: PreviewArgs) -> anyhow::Result<()> {
     config.backend = backend.clone();
     config.sample_fraction = args.sample;
     config.recreate = args.recreate;
+
+    // P-07: wire up the --table subgraph anchor flag.
+    if let Some(ref table_str) = args.table {
+        let anchor = if table_str.contains('.') {
+            let parts: Vec<&str> = table_str.splitn(2, '.').collect();
+            QualifiedName::new(parts[0], parts[1])
+        } else {
+            QualifiedName::new("public", table_str)
+        };
+        // Validate the anchor exists in the DAG.
+        let subgraph = collect_subgraph(&desired, &anchor);
+        if subgraph.is_empty() {
+            anyhow::bail!(
+                "Table '{}' not found in the DAG. Use `aqueduct status` to list known tables.",
+                table_str
+            );
+        }
+        config.anchor_table = Some(anchor);
+    }
 
     let env = match &config.backend {
         PreviewBackend::Native => create_preview_native(&client, &config, &desired).await?,

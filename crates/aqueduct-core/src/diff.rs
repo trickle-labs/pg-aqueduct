@@ -8,6 +8,105 @@ use crate::dag::{ConsumerSpec, DagState, QualifiedName, StreamTableSpec};
 static WHITESPACE_RE: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"\s+").expect("valid static regex"));
 
+/// Source dependency index: maps each `QualifiedName` source table to the set of
+/// stream tables whose queries reference it.
+///
+/// Built once per `compute_diff` call (P-01 / v0.12) so that cascade impact
+/// detection is O(N) rather than O(changed_sources × stream_tables × parse_cost).
+type SourceIndex = std::collections::HashMap<QualifiedName, Vec<QualifiedName>>;
+
+/// Build the source dependency index for a `DagState`.
+///
+/// For every stream table, parse its query once and collect the set of source
+/// tables it references.  The result is a map from source name to the list of
+/// stream table names that depend on it.
+fn build_source_index(desired: &DagState) -> SourceIndex {
+    let mut index: SourceIndex = std::collections::HashMap::new();
+
+    for stream_table in &desired.stream_tables {
+        // Collect every table reference from the stream query.
+        let refs = collect_table_refs(&stream_table.query);
+        for source_ref in refs {
+            index
+                .entry(source_ref)
+                .or_default()
+                .push(stream_table.qualified_name.clone());
+        }
+    }
+
+    index
+}
+
+/// Parse a SQL query and return all qualified table names referenced in FROM / JOIN clauses.
+fn collect_table_refs(sql: &str) -> Vec<QualifiedName> {
+    use sqlparser::dialect::PostgreSqlDialect;
+    use sqlparser::parser::Parser;
+
+    let dialect = PostgreSqlDialect {};
+    let Ok(stmts) = Parser::parse_sql(&dialect, sql) else {
+        return vec![];
+    };
+
+    let mut refs = Vec::new();
+    for stmt in &stmts {
+        collect_refs_stmt(stmt, &mut refs);
+    }
+    refs
+}
+
+fn collect_refs_stmt(stmt: &sqlparser::ast::Statement, out: &mut Vec<QualifiedName>) {
+    use sqlparser::ast::Statement;
+    if let Statement::Query(q) = stmt {
+        collect_refs_set_expr(&q.body, out);
+    }
+}
+
+fn collect_refs_set_expr(expr: &sqlparser::ast::SetExpr, out: &mut Vec<QualifiedName>) {
+    use sqlparser::ast::SetExpr;
+    match expr {
+        SetExpr::Select(sel) => {
+            for twj in &sel.from {
+                collect_refs_factor(&twj.relation, out);
+                for j in &twj.joins {
+                    collect_refs_factor(&j.relation, out);
+                }
+            }
+        }
+        SetExpr::SetOperation { left, right, .. } => {
+            collect_refs_set_expr(left, out);
+            collect_refs_set_expr(right, out);
+        }
+        _ => {}
+    }
+}
+
+fn collect_refs_factor(factor: &sqlparser::ast::TableFactor, out: &mut Vec<QualifiedName>) {
+    use sqlparser::ast::TableFactor;
+    match factor {
+        TableFactor::Table { name, .. } => {
+            let parts: Vec<&str> = name.0.iter().map(|id| id.value.as_str()).collect();
+            let qname = match parts.as_slice() {
+                [schema, table] => QualifiedName::new(*schema, *table),
+                [table] => QualifiedName::new("public", *table),
+                _ => return,
+            };
+            out.push(qname);
+        }
+        TableFactor::Derived { subquery, .. } => {
+            collect_refs_set_expr(&subquery.body, out);
+        }
+        TableFactor::NestedJoin {
+            table_with_joins, ..
+        } => {
+            collect_refs_factor(&table_with_joins.relation, out);
+            for j in &table_with_joins.joins {
+                collect_refs_factor(&j.relation, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// The kind of change for a single stream table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeltaKind {
@@ -194,23 +293,28 @@ pub fn compute_diff(desired: &DagState, actual: &DagState) -> DagDiff {
 /// For owned source tables, we compare desired DDL against actual DDL (stored in
 /// `aqueduct.dag_versions`).  When the DDL changes, we identify every stream-table
 /// node whose query references the source table and mark it for rebuild.
+///
+/// Uses a pre-built source dependency index (P-01 / v0.12) so each stream-table
+/// query is parsed exactly once regardless of how many sources changed.
 fn compute_source_deltas(
     desired: &DagState,
     actual: &DagState,
     _stream_deltas: &[NodeDelta],
 ) -> Vec<SourceDelta> {
+    // P-01: Build source index once, then look up per changed source in O(1).
+    let source_index = build_source_index(desired);
+
     let mut source_deltas = Vec::new();
 
     for desired_source in &desired.sources {
         if !desired_source.owned {
-            // Unowned sources: tracked for reference but no DDL emitted.
             continue;
         }
 
         let actual_source = actual.find_source(&desired_source.qualified_name);
 
         let kind = match actual_source {
-            None => SourceDeltaKind::AlterDdl, // New owned source — treat as DDL change.
+            None => SourceDeltaKind::AlterDdl,
             Some(actual_src) => {
                 if normalise_sql(desired_source.create_sql.as_deref().unwrap_or(""))
                     != normalise_sql(actual_src.create_sql.as_deref().unwrap_or(""))
@@ -226,8 +330,19 @@ fn compute_source_deltas(
             continue;
         }
 
-        // Find stream tables that reference this source table.
-        let cascade_impacts = find_cascade_impacts(&desired_source.qualified_name, desired);
+        // O(1) lookup using the pre-built index instead of re-parsing all queries.
+        let cascade_impacts = source_index
+            .get(&desired_source.qualified_name)
+            .map(|tables| {
+                tables
+                    .iter()
+                    .map(|t| CascadeImpact {
+                        stream_table: t.clone(),
+                        class: "rebuild".to_string(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
         source_deltas.push(SourceDelta {
             qualified_name: desired_source.qualified_name.clone(),
@@ -240,100 +355,10 @@ fn compute_source_deltas(
     source_deltas
 }
 
-/// Find all stream tables that reference the given source table in their query.
-///
-/// Returns the list of impacted stream tables with their migration class
-/// (always Rebuild for a base-table DDL change, since column structure may have changed).
-fn find_cascade_impacts(source: &QualifiedName, desired: &DagState) -> Vec<CascadeImpact> {
-    let mut impacts = Vec::new();
-
-    for stream_table in &desired.stream_tables {
-        if query_references_table(&stream_table.query, source) {
-            impacts.push(CascadeImpact {
-                stream_table: stream_table.qualified_name.clone(),
-                class: "rebuild".to_string(),
-            });
-        }
-    }
-
-    impacts
-}
-
 /// Check whether a SQL query references the given qualified table name.
-fn query_references_table(sql: &str, target: &QualifiedName) -> bool {
-    use sqlparser::dialect::PostgreSqlDialect;
-    use sqlparser::parser::Parser;
-
-    let dialect = PostgreSqlDialect {};
-    let Ok(stmts) = Parser::parse_sql(&dialect, sql) else {
-        return false;
-    };
-
-    for stmt in &stmts {
-        if stmt_references_table(stmt, target) {
-            return true;
-        }
-    }
-    false
-}
-
-fn stmt_references_table(stmt: &sqlparser::ast::Statement, target: &QualifiedName) -> bool {
-    use sqlparser::ast::Statement;
-    if let Statement::Query(q) = stmt {
-        return set_expr_references_table(&q.body, target);
-    }
-    false
-}
-
-fn set_expr_references_table(expr: &sqlparser::ast::SetExpr, target: &QualifiedName) -> bool {
-    use sqlparser::ast::SetExpr;
-    match expr {
-        SetExpr::Select(sel) => {
-            for table_with_joins in &sel.from {
-                if table_factor_references(&table_with_joins.relation, target) {
-                    return true;
-                }
-                for join in &table_with_joins.joins {
-                    if table_factor_references(&join.relation, target) {
-                        return true;
-                    }
-                }
-            }
-            false
-        }
-        SetExpr::SetOperation { left, right, .. } => {
-            set_expr_references_table(left, target) || set_expr_references_table(right, target)
-        }
-        _ => false,
-    }
-}
-
-fn table_factor_references(factor: &sqlparser::ast::TableFactor, target: &QualifiedName) -> bool {
-    use sqlparser::ast::TableFactor;
-    match factor {
-        TableFactor::Table { name, .. } => {
-            let parts: Vec<&str> = name.0.iter().map(|id| id.value.as_str()).collect();
-            let qname = match parts.as_slice() {
-                [schema, table] => QualifiedName::new(*schema, *table),
-                [table] => QualifiedName::new("public", *table),
-                _ => return false,
-            };
-            &qname == target
-        }
-        TableFactor::Derived { subquery, .. } => set_expr_references_table(&subquery.body, target),
-        TableFactor::NestedJoin {
-            table_with_joins, ..
-        } => {
-            if table_factor_references(&table_with_joins.relation, target) {
-                return true;
-            }
-            table_with_joins
-                .joins
-                .iter()
-                .any(|j| table_factor_references(&j.relation, target))
-        }
-        _ => false,
-    }
+/// Kept for targeted cascade checks and tests.
+pub fn query_references_table(sql: &str, target: &QualifiedName) -> bool {
+    collect_table_refs(sql).contains(target)
 }
 
 fn classify_change(desired: &StreamTableSpec, actual: &StreamTableSpec) -> DeltaKind {
@@ -529,5 +554,48 @@ mod tests {
         };
         let diff = compute_diff(&desired, &actual);
         assert_eq!(diff.deltas[0].kind, DeltaKind::AlterQuery);
+    }
+
+    /// P-01: Source dependency index is built once and used for cascade impact
+    /// detection without re-parsing every stream query.
+    #[test]
+    fn test_source_index_builds_correctly() {
+        use crate::dag::{QualifiedName, RefreshMode, StreamTableSpec};
+
+        let q = "SELECT id, total FROM public.orders JOIN public.order_items USING (id)";
+        let desired = DagState {
+            stream_tables: vec![StreamTableSpec {
+                qualified_name: QualifiedName::new("public", "order_totals"),
+                query: q.to_string(),
+                refresh_mode: RefreshMode::Differential,
+                schedule: "30s".to_string(),
+                cdc_mode: None,
+                explicit_depends_on: vec![],
+                depends_on: vec![],
+                cypher_source: None,
+            }],
+            sources: vec![],
+            consumers: vec![],
+        };
+
+        let index = build_source_index(&desired);
+        let orders_key = QualifiedName::new("public", "orders");
+        let items_key = QualifiedName::new("public", "order_items");
+
+        assert!(index.contains_key(&orders_key), "index should contain orders");
+        assert!(index.contains_key(&items_key), "index should contain order_items");
+
+        let orders_deps = &index[&orders_key];
+        assert!(orders_deps.contains(&QualifiedName::new("public", "order_totals")));
+    }
+
+    /// P-01: query_references_table uses the shared collector internally.
+    #[test]
+    fn test_query_references_table() {
+        let sql = "SELECT * FROM public.orders WHERE id = 1";
+        let target = QualifiedName::new("public", "orders");
+        let other = QualifiedName::new("public", "products");
+        assert!(query_references_table(sql, &target));
+        assert!(!query_references_table(sql, &other));
     }
 }

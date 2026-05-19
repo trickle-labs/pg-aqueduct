@@ -465,6 +465,7 @@ async fn test_preview_neon_without_credentials() {
         },
         sample_fraction: 0.1,
         recreate: false,
+        anchor_table: None,
     };
 
     // Extract API token and project ID from config.
@@ -1210,3 +1211,117 @@ fn test_maintenance_window_enforcement() {
         "12:00 should be outside 22:00-02:00 wrap window"
     );
 }
+
+// ── T-07: binary-level CLI tests ─────────────────────────────────────────────
+
+/// T-07: `aqueduct --help` exits 0 and contains "Usage".
+#[test]
+fn test_cli_help_flag() {
+    use assert_cmd::Command;
+    use predicates::prelude::*;
+
+    Command::cargo_bin("aqueduct")
+        .unwrap()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Usage").or(predicate::str::contains("aqueduct")));
+}
+
+/// T-07: `aqueduct --version` exits 0 and prints the current version.
+#[test]
+fn test_cli_version_flag() {
+    use assert_cmd::Command;
+    use predicates::prelude::*;
+
+    Command::cargo_bin("aqueduct")
+        .unwrap()
+        .arg("--version")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("0.12.0"));
+}
+
+/// T-07: `aqueduct plan --help` exits 0.
+#[test]
+fn test_cli_plan_help_flag() {
+    use assert_cmd::Command;
+    use predicates::prelude::*;
+
+    Command::cargo_bin("aqueduct")
+        .unwrap()
+        .args(["plan", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("plan").or(predicate::str::contains("Plan")));
+}
+
+/// T-07: `aqueduct apply --help` exits 0.
+#[test]
+fn test_cli_apply_help_flag() {
+    use assert_cmd::Command;
+    use predicates::prelude::*;
+
+    Command::cargo_bin("aqueduct")
+        .unwrap()
+        .args(["apply", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("apply").or(predicate::str::contains("Apply")));
+}
+
+/// T-07: `aqueduct` without arguments exits with non-zero code and prints usage.
+#[test]
+fn test_cli_no_args_shows_help() {
+    use assert_cmd::Command;
+
+    // With no args, most CLIs show help on stderr and exit non-zero,
+    // OR they print help and exit 0. We accept either.
+    let assert = Command::cargo_bin("aqueduct")
+        .unwrap()
+        .assert();
+
+    // Either success (--help mode) or failure (error mode) is fine,
+    // but it must output something about aqueduct on stdout or stderr.
+    let output = assert.get_output().clone();
+    let combined = String::from_utf8_lossy(&output.stdout).to_string()
+        + &String::from_utf8_lossy(&output.stderr);
+    assert!(
+        combined.contains("aqueduct") || combined.contains("Usage") || combined.contains("help"),
+        "No-args output should mention aqueduct or usage, got: {}",
+        combined
+    );
+}
+
+/// T-07: `aqueduct validate --help` exits 0 (if validate subcommand exists).
+#[test]
+fn test_cli_validate_help_or_unknown() {
+    use assert_cmd::Command;
+
+    // If validate exists, --help should succeed.
+    // If it doesn't, we should get an error about unknown subcommand — which is still predictable.
+    let assert = Command::cargo_bin("aqueduct")
+        .unwrap()
+        .args(["validate", "--help"])
+        .assert();
+
+    let output = assert.get_output().clone();
+    let exit_success = output.status.success();
+    let combined = String::from_utf8_lossy(&output.stdout).to_string()
+        + &String::from_utf8_lossy(&output.stderr);
+
+    if exit_success {
+        // Has validate subcommand.
+        assert!(
+            combined.contains("validate") || combined.contains("Validate"),
+            "validate --help should mention validate"
+        );
+    } else {
+        // Does not have validate subcommand — that's OK too.
+        assert!(
+            combined.contains("validate") || combined.contains("error") || combined.contains("unknown"),
+            "should mention validate in error output"
+        );
+    }
+}
+

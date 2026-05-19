@@ -1,7 +1,7 @@
 /// SQL statements for bootstrapping the aqueduct catalog schema.
 /// These are embedded directly in the binary via include_str!() in a real deployment;
 /// for v0.1 we keep them as a constant in this module.
-pub const CATALOG_SCHEMA_VERSION: u32 = 3;
+pub const CATALOG_SCHEMA_VERSION: u32 = 4;
 
 /// The SQL to create the aqueduct catalog schema (v1, baseline).
 pub const CATALOG_INIT_SQL: &str = r#"
@@ -134,12 +134,44 @@ SET value_jsonb = '3'::jsonb, measured_at = now()
 WHERE key = 'catalog_schema_version';
 "#;
 
+/// Catalog migration from v3 to v4: adds performance indexes for common query patterns (P-02 / v0.12).
+pub const CATALOG_MIGRATE_V3_TO_V4_SQL: &str = r#"
+-- Performance indexes for high-traffic catalog queries (P-02 / v0.12).
+-- These indexes cover the most common access patterns:
+-- 1. Listing DAG versions for a project (plan/status/rollback commands).
+-- 2. Checking migration status for a project (status/resume commands).
+-- 3. Querying in-flight migrations by project and start time (heartbeat/resume).
+-- 4. Looking up project locks (LockDag/UnlockDag steps).
+
+CREATE INDEX IF NOT EXISTS aqueduct_dag_versions_project
+    ON aqueduct.dag_versions (project, version DESC);
+
+CREATE INDEX IF NOT EXISTS aqueduct_migrations_project_status
+    ON aqueduct.migrations (project, status)
+    WHERE status IN ('running', 'recoverable_failure');
+
+CREATE INDEX IF NOT EXISTS aqueduct_migrations_project_started
+    ON aqueduct.migrations (project, started_at DESC);
+
+CREATE INDEX IF NOT EXISTS aqueduct_locks_project
+    ON aqueduct.locks (project);
+
+-- Bump catalog version to 4.
+UPDATE aqueduct.cluster_profile
+SET value_jsonb = '4'::jsonb, measured_at = now()
+WHERE key = 'catalog_schema_version';
+"#;
+
 /// Combined init SQL for fresh installations (creates v2 schema directly).
-/// Kept for backward-compatibility; new code should use CATALOG_INIT_V3_SQL.
-pub const CATALOG_INIT_V2_SQL: &str = CATALOG_INIT_V3_SQL;
+/// Kept for backward-compatibility; new code should use CATALOG_INIT_V4_SQL.
+pub const CATALOG_INIT_V2_SQL: &str = CATALOG_INIT_V4_SQL;
 
 /// Combined init SQL for fresh installations (creates v3 schema directly).
-pub const CATALOG_INIT_V3_SQL: &str = r#"
+/// Kept for backward-compatibility; new code should use CATALOG_INIT_V4_SQL.
+pub const CATALOG_INIT_V3_SQL: &str = CATALOG_INIT_V4_SQL;
+
+/// Combined init SQL for fresh installations at v4 (includes performance indexes).
+pub const CATALOG_INIT_V4_SQL: &str = r#"
 CREATE SCHEMA IF NOT EXISTS aqueduct;
 
 -- Records a full snapshot of the DAG spec at each successful apply.
@@ -227,7 +259,6 @@ CREATE TABLE IF NOT EXISTS aqueduct.blue_green_deployments (
 );
 
 -- Multi-project ownership registry: tracks which project owns each stream table.
--- Populated on CreateStreamTable, removed on DropStreamTable.
 CREATE TABLE IF NOT EXISTS aqueduct.stream_table_ownership (
     project       text        NOT NULL,
     schema_name   text        NOT NULL,
@@ -236,9 +267,23 @@ CREATE TABLE IF NOT EXISTS aqueduct.stream_table_ownership (
     PRIMARY KEY (schema_name, table_name)
 );
 
+-- Performance indexes (P-02 / v0.12).
+CREATE INDEX IF NOT EXISTS aqueduct_dag_versions_project
+    ON aqueduct.dag_versions (project, version DESC);
+
+CREATE INDEX IF NOT EXISTS aqueduct_migrations_project_status
+    ON aqueduct.migrations (project, status)
+    WHERE status IN ('running', 'recoverable_failure');
+
+CREATE INDEX IF NOT EXISTS aqueduct_migrations_project_started
+    ON aqueduct.migrations (project, started_at DESC);
+
+CREATE INDEX IF NOT EXISTS aqueduct_locks_project
+    ON aqueduct.locks (project);
+
 -- Record the catalog schema version.
 INSERT INTO aqueduct.cluster_profile (key, value_jsonb, measured_at)
-VALUES ('catalog_schema_version', '3'::jsonb, now())
+VALUES ('catalog_schema_version', '4'::jsonb, now())
 ON CONFLICT (key) DO NOTHING;
 "#;
 
@@ -438,6 +483,13 @@ pub async fn ensure_catalog_current(client: &tokio_postgres::Client) -> crate::e
         if current_version < 3 {
             client
                 .batch_execute(CATALOG_MIGRATE_V2_TO_V3_SQL)
+                .await
+                .map_err(|e| crate::error::AqueductError::Catalog(e.to_string()))?;
+        }
+        // Apply the v3→v4 migration if needed (P-02 / v0.12).
+        if current_version < 4 {
+            client
+                .batch_execute(CATALOG_MIGRATE_V3_TO_V4_SQL)
                 .await
                 .map_err(|e| crate::error::AqueductError::Catalog(e.to_string()))?;
         }

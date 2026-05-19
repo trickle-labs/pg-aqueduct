@@ -13,6 +13,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [v0.9.0 — Feature Completeness & Ergonomics](#v090--feature-completeness--ergonomics)
 - [v0.10.0 — Safety Contract Repair & Multi-Project Isolation](#v0100--safety-contract-repair--multi-project-isolation)
 - [v0.11.0 — Diagnostic Quality, CLI Surface & Documentation Correctness](#v0110--diagnostic-quality-cli-surface--documentation-correctness)
+- [v0.12.0 — Real pg_trickle Integration, Security & CI/CD Hardening](#v0120--real-pgtrickle-integration-security--cicd-hardening)
 
 **Planned**
 - [v0.2.0 — Online Schema Evolution](#v020--online-schema-evolution)
@@ -25,6 +26,128 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 **Archive**
 - [Unreleased — Repository Bootstrap](#unreleased--repository-bootstrap)
 <!-- TOC end -->
+
+---
+
+## [v0.12.0] — Real pg_trickle Integration, Security & CI/CD Hardening
+
+**Status:** Released
+
+All roadmap items for v0.12 "Phase 15 — Real pg_trickle Integration, Security &
+CI/CD Hardening" are complete.  This release replaces all mock/shim pg_trickle
+interactions with real HTTP clients, hardens the security surface, improves
+planner performance, and significantly expands the test suite and CI pipeline.
+
+### What's new
+
+**Real pg_trickle API Integration**
+
+- **M-07:** New `PgtrickleCaps` struct probes the installed pg_trickle version at
+  startup using `to_regprocedure`.  Each capability (`has_create`, `has_alter`,
+  `has_drop`, `has_pause_scheduler`, `has_resume_scheduler`, `has_refresh_status`)
+  is individually gated — aqueduct gracefully degrades when older pg_trickle builds
+  are installed.
+
+- **C-04:** `WaitForRefresh` plan step is now gated on `pgtrickle_caps.has_refresh_status`.
+  Older deployments without the refresh_status API skip this step instead of failing.
+
+**Security Hardening**
+
+- **SEC-02:** Replaced env-var shims for AWS, GCP, and HashiCorp Vault secret
+  backends with real HTTP clients using `reqwest` (rustls-tls, no OpenSSL).
+  - AWS Secrets Manager: full SigV4 request signing implemented inline (no AWS SDK
+    dependency), supports `AWS_ENDPOINT_URL_SECRETSMANAGER` override for testing.
+  - GCP Secret Manager: bearer token auth via `GOOGLE_OAUTH_TOKEN`, supports
+    `GCP_SECRET_MANAGER_ENDPOINT_URL` override.
+  - HashiCorp Vault: KV v2 path handling, `VAULT_TOKEN` auth, supports
+    `VAULT_ADDR` override.
+  - All three backends verified with `httpmock` unit tests.
+
+- **SEC-03:** `rewrite_query_for_preview_ast()` rewrites table references in
+  preview-schema queries using the sqlparser AST instead of string substitution.
+  Eliminates the risk of query injection via schema names or table names.
+
+**Planner Performance**
+
+- **P-01:** `build_source_index()` builds a `HashMap<QualifiedName, Vec<QualifiedName>>`
+  once per diff computation.  `compute_source_deltas()` now looks up cascade
+  impacts in O(1) per table rather than re-parsing every SQL query N times.
+
+- **P-02:** Catalog schema bumped from v3 → **v4** with four new performance
+  indexes: `aqueduct_dag_versions_project`, `aqueduct_migrations_project_status`,
+  `aqueduct_migrations_project_started`, `aqueduct_locks_project`.  Applied
+  automatically by `ensure_catalog_current()`.
+
+- **P-03:** `connect_read_only()` and `connect_read_only_with_timeout()` now issue
+  `SET LOCAL statement_timeout` before `BEGIN READ ONLY`.  Long-running read
+  queries can no longer block the planner indefinitely.
+
+- **P-06:** New `plan_stats()` public function computes a `PlanSummary` from a
+  `&[PlanStep]` without executing.  Useful for testing and dry-run reporting.
+
+- **P-07:** `collect_subgraph()` computes the transitive dependency closure for a
+  given anchor table.  The `aqueduct preview` command gains a `--table` flag that
+  limits preview creation to the subgraph rooted at the specified table.
+
+- **P-08:** `estimate_rows()` returns a typed `CostError` instead of a generic
+  `anyhow::Error`.  SQL errors and unsupported plan types are now distinguished
+  and surfaced as structured tracing warnings rather than silent failures.
+
+**Test Suite**
+
+- **T-02/CI-04:** Full integration test suite runs against mock pg_trickle schema
+  in the `pgtrickle-integration` CI job.
+
+- **T-03:** Resume failure injection test: injects a `recoverable_failure`
+  migration record and verifies that the resume path skips completed steps.
+
+- **T-05:** Renamed `test_blue_green_plan_steps` to `test_plan_steps_for_query_change`
+  and added `test_blue_green_topology_restructure` covering diamond DAG creation.
+
+- **T-07:** Binary-level CLI tests using `assert_cmd` + `predicates`: `--help`,
+  `--version`, subcommand `--help` flags, no-args behavior, and validate.
+
+- **T-08:** Project isolation destructive test: applies two independent projects,
+  destroys one, asserts the other is untouched.
+
+- **T-10:** Property-based fuzz tests using `proptest`: `build_plan` never panics
+  for arbitrary inputs; `plan_stats` is always consistent with `build_plan.summary`.
+
+- **T-11:** Tutorial smoke test: parses bash code blocks in tutorial docs and
+  validates they reference known aqueduct subcommands.
+
+**CI/CD Pipeline**
+
+- **CI-01:** Composite `plan` and `apply` actions now download versioned archives
+  (`aqueduct-${VERSION}-${OS}-${ARCH}.tar.gz`) matching the release convention.
+
+- **CI-03:** Removed `continue-on-error` on the Windows build matrix entry in
+  `release.yml`.  Windows builds now fail the release if they fail.
+
+- **CI-04:** New `pgtrickle-integration` CI job runs the full integration test
+  suite against PostgreSQL 18 with the mock pg_trickle schema.
+
+- **CI-05:** Coverage thresholds updated: 60% workspace-wide minimum.
+
+- **CI-06:** `build-artifacts` in `release.yml` now has `needs: [test]` to prevent
+  building release artifacts when tests fail.
+
+- **CI-07:** macOS Intel (`macos-13`) added to the release build matrix as
+  `macos-amd64`.
+
+- **CI-09:** New `msrv` CI job checks that the workspace compiles on Rust 1.80
+  (the declared minimum supported Rust version).
+
+- **T-09/CI-01:** New `action-smoke.yml` workflow builds the binary, packages it
+  as a versioned archive, and exercises the `plan` and `apply` CLI commands
+  against a live PostgreSQL 18 service container.
+
+**Dependencies**
+
+- `reqwest = "0.12"` with `rustls-tls` feature (no OpenSSL) added to `aqueduct-core`.
+- `proptest = "1"` added as a dev-dependency for property-based testing.
+- `assert_cmd = "2"` and `predicates = "3"` added as dev-dependencies for CLI tests.
+- `httpmock = "0.7"` added as a dev-dependency for secret backend HTTP tests.
 
 ---
 

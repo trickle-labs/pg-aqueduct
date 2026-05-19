@@ -68,12 +68,31 @@ pub async fn connect(dsn: &str) -> Result<tokio_postgres::Client> {
 }
 
 /// Connect to PostgreSQL and execute all subsequent queries in a read-only
-/// transaction.  Used by `plan` and `status` commands to prevent accidental
-/// writes (D-03/SEC-08).
+/// transaction with a statement timeout (P-03 / v0.12).
+///
+/// Uses `SET LOCAL statement_timeout` inside a `BEGIN READ ONLY` transaction to:
+/// 1. Prevent runaway queries from blocking other operations.
+/// 2. Ensure all subsequent queries in the session are read-only.
+///
+/// The `read_timeout` parameter is the statement timeout duration (e.g., `"30s"`).
+/// Defaults to `"30s"` when `None` is passed.
 pub async fn connect_read_only(dsn: &str) -> Result<tokio_postgres::Client> {
+    connect_read_only_with_timeout(dsn, "30s").await
+}
+
+/// Like `connect_read_only` but with a configurable statement timeout.
+pub async fn connect_read_only_with_timeout(
+    dsn: &str,
+    timeout: &str,
+) -> Result<tokio_postgres::Client> {
     let client = connect(dsn).await?;
+    // P-03: Use BEGIN READ ONLY with SET LOCAL statement_timeout to prevent
+    // long-running reads from interfering with writes, and to bound query time.
     client
-        .execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY", &[])
+        .batch_execute(&format!(
+            "SET LOCAL statement_timeout = '{}'; BEGIN READ ONLY",
+            timeout.replace('\'', "")
+        ))
         .await?;
     Ok(client)
 }
