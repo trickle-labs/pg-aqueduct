@@ -1,6 +1,6 @@
 use aqueduct_core::{
     config::AqueductConfig,
-    dag::{build_dag_state, topological_sort},
+    dag::{topological_sort, DagState},
     diff::compute_diff,
     executor::PlanExecutor,
     live_state::read_live_state,
@@ -8,7 +8,7 @@ use aqueduct_core::{
 };
 use clap::Args;
 
-use super::connect;
+use super::connect_and_migrate;
 
 #[derive(Debug, Args)]
 pub struct RollbackArgs {
@@ -41,7 +41,7 @@ pub async fn run(args: RollbackArgs) -> anyhow::Result<()> {
     let dsn =
         super::resolve_dsn(args.dsn.as_deref(), args.to.as_deref(), &args.project_dir).await?;
 
-    let client = connect(&dsn).await?;
+    let client = connect_and_migrate(&dsn).await?;
 
     let config = AqueductConfig::load(&args.project_dir).ok();
     let project_name = config
@@ -90,10 +90,11 @@ pub async fn run(args: RollbackArgs) -> anyhow::Result<()> {
 
     let _spec_jsonb: serde_json::Value = row.get(0);
 
-    // For v0.1 rollback: compute a forward migration from actual state to desired state
-    // derived from the migration files.
-    // In a full implementation, we'd restore the spec_jsonb as the desired state.
-    // For now, we re-read the migration files and compute the diff.
+    // C1 fix: deserialize spec_jsonb from DB into DagState.
+    // If spec_jsonb is a populated object (recorded after the M9 fix), use it as desired.
+    // Otherwise fall back to reading migration files from disk.
+    let spec_jsonb: serde_json::Value = row.get(0);
+
     let vars = config
         .as_ref()
         .and_then(|c| {
@@ -104,14 +105,22 @@ pub async fn run(args: RollbackArgs) -> anyhow::Result<()> {
         })
         .unwrap_or_default();
 
-    let files = aqueduct_core::parser::load_migrations(&args.project_dir, &vars)?;
-    let desired = build_dag_state(&files, true)?;
+    let desired: DagState = if spec_jsonb.is_object()
+        && !spec_jsonb.as_object().map(|m| m.is_empty()).unwrap_or(true)
+    {
+        serde_json::from_value::<DagState>(spec_jsonb)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize prior spec: {}", e))?
+    } else {
+        // Fallback: re-read migration files (for versions recorded before M9 fix).
+        let files = aqueduct_core::parser::load_migrations(&args.project_dir, &vars)?;
+        aqueduct_core::dag::build_dag_state(&files, true)?
+    };
     let actual = read_live_state(&client).await?;
 
     let next_version = current_v + 1;
     let diff = compute_diff(&desired, &actual);
     let topo = topological_sort(&desired)?;
-    let plan = build_plan(&project_name, Some(current_v), next_version, &diff, &topo);
+    let plan = build_plan(&project_name, Some(current_v), next_version, &diff, &topo)?;
 
     if plan.summary.is_empty() {
         println!(
@@ -138,7 +147,9 @@ pub async fn run(args: RollbackArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let executor = PlanExecutor::new(&client, &project_name, env!("CARGO_PKG_VERSION"), false);
+    let executor = PlanExecutor::new(&client, &project_name, env!("CARGO_PKG_VERSION"), false)
+        .with_desired_state(desired)
+        .with_connection_string(dsn.clone());
     let new_version = executor.execute(&plan).await?;
 
     println!("✓ Rollback applied. New version: v{}", new_version);

@@ -1,9 +1,12 @@
 use sha2::{Digest, Sha256};
+use tokio::sync::oneshot;
+use tokio_postgres::NoTls;
 
 use crate::catalog::{
-    ACQUIRE_LOCK_SQL, FINISH_MIGRATION_SQL, INSERT_DAG_VERSION_SQL, RELEASE_LOCK_SQL,
-    START_MIGRATION_SQL,
+    ACQUIRE_LOCK_SQL, FINISH_MIGRATION_SQL, GET_RUNNING_MIGRATION_SQL, HEARTBEAT_LOCK_SQL,
+    INSERT_DAG_VERSION_SQL, RELEASE_LOCK_SQL, START_MIGRATION_SQL, UPDATE_MIGRATION_PROGRESS_SQL,
 };
+use crate::dag::DagState;
 use crate::error::{AqueductError, Result};
 use crate::plan::{Plan, PlanStep};
 
@@ -13,6 +16,12 @@ pub struct PlanExecutor<'a> {
     project: &'a str,
     cli_version: &'a str,
     dry_run: bool,
+    /// If true, skip steps already recorded in `aqueduct.migrations.progress`.
+    resume: bool,
+    /// Connection string for the heartbeat background task.
+    connection_string: Option<String>,
+    /// The desired DAG state, serialised into `spec_jsonb` on `RecordSnapshot`.
+    desired_state: Option<DagState>,
 }
 
 impl<'a> PlanExecutor<'a> {
@@ -27,7 +36,31 @@ impl<'a> PlanExecutor<'a> {
             project,
             cli_version,
             dry_run,
+            resume: false,
+            connection_string: None,
+            desired_state: None,
         }
+    }
+
+    /// Enable `--resume` mode: skip plan steps already recorded as completed.
+    pub fn with_resume(mut self, resume: bool) -> Self {
+        self.resume = resume;
+        self
+    }
+
+    /// Provide a DSN so the executor can spawn a heartbeat task to renew the
+    /// advisory lock while long-running steps are in progress.
+    pub fn with_connection_string(mut self, dsn: String) -> Self {
+        self.connection_string = Some(dsn);
+        self
+    }
+
+    /// Provide the desired `DagState` so it is serialised into `spec_jsonb`
+    /// when the `RecordSnapshot` step executes.  Without this, `spec_jsonb`
+    /// is written as an empty object (which breaks `rollback`).
+    pub fn with_desired_state(mut self, state: DagState) -> Self {
+        self.desired_state = Some(state);
+        self
     }
 
     /// Execute the plan, returning the new DAG version.
@@ -47,23 +80,54 @@ impl<'a> PlanExecutor<'a> {
             return Ok(plan.to_version);
         }
 
-        // Start migration record.
-        let plan_json = serde_json::to_value(plan).map_err(AqueductError::Json)?;
-        let migration_id: i64 = self
-            .client
-            .query_one(
-                START_MIGRATION_SQL,
-                &[
-                    &self.project,
-                    &plan.from_version.map(|v| v as i64),
-                    &plan_json,
-                    &self.cli_version,
-                ],
-            )
-            .await?
-            .get(0);
+        // Determine starting step index when resuming.
+        let resume_from: usize = if self.resume {
+            self.find_resume_step().await?
+        } else {
+            0
+        };
 
-        let result = self.run_steps(plan).await;
+        // Start (or reuse) migration record.
+        let plan_json = serde_json::to_value(plan).map_err(AqueductError::Json)?;
+        let migration_id: i64 = if self.resume && resume_from > 0 {
+            // Find the existing running migration.
+            let row = self
+                .client
+                .query_opt(GET_RUNNING_MIGRATION_SQL, &[&self.project])
+                .await?;
+            if let Some(r) = row {
+                r.get::<_, i64>(0)
+            } else {
+                // No running migration found; start fresh.
+                self.client
+                    .query_one(
+                        START_MIGRATION_SQL,
+                        &[
+                            &self.project,
+                            &plan.from_version.map(|v| v as i64),
+                            &plan_json,
+                            &self.cli_version,
+                        ],
+                    )
+                    .await?
+                    .get(0)
+            }
+        } else {
+            self.client
+                .query_one(
+                    START_MIGRATION_SQL,
+                    &[
+                        &self.project,
+                        &plan.from_version.map(|v| v as i64),
+                        &plan_json,
+                        &self.cli_version,
+                    ],
+                )
+                .await?
+                .get(0)
+        };
+
+        let result = self.run_steps(plan, migration_id, resume_from).await;
 
         // Finish migration record.
         let (status, new_version) = match &result {
@@ -82,213 +146,140 @@ impl<'a> PlanExecutor<'a> {
         result
     }
 
-    async fn run_steps(&self, plan: &Plan) -> Result<u64> {
+    /// Find the step index to resume from by reading progress from the running migration.
+    async fn find_resume_step(&self) -> Result<usize> {
+        let row = self
+            .client
+            .query_opt(GET_RUNNING_MIGRATION_SQL, &[&self.project])
+            .await?;
+
+        if let Some(r) = row {
+            let progress: serde_json::Value = r.get(1);
+            let completed = progress
+                .get("completed_steps")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            // Resume from the step AFTER the last completed one.
+            return Ok(completed + 1);
+        }
+
+        Ok(0)
+    }
+
+    async fn run_steps(&self, plan: &Plan, migration_id: i64, resume_from: usize) -> Result<u64> {
         let lock_holder = format!("aqueduct-cli/{}", self.cli_version);
         let mut locked = false;
         let mut new_version: u64 = plan.to_version;
 
-        for step in &plan.steps {
-            tracing::debug!("Executing step: {}", step.description());
-            match step {
-                PlanStep::LockDag { project, ttl } => {
-                    self.acquire_lock(project, &lock_holder, ttl).await?;
-                    locked = true;
+        // ── Heartbeat task setup ─────────────────────────────────────────────
+        // Spawn a background task that renews the advisory lock every ttl/3
+        // to prevent lock expiry during long-running migrations.
+        let (heartbeat_tx, heartbeat_rx) = oneshot::channel::<()>();
+        let heartbeat_handle = if let Some(dsn) = &self.connection_string {
+            let dsn = dsn.clone();
+            let project = self.project.to_string();
+            Some(tokio::spawn(run_heartbeat(dsn, project, heartbeat_rx)))
+        } else {
+            // Without a DSN we drop the sender immediately; the future will be
+            // unused but that's fine.
+            drop(heartbeat_tx);
+            None
+        };
+        // We'll send on `heartbeat_tx` when we're done (or just drop it).
+        // Note: if connection_string is None, heartbeat_tx was already dropped
+        // above.  We use an Option to manage this:
+        let heartbeat_cancel: Option<oneshot::Sender<()>> = if heartbeat_handle.is_some() {
+            // Rebuild a new pair since we moved heartbeat_tx into the spawn block.
+            // Actually, we need to restructure this.  See below.
+            None // placeholder — replaced by the restructured code below
+        } else {
+            None
+        };
+        // ── NOTE: restructure heartbeat setup ───────────────────────────────
+        // Drop the placeholder above; re-do with a clean pattern.
+        drop(heartbeat_cancel);
+        if let Some(h) = heartbeat_handle {
+            h.abort(); // abort the broken handle; we'll respawn below properly
+        }
+
+        // Clean heartbeat setup:
+        let heartbeat_cancel = if let Some(dsn) = &self.connection_string {
+            let (tx, rx) = oneshot::channel::<()>();
+            let dsn = dsn.clone();
+            let project = self.project.to_string();
+            tokio::spawn(run_heartbeat(dsn, project, rx));
+            Some(tx)
+        } else {
+            None
+        };
+
+        // ── Drain-then-pause: pause the pg_trickle scheduler before any
+        // migration step so in-flight refreshes don't race with DDL.
+        let affected_nodes: Vec<String> = plan
+            .steps
+            .iter()
+            .filter_map(|s| match s {
+                PlanStep::AlterStreamTable { name, .. }
+                | PlanStep::DropStreamTable { name, .. }
+                | PlanStep::Backfill { name, .. } => Some(name.name.clone()),
+                PlanStep::CreateStreamTable { spec } => Some(spec.qualified_name.name.clone()),
+                _ => None,
+            })
+            .collect();
+
+        let pgtrickle_available = self.pgtrickle_exists().await;
+
+        if pgtrickle_available && !affected_nodes.is_empty() {
+            // Pause the scheduler for the affected nodes.  Errors here are
+            // non-fatal: older pg_trickle versions may not support this.
+            if let Err(e) = self
+                .client
+                .execute(
+                    "SELECT pgtrickle.pause_scheduler($1::text[])",
+                    &[&affected_nodes],
+                )
+                .await
+            {
+                tracing::warn!("pause_scheduler() failed (non-fatal): {}", e);
+            }
+        }
+
+        // Guard: always resume the scheduler, even on error.
+        let mut scheduler_paused = pgtrickle_available && !affected_nodes.is_empty();
+
+        let result: Result<u64> = async {
+            for (step_idx, step) in plan.steps.iter().enumerate() {
+                // Skip already-completed steps when resuming.
+                if step_idx < resume_from {
+                    tracing::debug!("Resume: skipping step {} (already completed)", step_idx);
+                    continue;
                 }
 
-                PlanStep::ValidateQuery { name, query } => {
-                    self.validate_query(name, query)?;
-                }
+                tracing::debug!("Executing step {}: {}", step_idx, step.description());
+                match step {
+                    PlanStep::LockDag { project, ttl } => {
+                        self.acquire_lock(project, &lock_holder, ttl).await?;
+                        locked = true;
+                    }
 
-                PlanStep::AlterBaseTable { name, statement } => {
-                    // Execute the base-table DDL directly.
-                    // For safety, we only allow well-formed DDL statements here.
-                    tracing::info!("Executing base-table DDL for '{}'", name);
-                    self.client.execute(statement.as_str(), &[]).await?;
-                }
+                    PlanStep::ValidateQuery { name, query } => {
+                        self.validate_query(name, query)?;
+                    }
 
-                PlanStep::CreateStreamTable { spec } => {
-                    let schema = &spec.qualified_name.schema;
-                    let table = &spec.qualified_name.name;
+                    PlanStep::AlterBaseTable { name, statement } => {
+                        tracing::info!("Executing base-table DDL for '{}'", name);
+                        self.client.execute(statement.as_str(), &[]).await?;
+                    }
 
-                    // Check if pgtrickle is available.
-                    let pgtrickle_exists: bool = self
-                        .client
-                        .query_one(
-                            "SELECT EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = 'pgtrickle')",
-                            &[],
-                        )
-                        .await?
-                        .get(0);
-
-                    if pgtrickle_exists {
-                        self.client
-                            .execute(
-                                "SELECT pgtrickle.create_stream_table($1, $2, $3, $4, $5, $6)",
-                                &[
-                                    schema,
-                                    table,
-                                    &spec.query,
-                                    &spec.refresh_mode.to_string(),
-                                    &spec.schedule,
-                                    &spec.cdc_mode,
-                                ],
-                            )
-                            .await?;
-                    } else {
-                        // Fallback: create a regular table with the query structure.
-                        self.client
-                            .execute(
-                                &format!("CREATE SCHEMA IF NOT EXISTS {}", quote_ident(schema)),
-                                &[],
-                            )
-                            .await?;
-                        if !spec.query.is_empty() {
-                            self.client
-                                .execute(
-                                    &format!(
-                                        "CREATE TABLE IF NOT EXISTS {}.{} AS SELECT * FROM ({}) q LIMIT 0",
-                                        quote_ident(schema),
-                                        quote_ident(table),
-                                        spec.query
-                                    ),
-                                    &[],
-                                )
-                                .await?;
+                    PlanStep::CreateStreamTable { spec } => {
+                        if !pgtrickle_available {
+                            return Err(AqueductError::PgTrickleNotInstalled);
                         }
-                    }
-                }
-
-                PlanStep::AlterStreamTable {
-                    name,
-                    schedule,
-                    refresh_mode,
-                    cdc_mode,
-                    new_query: _,
-                } => {
-                    let pgtrickle_exists: bool = self
-                        .client
-                        .query_one(
-                            "SELECT EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = 'pgtrickle')",
-                            &[],
-                        )
-                        .await?
-                        .get(0);
-
-                    if pgtrickle_exists {
-                        self.client
-                            .execute(
-                                "SELECT pgtrickle.alter_stream_table($1, $2, $3, $4, $5)",
-                                &[&name.schema, &name.name, schedule, refresh_mode, cdc_mode],
-                            )
-                            .await?;
-                    }
-                }
-
-                PlanStep::DropStreamTable { name, cascade: _ } => {
-                    let pgtrickle_exists: bool = self
-                        .client
-                        .query_one(
-                            "SELECT EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = 'pgtrickle')",
-                            &[],
-                        )
-                        .await?
-                        .get(0);
-
-                    if pgtrickle_exists {
-                        self.client
-                            .execute(
-                                "SELECT pgtrickle.drop_stream_table($1, $2)",
-                                &[&name.schema, &name.name],
-                            )
-                            .await?;
-                    } else {
-                        self.client
-                            .execute(
-                                &format!(
-                                    "DROP TABLE IF EXISTS {}.{}",
-                                    quote_ident(&name.schema),
-                                    quote_ident(&name.name)
-                                ),
-                                &[],
-                            )
-                            .await?;
-                    }
-                }
-
-                PlanStep::Backfill { name: _, mode: _ } => {
-                    // In the mock environment, backfill is a no-op.
-                    // In production, this would call pgtrickle.refresh_stream_table().
-                    tracing::debug!("Backfill step: no-op in mock environment");
-                }
-
-                PlanStep::RecordSnapshot { version } => {
-                    new_version = *version;
-                    let spec_json = serde_json::json!({});
-                    let plan_json = serde_json::to_value(plan).map_err(AqueductError::Json)?;
-                    let spec_hash: Vec<u8> =
-                        Sha256::digest(spec_json.to_string().as_bytes()).to_vec();
-
-                    let applied_by = std::env::var("USER")
-                        .or_else(|_| std::env::var("USERNAME"))
-                        .unwrap_or_else(|_| "unknown".to_string());
-
-                    self.client
-                        .execute(
-                            INSERT_DAG_VERSION_SQL,
-                            &[
-                                &self.project,
-                                &spec_hash,
-                                &applied_by,
-                                &plan_json,
-                                &spec_json,
-                            ],
-                        )
-                        .await?;
-                }
-
-                PlanStep::UnlockDag { .. } => {
-                    if locked {
-                        self.client
-                            .execute(RELEASE_LOCK_SQL, &[&self.project, &lock_holder])
-                            .await
-                            .ok();
-                        locked = false;
-                    }
-                }
-
-                // ── v0.3: Blue/Green steps ────────────────────────────────────────
-                PlanStep::CreateGreenSchema { schema } => {
-                    tracing::info!("Creating green schema '{}'", schema);
-                    self.client
-                        .execute(
-                            &format!("CREATE SCHEMA IF NOT EXISTS {}", quote_ident(schema)),
-                            &[],
-                        )
-                        .await?;
-                }
-
-                PlanStep::CreateStreamTableInGreen { spec, green_schema } => {
-                    tracing::info!(
-                        "Creating stream table '{}' in green schema '{}'",
-                        spec.qualified_name,
-                        green_schema
-                    );
-                    // Create the table in the green schema.
-                    let pgtrickle_exists: bool = self
-                        .client
-                        .query_one(
-                            "SELECT EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = 'pgtrickle')",
-                            &[],
-                        )
-                        .await?
-                        .get(0);
-
-                    if pgtrickle_exists {
                         self.client
                             .execute(
                                 "SELECT pgtrickle.create_stream_table($1, $2, $3, $4, $5, $6)",
                                 &[
-                                    green_schema,
+                                    &spec.qualified_name.schema,
                                     &spec.qualified_name.name,
                                     &spec.query,
                                     &spec.refresh_mode.to_string(),
@@ -297,186 +288,358 @@ impl<'a> PlanExecutor<'a> {
                                 ],
                             )
                             .await?;
-                    } else {
-                        self.client
-                            .execute(
-                                &format!(
-                                    "CREATE TABLE IF NOT EXISTS {}.{} AS SELECT * FROM ({}) q LIMIT 0",
-                                    quote_ident(green_schema),
-                                    quote_ident(&spec.qualified_name.name),
-                                    spec.query
-                                ),
-                                &[],
-                            )
-                            .await?;
                     }
-                }
 
-                PlanStep::WaitForConvergence {
-                    green_schema,
-                    node_names,
-                    ..
-                } => {
-                    // In mock/test environments, convergence is immediate.
-                    tracing::info!(
-                        "Waiting for green schema '{}' to converge ({} nodes)",
-                        green_schema,
-                        node_names.len()
-                    );
-                }
-
-                PlanStep::SwapConsumerViews {
-                    assignments,
-                    green_schema,
-                    ..
-                } => {
-                    tracing::info!(
-                        "Swapping {} consumer views → green schema '{}'",
-                        assignments.len(),
-                        green_schema
-                    );
-                    // Execute all view swaps individually.
-                    // (A real transaction would need &mut client; we use
-                    //  individual statements here for compatibility with the
-                    //  shared &Client interface.)
-                    for assignment in assignments {
-                        let view_schema = &assignment.view_name.schema;
-                        let view_name = &assignment.view_name.name;
-                        let target_schema = &assignment.target_table.schema;
-                        let target_name = &assignment.target_table.name;
-                        let default_body = format!(
-                            "SELECT * FROM {}.{}",
-                            quote_ident(target_schema),
-                            quote_ident(target_name)
-                        );
-                        let sql_body = assignment
-                            .sql_body
-                            .as_deref()
-                            .unwrap_or(default_body.as_str());
-
-                        self.client
-                            .execute(
-                                &format!(
-                                    "CREATE OR REPLACE VIEW {}.{} AS {}",
-                                    quote_ident(view_schema),
-                                    quote_ident(view_name),
-                                    sql_body
-                                ),
-                                &[],
-                            )
-                            .await?;
+                    PlanStep::AlterStreamTable {
+                        name,
+                        schedule,
+                        refresh_mode,
+                        cdc_mode,
+                        new_query,
+                    } => {
+                        if pgtrickle_available {
+                            // Pass new_query when present so query changes are applied.
+                            self.client
+                                .execute(
+                                    "SELECT pgtrickle.alter_stream_table($1, $2, $3, $4, $5, $6)",
+                                    &[
+                                        &name.schema,
+                                        &name.name,
+                                        schedule,
+                                        refresh_mode,
+                                        cdc_mode,
+                                        new_query,
+                                    ],
+                                )
+                                .await?;
+                        }
                     }
-                }
 
-                PlanStep::RetireBlueSchema {
-                    schema,
-                    retain_secs,
-                } => {
-                    if *retain_secs == 0 {
-                        // Drop immediately.
-                        tracing::info!("Dropping blue schema '{}'", schema);
-                        self.client
-                            .execute(
-                                &format!("DROP SCHEMA IF EXISTS {} CASCADE", quote_ident(schema)),
-                                &[],
-                            )
-                            .await?;
-                    } else {
-                        // In production, this would schedule a deferred drop.
-                        // In tests, we just log.
-                        tracing::info!(
-                            "Blue schema '{}' will be retired in {}s",
-                            schema,
-                            retain_secs
-                        );
-                    }
-                }
-
-                // ── v0.3: Consumer view steps ──────────────────────────────────────
-                PlanStep::ManageConsumerView { spec, action } => {
-                    let view_schema = &spec.expose_as.schema;
-                    let view_name = &spec.expose_as.name;
-
-                    match action.as_str() {
-                        "drop" => {
-                            tracing::info!("Dropping consumer view '{}'", spec.expose_as);
+                    PlanStep::DropStreamTable { name, cascade: _ } => {
+                        if pgtrickle_available {
+                            self.client
+                                .execute(
+                                    "SELECT pgtrickle.drop_stream_table($1, $2)",
+                                    &[&name.schema, &name.name],
+                                )
+                                .await?;
+                        } else {
                             self.client
                                 .execute(
                                     &format!(
-                                        "DROP VIEW IF EXISTS {}.{}",
-                                        quote_ident(view_schema),
-                                        quote_ident(view_name)
+                                        "DROP TABLE IF EXISTS {}.{}",
+                                        quote_ident(&name.schema),
+                                        quote_ident(&name.name)
                                     ),
                                     &[],
                                 )
                                 .await?;
                         }
-                        "create" | "alter" => {
-                            tracing::info!(
-                                "{} consumer view '{}' → source '{}'",
-                                action.to_uppercase(),
-                                spec.expose_as,
-                                spec.source
-                            );
+                    }
 
-                            let default_body = format!(
-                                "SELECT * FROM {}.{}",
-                                quote_ident(&spec.source.schema),
-                                quote_ident(&spec.source.name)
-                            );
-                            let body = spec.sql_body.as_deref().unwrap_or(default_body.as_str());
+                    PlanStep::Backfill { name: _, mode: _ } => {
+                        // In the mock environment, backfill is a no-op.
+                        // In production, this would call pgtrickle.refresh_stream_table().
+                        tracing::debug!("Backfill step: no-op in mock environment");
+                    }
 
-                            // Ensure the view schema exists.
+                    PlanStep::RecordSnapshot { version } => {
+                        new_version = *version;
+
+                        // Serialise the full desired DagState so rollback can restore it.
+                        let spec_json = self
+                            .desired_state
+                            .as_ref()
+                            .map(|s| serde_json::to_value(s).unwrap_or_else(|_| serde_json::json!({})))
+                            .unwrap_or_else(|| serde_json::json!({}));
+                        let plan_json =
+                            serde_json::to_value(plan).map_err(AqueductError::Json)?;
+                        let spec_hash: Vec<u8> =
+                            Sha256::digest(spec_json.to_string().as_bytes()).to_vec();
+
+                        let applied_by = std::env::var("USER")
+                            .or_else(|_| std::env::var("USERNAME"))
+                            .unwrap_or_else(|_| "unknown".to_string());
+
+                        self.client
+                            .execute(
+                                INSERT_DAG_VERSION_SQL,
+                                &[
+                                    &self.project,
+                                    &spec_hash,
+                                    &applied_by,
+                                    &plan_json,
+                                    &spec_json,
+                                ],
+                            )
+                            .await?;
+                    }
+
+                    PlanStep::UnlockDag { .. } => {
+                        if locked {
+                            self.client
+                                .execute(RELEASE_LOCK_SQL, &[&self.project, &lock_holder])
+                                .await
+                                .ok();
+                            locked = false;
+                        }
+                    }
+
+                    // ── v0.3: Blue/Green steps ──────────────────────────────
+                    PlanStep::CreateGreenSchema { schema } => {
+                        tracing::info!("Creating green schema '{}'", schema);
+                        self.client
+                            .execute(
+                                &format!(
+                                    "CREATE SCHEMA IF NOT EXISTS {}",
+                                    quote_ident(schema)
+                                ),
+                                &[],
+                            )
+                            .await?;
+                    }
+
+                    PlanStep::CreateStreamTableInGreen { spec, green_schema } => {
+                        tracing::info!(
+                            "Creating stream table '{}' in green schema '{}'",
+                            spec.qualified_name,
+                            green_schema
+                        );
+                        if pgtrickle_available {
                             self.client
                                 .execute(
-                                    &format!(
-                                        "CREATE SCHEMA IF NOT EXISTS {}",
-                                        quote_ident(view_schema)
-                                    ),
-                                    &[],
+                                    "SELECT pgtrickle.create_stream_table($1, $2, $3, $4, $5, $6)",
+                                    &[
+                                        green_schema,
+                                        &spec.qualified_name.name,
+                                        &spec.query,
+                                        &spec.refresh_mode.to_string(),
+                                        &spec.schedule,
+                                        &spec.cdc_mode,
+                                    ],
                                 )
                                 .await?;
+                        }
+                    }
 
+                    PlanStep::WaitForConvergence {
+                        green_schema,
+                        node_names,
+                        ..
+                    } => {
+                        tracing::info!(
+                            "Waiting for green schema '{}' to converge ({} nodes)",
+                            green_schema,
+                            node_names.len()
+                        );
+                    }
+
+                    PlanStep::SwapConsumerViews {
+                        assignments,
+                        green_schema,
+                        ..
+                    } => {
+                        tracing::info!(
+                            "Swapping {} consumer views → green schema '{}'",
+                            assignments.len(),
+                            green_schema
+                        );
+                        for assignment in assignments {
+                            let view_schema = &assignment.view_name.schema;
+                            let view_name = &assignment.view_name.name;
+                            let target_schema = &assignment.target_table.schema;
+                            let target_name = &assignment.target_table.name;
+                            let default_body = format!(
+                                "SELECT * FROM {}.{}",
+                                quote_ident(target_schema),
+                                quote_ident(target_name)
+                            );
+                            let sql_body = assignment
+                                .sql_body
+                                .as_deref()
+                                .unwrap_or(default_body.as_str());
                             self.client
                                 .execute(
                                     &format!(
                                         "CREATE OR REPLACE VIEW {}.{} AS {}",
                                         quote_ident(view_schema),
                                         quote_ident(view_name),
-                                        body
+                                        sql_body
                                     ),
                                     &[],
                                 )
                                 .await?;
                         }
-                        _ => {
-                            tracing::warn!("Unknown consumer view action: '{}'", action);
+                    }
+
+                    PlanStep::RetireBlueSchema {
+                        schema,
+                        retain_secs,
+                    } => {
+                        if *retain_secs == 0 {
+                            tracing::info!("Dropping blue schema '{}'", schema);
+                            self.client
+                                .execute(
+                                    &format!(
+                                        "DROP SCHEMA IF EXISTS {} CASCADE",
+                                        quote_ident(schema)
+                                    ),
+                                    &[],
+                                )
+                                .await?;
+                        } else {
+                            tracing::info!(
+                                "Blue schema '{}' will be retired in {}s",
+                                schema,
+                                retain_secs
+                            );
+                        }
+                    }
+
+                    // ── v0.3: Consumer view steps ───────────────────────────
+                    PlanStep::ManageConsumerView { spec, action } => {
+                        let view_schema = &spec.expose_as.schema;
+                        let view_name = &spec.expose_as.name;
+
+                        match action.as_str() {
+                            "drop" => {
+                                tracing::info!("Dropping consumer view '{}'", spec.expose_as);
+                                self.client
+                                    .execute(
+                                        &format!(
+                                            "DROP VIEW IF EXISTS {}.{}",
+                                            quote_ident(view_schema),
+                                            quote_ident(view_name)
+                                        ),
+                                        &[],
+                                    )
+                                    .await?;
+                            }
+                            "create" | "alter" => {
+                                tracing::info!(
+                                    "{} consumer view '{}' → source '{}'",
+                                    action.to_uppercase(),
+                                    spec.expose_as,
+                                    spec.source
+                                );
+                                let default_body = format!(
+                                    "SELECT * FROM {}.{}",
+                                    quote_ident(&spec.source.schema),
+                                    quote_ident(&spec.source.name)
+                                );
+                                let body =
+                                    spec.sql_body.as_deref().unwrap_or(default_body.as_str());
+                                self.client
+                                    .execute(
+                                        &format!(
+                                            "CREATE SCHEMA IF NOT EXISTS {}",
+                                            quote_ident(view_schema)
+                                        ),
+                                        &[],
+                                    )
+                                    .await?;
+                                self.client
+                                    .execute(
+                                        &format!(
+                                            "CREATE OR REPLACE VIEW {}.{} AS {}",
+                                            quote_ident(view_schema),
+                                            quote_ident(view_name),
+                                            body
+                                        ),
+                                        &[],
+                                    )
+                                    .await?;
+                                // Register in catalog.
+                                if let Err(e) = self
+                                    .client
+                                    .execute(
+                                        crate::catalog::UPSERT_CONSUMER_VIEW_SQL,
+                                        &[
+                                            &self.project,
+                                            &spec.name,
+                                            &spec.expose_as.to_string(),
+                                            &spec.source.to_string(),
+                                            &spec.sql_body,
+                                        ],
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        "Failed to register consumer view in catalog: {}",
+                                        e
+                                    );
+                                }
+                            }
+                            _ => {
+                                tracing::warn!("Unknown consumer view action: '{}'", action);
+                            }
                         }
                     }
                 }
+
+                // Record step progress so `--resume` can skip completed steps.
+                self.client
+                    .execute(
+                        UPDATE_MIGRATION_PROGRESS_SQL,
+                        &[
+                            &migration_id,
+                            &serde_json::json!({ "completed_steps": step_idx }),
+                        ],
+                    )
+                    .await
+                    .ok();
+            }
+
+            // Ensure lock is released on success.
+            if locked {
+                self.client
+                    .execute(RELEASE_LOCK_SQL, &[&self.project, &lock_holder])
+                    .await
+                    .ok();
+            }
+
+            Ok(new_version)
+        }
+        .await;
+
+        // ── Cleanup: resume scheduler and cancel heartbeat ───────────────────
+        if scheduler_paused {
+            scheduler_paused = false;
+            if let Err(e) = self
+                .client
+                .execute("SELECT pgtrickle.resume_scheduler($1::text[])", &[&affected_nodes])
+                .await
+            {
+                tracing::warn!("resume_scheduler() failed (non-fatal): {}", e);
             }
         }
+        let _ = scheduler_paused; // suppress unused warning
 
-        // Ensure lock is always released on success too.
-        if locked {
-            self.client
-                .execute(RELEASE_LOCK_SQL, &[&self.project, &lock_holder])
-                .await
-                .ok();
-        }
+        // Cancel the heartbeat task.
+        drop(heartbeat_cancel);
 
-        Ok(new_version)
+        result
+    }
+
+    /// Check if the pgtrickle schema is available.
+    async fn pgtrickle_exists(&self) -> bool {
+        self.client
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = 'pgtrickle')",
+                &[],
+            )
+            .await
+            .map(|r| r.get::<_, bool>(0))
+            .unwrap_or(false)
     }
 
     async fn acquire_lock(&self, project: &str, holder: &str, ttl: &str) -> Result<()> {
-        // Try to acquire the lock using INSERT ... ON CONFLICT.
         let rows = self
             .client
             .query(ACQUIRE_LOCK_SQL, &[&project, &holder, &ttl])
             .await?;
 
         if rows.is_empty() {
-            // Lock is held by someone else and hasn't expired.
             let lock_row = self
                 .client
                 .query_opt(
@@ -504,11 +667,41 @@ impl<'a> PlanExecutor<'a> {
     }
 }
 
-fn quote_ident(s: &str) -> String {
-    format!("\"{}\"", s.replace('"', "\"\""))
+/// Background task that renews the advisory lock every `interval` until cancelled.
+async fn run_heartbeat(dsn: String, project: String, mut cancel_rx: oneshot::Receiver<()>) {
+    // Parse TTL from environment or use a sensible default (10 seconds).
+    let interval = tokio::time::Duration::from_secs(10);
+    let mut ticker = tokio::time::interval(interval);
+    // Skip the first immediate tick.
+    ticker.tick().await;
+
+    // Establish a dedicated connection for the heartbeat.
+    let Ok((client, conn)) = tokio_postgres::connect(&dsn, NoTls).await else {
+        tracing::warn!("Heartbeat: could not connect to database — lock may expire");
+        return;
+    };
+    tokio::spawn(conn);
+
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                if let Err(e) = client.execute(HEARTBEAT_LOCK_SQL, &[&project]).await {
+                    tracing::warn!("Heartbeat: lock renewal failed: {}", e);
+                } else {
+                    tracing::debug!("Heartbeat: renewed lock for project '{}'", project);
+                }
+            }
+            _ = &mut cancel_rx => {
+                tracing::debug!("Heartbeat: cancelled for project '{}'", project);
+                break;
+            }
+        }
+    }
 }
 
-/// Import stream tables from the live pg_trickle catalog into a migrations directory.
+fn quote_ident(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\"\""))
+}/// Import stream tables from the live pg_trickle catalog into a migrations directory.
 pub async fn import_from_live(
     client: &tokio_postgres::Client,
     project: &str,

@@ -7,7 +7,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/trickle-labs/pg-aqueduct"
@@ -23,8 +23,6 @@ tokio = { version = "1", features = ["full"] }
 # Database
 tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-chrono-0_4"] }
 postgres-types = { version = "0.2", features = ["derive"] }
-deadpool-postgres = { version = "0.14" }
-
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

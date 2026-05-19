@@ -45,6 +45,7 @@ pub struct StatusArgs {
 async fn poll_once(
     client: &tokio_postgres::Client,
     project_name: &str,
+    project_dir: &std::path::Path,
     format: &str,
     fail_on_drift: bool,
 ) -> anyhow::Result<u32> {
@@ -76,13 +77,41 @@ async fn poll_once(
         (None, None)
     };
 
+    // H8: compute real drift count by comparing desired state to live state.
+    let drift_count: usize = {
+        let live_result = aqueduct_core::live_state::read_live_state(client).await;
+        match (|| -> anyhow::Result<_> {
+            let files = aqueduct_core::parser::load_migrations(project_dir, &Default::default())?;
+            let desired = aqueduct_core::dag::build_dag_state(&files, true)?;
+            Ok(desired)
+        })() {
+            Ok(desired) => match live_result {
+                Ok(live) => {
+                    let diff = aqueduct_core::diff::compute_diff(&desired, &live);
+                    diff.deltas
+                        .iter()
+                        .filter(|d| d.kind != aqueduct_core::diff::DeltaKind::Unchanged)
+                        .count()
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to read live state for drift detection: {}", e);
+                    0
+                }
+            },
+            Err(e) => {
+                tracing::warn!("Failed to load migrations for drift detection: {}", e);
+                0
+            }
+        }
+    };
+
     let status = StatusReport {
         project: project_name.to_string(),
         current_version,
         applied_at,
         applied_by,
         stream_table_count,
-        drift_count: 0,
+        drift_count,
         pgtrickle_version,
         pg_version,
     };
@@ -158,7 +187,7 @@ pub async fn run(args: StatusArgs) -> anyhow::Result<()> {
 
     if !args.watch {
         let drift_count =
-            poll_once(&client, &project_name, &args.format, args.fail_on_drift).await?;
+            poll_once(&client, &project_name, &args.project_dir, &args.format, args.fail_on_drift).await?;
         if args.fail_on_drift && drift_count > 0 {
             anyhow::bail!("Drift detected ({} tables)", drift_count);
         }
@@ -170,7 +199,7 @@ pub async fn run(args: StatusArgs) -> anyhow::Result<()> {
     let mut consecutive_drift: u32 = 0;
 
     loop {
-        let drift = poll_once(&client, &project_name, &args.format, false)
+        let drift = poll_once(&client, &project_name, &args.project_dir, &args.format, false)
             .await
             .unwrap_or_else(|e| {
                 tracing::warn!("Status poll error: {}", e);

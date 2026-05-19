@@ -4,7 +4,7 @@ use crate::dag::{RefreshMode, StreamTableSpec};
 use crate::diff::{DeltaKind, NodeDelta};
 
 /// Migration class — how expensive a change is and what technique is used.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum MigrationClass {
     /// Metadata-only change: a single `alter_stream_table()` call; no rebuild.
     Free,
@@ -181,15 +181,11 @@ fn classify_select_list_change(
         }
     }
 
-    // Case 2: Removal only — desired is a strict subset of actual.
-    // Every desired item exists in actual and the order is preserved.
+    // Case 2: Removal only — desired is a strict prefix of actual.
+    // Removing trailing columns only is in-place; removing from the middle shifts ordinals → Rebuild.
     if d_strs.len() < a_strs.len() {
-        // Check that every item in desired appears in actual, in order.
-        let all_in_actual = {
-            let mut actual_iter = a_strs.iter();
-            d_strs.iter().all(|d| actual_iter.any(|a| a == d))
-        };
-        if all_in_actual {
+        let is_prefix = a_strs.starts_with(d_strs.as_slice());
+        if is_prefix {
             return SelectListDelta::Removal;
         }
     }

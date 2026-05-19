@@ -74,14 +74,16 @@ CREATE OR REPLACE FUNCTION pgtrickle.alter_stream_table(
     p_table_name   text,
     p_schedule     text DEFAULT NULL,
     p_refresh_mode text DEFAULT NULL,
-    p_cdc_mode     text DEFAULT NULL
+    p_cdc_mode     text DEFAULT NULL,
+    p_query        text DEFAULT NULL
 ) RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
     UPDATE pgtrickle.pgt_stream_tables
     SET
         schedule     = COALESCE(p_schedule, schedule),
         refresh_mode = COALESCE(p_refresh_mode, refresh_mode),
-        cdc_mode     = COALESCE(p_cdc_mode, cdc_mode)
+        cdc_mode     = COALESCE(p_cdc_mode, cdc_mode),
+        query        = COALESCE(p_query, query)
     WHERE schema_name = p_schema_name AND table_name = p_table_name;
 END;
 $$;

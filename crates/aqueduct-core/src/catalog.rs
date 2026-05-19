@@ -299,6 +299,72 @@ pub const IS_PRIMARY_SQL: &str = r#"
 SELECT NOT pg_is_in_recovery()
 "#;
 
+/// SQL to update migration progress (step index completed).
+pub const UPDATE_MIGRATION_PROGRESS_SQL: &str = r#"
+UPDATE aqueduct.migrations SET progress = $2 WHERE id = $1
+"#;
+
+/// SQL to renew (heartbeat) a lock by updating acquired_at.
+pub const HEARTBEAT_LOCK_SQL: &str = r#"
+UPDATE aqueduct.locks SET acquired_at = now() WHERE project = $1
+"#;
+
+/// SQL to look up the running migration for a project and return its progress.
+pub const GET_RUNNING_MIGRATION_SQL: &str = r#"
+SELECT id, progress
+FROM aqueduct.migrations
+WHERE project = $1 AND status = 'running'
+ORDER BY started_at DESC
+LIMIT 1
+"#;
+
+/// Ensure the catalog schema is up-to-date with the compiled-in schema version.
+///
+/// Every command that opens a database connection should call this before doing
+/// anything else. It reads `catalog_schema_version` from `aqueduct.cluster_profile`
+/// and applies any pending catalog migrations from the embedded SQL bundle.
+pub async fn ensure_catalog_current(
+    client: &tokio_postgres::Client,
+) -> crate::error::Result<()> {
+    // If the aqueduct schema does not exist yet, nothing to do — the user must
+    // run `aqueduct init` first.
+    let schema_exists: bool = client
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = 'aqueduct')",
+            &[],
+        )
+        .await?
+        .get(0);
+
+    if !schema_exists {
+        return Ok(());
+    }
+
+    // Read the current catalog version.
+    let row = client
+        .query_opt(CATALOG_VERSION_SQL, &[])
+        .await?;
+
+    let current_version: i32 = row.map(|r| r.get::<_, i32>(0)).unwrap_or(1);
+
+    if current_version < CATALOG_SCHEMA_VERSION as i32 {
+        tracing::info!(
+            "Upgrading catalog schema from v{} to v{}",
+            current_version,
+            CATALOG_SCHEMA_VERSION
+        );
+        // Apply the v1→v2 migration if needed.
+        if current_version < 2 {
+            client
+                .batch_execute(CATALOG_MIGRATE_V1_TO_V2_SQL)
+                .await
+                .map_err(|e| crate::error::AqueductError::Catalog(e.to_string()))?;
+        }
+    }
+
+    Ok(())
+}
+
 /// SQL to upsert a consumer view registration in the catalog.
 pub const UPSERT_CONSUMER_VIEW_SQL: &str = r#"
 INSERT INTO aqueduct.consumer_views (project, name, expose_as, source, sql_body, created_at, updated_at)

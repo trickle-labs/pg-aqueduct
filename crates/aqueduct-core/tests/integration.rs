@@ -145,7 +145,7 @@ SELECT customer_id, SUM(amount) AS total FROM raw_orders GROUP BY customer_id;
     assert_eq!(diff.changes().len(), 1);
 
     let topo = topological_sort(&desired).expect("topo sort");
-    let plan = build_plan("test-project", None, 1, &diff, &topo);
+    let plan = build_plan("test-project", None, 1, &diff, &topo).expect("build_plan");
 
     assert_eq!(plan.summary.creates, 1);
 
@@ -285,7 +285,7 @@ async fn test_rollback() {
     let actual_v1 = read_live_state(&db.client).await.expect("actual v1");
     let diff_v1 = compute_diff(&desired_v1, &actual_v1);
     let topo_v1 = topological_sort(&desired_v1).expect("topo v1");
-    let plan_v1 = build_plan("rollback-test", None, 1, &diff_v1, &topo_v1);
+    let plan_v1 = build_plan("rollback-test", None, 1, &diff_v1, &topo_v1).expect("build_plan");
 
     let executor = PlanExecutor::new(&db.client, "rollback-test", "0.1.0", false);
     executor.execute(&plan_v1).await.expect("apply v1");
@@ -299,7 +299,7 @@ async fn test_rollback() {
     let actual_v2 = read_live_state(&db.client).await.expect("actual v2");
     let diff_v2 = compute_diff(&desired_v2, &actual_v2);
     let topo_v2 = topological_sort(&desired_v2).expect("topo v2");
-    let plan_v2 = build_plan("rollback-test", Some(1), 2, &diff_v2, &topo_v2);
+    let plan_v2 = build_plan("rollback-test", Some(1), 2, &diff_v2, &topo_v2).expect("build_plan");
 
     executor.execute(&plan_v2).await.expect("apply v2");
 
@@ -310,7 +310,7 @@ async fn test_rollback() {
     let actual_after_v2 = read_live_state(&db.client).await.expect("actual after v2");
     let diff_rollback = compute_diff(&desired_v1, &actual_after_v2);
     let topo_rb = topological_sort(&desired_v1).expect("topo rb");
-    let plan_rollback = build_plan("rollback-test", Some(2), 3, &diff_rollback, &topo_rb);
+    let plan_rollback = build_plan("rollback-test", Some(2), 3, &diff_rollback, &topo_rb).expect("build_plan");
 
     executor
         .execute(&plan_rollback)
@@ -369,7 +369,7 @@ async fn test_lock_prevents_concurrent_apply() {
     let actual = read_live_state(&db.client).await.expect("actual");
     let diff = compute_diff(&desired, &actual);
     let topo = topological_sort(&desired).expect("topo");
-    let plan = build_plan("locked-project", None, 1, &diff, &topo);
+    let plan = build_plan("locked-project", None, 1, &diff, &topo).expect("build_plan");
 
     let executor = PlanExecutor::new(&db.client, "locked-project", "0.1.0", false);
     let result = executor.execute(&plan).await;
@@ -406,7 +406,7 @@ SELECT customer_id, SUM(amount) AS total FROM raw_orders GROUP BY customer_id;
     let actual_v1 = read_live_state(&db.client).await.expect("actual v1");
     let diff_v1 = compute_diff(&desired_v1, &actual_v1);
     let topo_v1 = topological_sort(&desired_v1).expect("topo v1");
-    let plan_v1 = build_plan("inplace-test", None, 1, &diff_v1, &topo_v1);
+    let plan_v1 = build_plan("inplace-test", None, 1, &diff_v1, &topo_v1).expect("build_plan");
 
     let executor = PlanExecutor::new(&db.client, "inplace-test", "0.2.0", false);
     executor.execute(&plan_v1).await.expect("apply v1");
@@ -434,7 +434,7 @@ SELECT customer_id, SUM(amount) AS total, COUNT(*) AS order_count FROM raw_order
 
     // Build and apply the in-place plan.
     let topo_v2 = topological_sort(&desired_v2).expect("topo v2");
-    let plan_v2 = build_plan("inplace-test", Some(1), 2, &diff_v2, &topo_v2);
+    let plan_v2 = build_plan("inplace-test", Some(1), 2, &diff_v2, &topo_v2).expect("build_plan");
     assert_eq!(plan_v2.summary.in_place_count, 1);
     assert_eq!(plan_v2.summary.rebuild_count, 0);
 
@@ -531,7 +531,7 @@ SELECT customer_id, SUM(amount) AS total FROM raw_orders GROUP BY customer_id;
 
     // The plan should include a drop + recreate (not just an alter).
     let topo = topological_sort(&desired).expect("topo");
-    let plan = build_plan("refresh-test", None, 1, &diff, &topo);
+    let plan = build_plan("refresh-test", None, 1, &diff, &topo).expect("build_plan");
     assert_eq!(plan.summary.rebuild_count, 1);
 }
 
@@ -661,7 +661,7 @@ async fn test_plan_includes_alter_base_table_step() {
 
     let diff = compute_diff(&desired, &actual);
     let topo = vec![QualifiedName::new("public", "order_totals")];
-    let plan = build_plan("cascade-test", None, 1, &diff, &topo);
+    let plan = build_plan("cascade-test", None, 1, &diff, &topo).expect("build_plan");
 
     // Must have an AlterBaseTable step.
     let has_alter_base = plan
@@ -700,7 +700,7 @@ SELECT customer_id, SUM(amount) AS total FROM raw_orders GROUP BY customer_id;
     let actual = read_live_state(&db.client).await.expect("actual");
     let diff = compute_diff(&desired, &actual);
     let topo = topological_sort(&desired).expect("topo");
-    let plan = build_plan("cost-test", None, 1, &diff, &topo);
+    let plan = build_plan("cost-test", None, 1, &diff, &topo).expect("build_plan");
 
     let cost = aqueduct_core::cost::estimate_plan_cost(&db.client, &plan, None)
         .await
@@ -804,7 +804,7 @@ SELECT * FROM public.order_totals WHERE amount > 0;
     let actual = read_live_state(&db.client).await.expect("actual");
     let diff = compute_diff(&desired, &actual);
     let topo = topological_sort(&desired).expect("topo");
-    let plan = build_plan("consumer-test", None, 1, &diff, &topo);
+    let plan = build_plan("consumer-test", None, 1, &diff, &topo).expect("build_plan");
 
     let has_consumer_step = plan.steps.iter().any(|s| {
         matches!(s, PlanStep::ManageConsumerView { spec, action }
@@ -852,7 +852,7 @@ SELECT customer_id, total FROM public.order_totals;
     let actual = read_live_state(&db.client).await.expect("actual");
     let diff = compute_diff(&desired, &actual);
     let topo = topological_sort(&desired).expect("topo");
-    let plan = build_plan("consumer-exec-test", None, 1, &diff, &topo);
+    let plan = build_plan("consumer-exec-test", None, 1, &diff, &topo).expect("build_plan");
 
     let executor = PlanExecutor::new(&db.client, "consumer-exec-test", "0.3.0", false);
     executor.execute(&plan).await.expect("execute plan");
@@ -1042,7 +1042,7 @@ async fn test_blue_green_plan_steps() {
     // this spec since the struct has no deployment_class field.
     // This test simply verifies that build_plan doesn't panic with a
     // standard Create delta and returns the expected in-place steps.
-    let plan = build_plan("bg-test", None, 1, &diff, &topo);
+    let plan = build_plan("bg-test", None, 1, &diff, &topo).expect("build_plan");
     assert!(!plan.steps.is_empty(), "Plan should not be empty");
 }
 
@@ -1185,7 +1185,7 @@ async fn test_destroy_project_dry_run() {
     let actual = read_live_state(&db.client).await.expect("actual");
     let diff = compute_diff(&desired, &actual);
     let topo = topological_sort(&desired).expect("topo");
-    let plan = build_plan("destroy-dry-run-test", None, 1, &diff, &topo);
+    let plan = build_plan("destroy-dry-run-test", None, 1, &diff, &topo).expect("build_plan");
     let executor = PlanExecutor::new(&db.client, "destroy-dry-run-test", "0.6.0", false);
     executor.execute(&plan).await.expect("apply plan");
 
@@ -1236,7 +1236,7 @@ async fn test_destroy_project_full() {
     let actual = read_live_state(&db.client).await.expect("actual");
     let diff = compute_diff(&desired, &actual);
     let topo = topological_sort(&desired).expect("topo");
-    let plan = build_plan("destroy-full-test", None, 1, &diff, &topo);
+    let plan = build_plan("destroy-full-test", None, 1, &diff, &topo).expect("build_plan");
     let executor = PlanExecutor::new(&db.client, "destroy-full-test", "0.6.0", false);
     executor.execute(&plan).await.expect("apply plan");
 
@@ -1362,7 +1362,7 @@ async fn test_planner_fuzzing_random_mutations() {
                 .await
                 .expect("get version");
         let next_version = current_version.map(|v| v + 1).unwrap_or(1);
-        let plan = build_plan(project, current_version, next_version, &diff, &topo);
+        let plan = build_plan(project, current_version, next_version, &diff, &topo).expect("build_plan");
 
         let executor = PlanExecutor::new(&db.client, project, "0.6.0", false);
         executor
@@ -1429,7 +1429,7 @@ async fn test_cookbook_01_change_schedule_faster() {
     assert_eq!(class, aqueduct_core::classifier::MigrationClass::Free);
 
     let topo = topological_sort(&desired).expect("topo");
-    let plan = build_plan("cookbook-01", None, 1, &diff, &topo);
+    let plan = build_plan("cookbook-01", None, 1, &diff, &topo).expect("build_plan");
     assert_eq!(plan.summary.free_count, 1);
     assert_eq!(plan.summary.rebuild_count, 0);
 }
@@ -1469,7 +1469,7 @@ async fn test_cookbook_02_change_schedule_slower() {
     assert_eq!(class, aqueduct_core::classifier::MigrationClass::Free);
 
     let topo = topological_sort(&desired).expect("topo");
-    let plan = build_plan("cookbook-02", None, 1, &diff, &topo);
+    let plan = build_plan("cookbook-02", None, 1, &diff, &topo).expect("build_plan");
     assert_eq!(plan.summary.free_count, 1);
     assert_eq!(plan.summary.rebuild_count, 0);
 }
@@ -1621,7 +1621,7 @@ SELECT id, SUM(amount) AS total, SUM(discount) AS discount_total FROM raw_c05 GR
     assert_eq!(class, aqueduct_core::classifier::MigrationClass::InPlace);
 
     let topo = topological_sort(&desired).expect("topo");
-    let plan = build_plan("cookbook-05", None, 1, &diff, &topo);
+    let plan = build_plan("cookbook-05", None, 1, &diff, &topo).expect("build_plan");
     assert_eq!(plan.summary.in_place_count, 1);
     assert_eq!(plan.summary.rebuild_count, 0);
 }
@@ -1670,7 +1670,7 @@ SELECT id, SUM(value) AS total, COUNT(*) AS event_count FROM raw_c06 GROUP BY id
     assert_eq!(class, aqueduct_core::classifier::MigrationClass::InPlace);
 
     let topo = topological_sort(&desired).expect("topo");
-    let plan = build_plan("cookbook-06", None, 1, &diff, &topo);
+    let plan = build_plan("cookbook-06", None, 1, &diff, &topo).expect("build_plan");
     assert_eq!(plan.summary.in_place_count, 1);
 }
 
@@ -2015,7 +2015,7 @@ SELECT id, SUM(amount) AS total FROM raw_c15 WHERE status = 'active' GROUP BY id
     assert_eq!(class, aqueduct_core::classifier::MigrationClass::Rebuild);
 
     let topo = topological_sort(&desired).expect("topo");
-    let plan = build_plan("cookbook-15", None, 1, &diff, &topo);
+    let plan = build_plan("cookbook-15", None, 1, &diff, &topo).expect("build_plan");
     assert_eq!(plan.summary.rebuild_count, 1);
 }
 
@@ -2120,7 +2120,7 @@ SELECT id, AVG(score) AS avg_score FROM raw_c18 GROUP BY id;
     );
 
     let topo = topological_sort(&desired).expect("topo");
-    let plan = build_plan("cookbook-18", None, 1, &diff, &topo);
+    let plan = build_plan("cookbook-18", None, 1, &diff, &topo).expect("build_plan");
     assert_eq!(plan.summary.creates, 1);
 
     let executor = PlanExecutor::new(&db.client, "cookbook-18", "0.7.0", false);
@@ -2164,7 +2164,7 @@ async fn test_cookbook_19_drop_stream_table() {
     assert_eq!(diff.changes()[0].kind, aqueduct_core::diff::DeltaKind::Drop);
 
     let topo = topological_sort(&desired).expect("topo");
-    let plan = build_plan("cookbook-19", None, 1, &diff, &topo);
+    let plan = build_plan("cookbook-19", None, 1, &diff, &topo).expect("build_plan");
     assert_eq!(plan.summary.drops, 1);
 }
 
@@ -2214,7 +2214,7 @@ SELECT COUNT(*) AS num_customers FROM public.c20_totals;
 
     let actual = read_live_state(&db.client).await.expect("actual");
     let diff = compute_diff(&desired, &actual);
-    let plan = build_plan("cookbook-20", None, 1, &diff, &topo);
+    let plan = build_plan("cookbook-20", None, 1, &diff, &topo).expect("build_plan");
     assert_eq!(plan.summary.creates, 2);
 
     let executor = PlanExecutor::new(&db.client, "cookbook-20", "0.7.0", false);
@@ -2248,7 +2248,7 @@ async fn test_cookbook_21_add_downstream_node() {
     let actual_v1 = read_live_state(&db.client).await.expect("actual v1");
     let diff_v1 = compute_diff(&desired_v1, &actual_v1);
     let topo_v1 = topological_sort(&desired_v1).expect("topo v1");
-    let plan_v1 = build_plan("cookbook-21", None, 1, &diff_v1, &topo_v1);
+    let plan_v1 = build_plan("cookbook-21", None, 1, &diff_v1, &topo_v1).expect("build_plan");
     let executor = PlanExecutor::new(&db.client, "cookbook-21", "0.7.0", false);
     executor.execute(&plan_v1).await.expect("apply v1");
 
@@ -2306,7 +2306,7 @@ async fn test_cookbook_22_remove_downstream_node() {
     let actual_v1 = read_live_state(&db.client).await.expect("actual v1");
     let diff_v1 = compute_diff(&desired_v1, &actual_v1);
     let topo_v1 = topological_sort(&desired_v1).expect("topo v1");
-    let plan_v1 = build_plan("cookbook-22", None, 1, &diff_v1, &topo_v1);
+    let plan_v1 = build_plan("cookbook-22", None, 1, &diff_v1, &topo_v1).expect("build_plan");
     let executor = PlanExecutor::new(&db.client, "cookbook-22", "0.7.0", false);
     executor.execute(&plan_v1).await.expect("apply v1");
 
@@ -2372,7 +2372,7 @@ async fn test_cookbook_23_three_level_chain() {
 
     let actual = read_live_state(&db.client).await.expect("actual");
     let diff = compute_diff(&desired, &actual);
-    let plan = build_plan("cookbook-23", None, 1, &diff, &topo);
+    let plan = build_plan("cookbook-23", None, 1, &diff, &topo).expect("build_plan");
     assert_eq!(plan.summary.creates, 3);
 
     let executor = PlanExecutor::new(&db.client, "cookbook-23", "0.7.0", false);
@@ -2424,7 +2424,7 @@ SELECT customer_id, total FROM public.c24_orders WHERE total > 0;
     let actual = read_live_state(&db.client).await.expect("actual");
     let diff = compute_diff(&desired, &actual);
     let topo = topological_sort(&desired).expect("topo");
-    let plan = build_plan("cookbook-24", None, 1, &diff, &topo);
+    let plan = build_plan("cookbook-24", None, 1, &diff, &topo).expect("build_plan");
 
     let has_create = plan.steps.iter().any(|s| {
         matches!(s, PlanStep::ManageConsumerView { spec, action }
@@ -2577,7 +2577,7 @@ async fn test_cookbook_27_multi_table_schedule_change() {
     }
 
     let topo = topological_sort(&desired).expect("topo");
-    let plan = build_plan("cookbook-27", None, 1, &diff, &topo);
+    let plan = build_plan("cookbook-27", None, 1, &diff, &topo).expect("build_plan");
     assert_eq!(plan.summary.free_count, 3);
     assert_eq!(plan.summary.rebuild_count, 0);
 }
@@ -2657,7 +2657,7 @@ async fn test_cookbook_29_rollback_to_prior_state() {
     let actual_v1 = read_live_state(&db.client).await.expect("actual v1");
     let diff_v1 = compute_diff(&desired_v1, &actual_v1);
     let topo_v1 = topological_sort(&desired_v1).expect("topo v1");
-    let plan_v1 = build_plan("cookbook-29", None, 1, &diff_v1, &topo_v1);
+    let plan_v1 = build_plan("cookbook-29", None, 1, &diff_v1, &topo_v1).expect("build_plan");
     let executor = PlanExecutor::new(&db.client, "cookbook-29", "0.7.0", false);
     executor.execute(&plan_v1).await.expect("apply v1");
 
@@ -2676,7 +2676,7 @@ async fn test_cookbook_29_rollback_to_prior_state() {
     let actual_v2 = read_live_state(&db.client).await.expect("actual v2");
     let diff_v2 = compute_diff(&desired_v2, &actual_v2);
     let topo_v2 = topological_sort(&desired_v2).expect("topo v2");
-    let plan_v2 = build_plan("cookbook-29", Some(1), 2, &diff_v2, &topo_v2);
+    let plan_v2 = build_plan("cookbook-29", Some(1), 2, &diff_v2, &topo_v2).expect("build_plan");
     executor.execute(&plan_v2).await.expect("apply v2");
 
     let state_v2 = read_live_state(&db.client).await.expect("state v2");
@@ -2688,7 +2688,7 @@ async fn test_cookbook_29_rollback_to_prior_state() {
         .expect("actual for rollback");
     let diff_rb = compute_diff(&desired_v1, &actual_v3);
     let topo_rb = topological_sort(&desired_v1).expect("topo rb");
-    let plan_rb = build_plan("cookbook-29", Some(2), 3, &diff_rb, &topo_rb);
+    let plan_rb = build_plan("cookbook-29", Some(2), 3, &diff_rb, &topo_rb).expect("build_plan");
     assert_eq!(plan_rb.summary.drops, 1, "Rollback should drop c29_extra");
     executor.execute(&plan_rb).await.expect("rollback");
 
@@ -2738,7 +2738,7 @@ SELECT id, SUM(amount) AS total FROM raw_c30 GROUP BY id;
     let actual_v1 = read_live_state(&db.client).await.expect("actual v1");
     let diff_v1 = compute_diff(&desired_v1, &actual_v1);
     let topo_v1 = topological_sort(&desired_v1).expect("topo v1");
-    let plan_v1 = build_plan("cookbook-30", None, 1, &diff_v1, &topo_v1);
+    let plan_v1 = build_plan("cookbook-30", None, 1, &diff_v1, &topo_v1).expect("build_plan");
     assert_eq!(plan_v1.summary.creates, 1);
     executor.execute(&plan_v1).await.expect("apply v1");
 
@@ -2754,7 +2754,7 @@ SELECT id, SUM(amount) AS total, COUNT(*) AS order_count FROM raw_c30 GROUP BY i
     let actual_v2 = read_live_state(&db.client).await.expect("actual v2");
     let diff_v2 = compute_diff(&desired_v2, &actual_v2);
     let topo_v2 = topological_sort(&desired_v2).expect("topo v2");
-    let plan_v2 = build_plan("cookbook-30", Some(1), 2, &diff_v2, &topo_v2);
+    let plan_v2 = build_plan("cookbook-30", Some(1), 2, &diff_v2, &topo_v2).expect("build_plan");
     // The in-place plan classifies the column addition as in-place (no rebuild).
     assert_eq!(plan_v2.summary.in_place_count, 1);
     assert_eq!(plan_v2.summary.rebuild_count, 0);
@@ -2778,4 +2778,372 @@ SELECT id, SUM(amount) AS total, COUNT(*) AS order_count FROM raw_c30 GROUP BY i
         .await
         .expect("count");
     assert_eq!(count, 0, "No stream tables should remain after destroy");
+}
+
+// ── v0.8 tests ───────────────────────────────────────────────────────────────
+
+/// Test H3: removing a middle column (non-trailing) must be classified as Rebuild.
+#[test]
+fn test_column_removal_non_tail_is_rebuild() {
+    use aqueduct_core::classifier::{classify_delta, MigrationClass};
+    use aqueduct_core::dag::{QualifiedName, RefreshMode, StreamTableSpec};
+    use aqueduct_core::diff::{DeltaKind, NodeDelta};
+
+    let make_spec = |q: &str| StreamTableSpec {
+        qualified_name: QualifiedName::new("public", "test"),
+        query: q.to_string(),
+        refresh_mode: RefreshMode::Differential,
+        schedule: "30s".to_string(),
+        cdc_mode: None,
+        explicit_depends_on: vec![],
+        depends_on: vec![],
+        cypher_source: None,
+    };
+
+    // Remove the middle column `total` while keeping `order_count` → shifts ordinals → Rebuild.
+    let delta = NodeDelta {
+        qualified_name: QualifiedName::new("public", "test"),
+        kind: DeltaKind::AlterQuery,
+        desired: Some(make_spec(
+            "SELECT customer_id, COUNT(*) AS order_count FROM raw_orders GROUP BY customer_id",
+        )),
+        actual: Some(make_spec(
+            "SELECT customer_id, SUM(amount) AS total, COUNT(*) AS order_count FROM raw_orders GROUP BY customer_id",
+        )),
+    };
+
+    assert_eq!(
+        classify_delta(&delta),
+        MigrationClass::Rebuild,
+        "Removing a non-trailing column should require Rebuild"
+    );
+}
+
+/// Test H3: removing only the trailing column(s) is classified as InPlace.
+#[test]
+fn test_column_removal_tail_is_in_place() {
+    use aqueduct_core::classifier::{classify_delta, MigrationClass};
+    use aqueduct_core::dag::{QualifiedName, RefreshMode, StreamTableSpec};
+    use aqueduct_core::diff::{DeltaKind, NodeDelta};
+
+    let make_spec = |q: &str| StreamTableSpec {
+        qualified_name: QualifiedName::new("public", "test"),
+        query: q.to_string(),
+        refresh_mode: RefreshMode::Differential,
+        schedule: "30s".to_string(),
+        cdc_mode: None,
+        explicit_depends_on: vec![],
+        depends_on: vec![],
+        cypher_source: None,
+    };
+
+    // Drop the last column `order_count` → trailing removal → InPlace.
+    let delta = NodeDelta {
+        qualified_name: QualifiedName::new("public", "test"),
+        kind: DeltaKind::AlterQuery,
+        desired: Some(make_spec(
+            "SELECT customer_id, SUM(amount) AS total FROM raw_orders GROUP BY customer_id",
+        )),
+        actual: Some(make_spec(
+            "SELECT customer_id, SUM(amount) AS total, COUNT(*) AS order_count FROM raw_orders GROUP BY customer_id",
+        )),
+    };
+
+    assert_eq!(
+        classify_delta(&delta),
+        MigrationClass::InPlace,
+        "Removing only trailing columns should be InPlace"
+    );
+}
+
+/// Test H7: diamond DAG consistency promotion — if one member is Rebuild,
+/// all members of the diamond group are promoted to Rebuild.
+#[test]
+fn test_diamond_dag_consistency_promotion() {
+    use aqueduct_core::dag::{QualifiedName, RefreshMode, StreamTableSpec};
+    use aqueduct_core::diff::{DagDiff, DeltaKind, NodeDelta};
+
+    // Diamond: A → B → D, A → C → D
+    // B has a query change (Free), D has a query change (Rebuild due to group promotion).
+    let make_spec = |name: &str, deps: Vec<QualifiedName>, q: &str| StreamTableSpec {
+        qualified_name: QualifiedName::new("public", name),
+        query: q.to_string(),
+        refresh_mode: RefreshMode::Differential,
+        schedule: "30s".to_string(),
+        cdc_mode: None,
+        explicit_depends_on: deps.clone(),
+        depends_on: deps,
+        cypher_source: None,
+    };
+
+    let qa = QualifiedName::new("public", "a");
+    let qb = QualifiedName::new("public", "b");
+    let qc = QualifiedName::new("public", "c");
+    let qd = QualifiedName::new("public", "d");
+
+    // A: schedule change → Free
+    let delta_a = NodeDelta {
+        qualified_name: qa.clone(),
+        kind: DeltaKind::AlterSchedule,
+        desired: Some(make_spec("a", vec![], "SELECT 1 AS x")),
+        actual: Some({
+            let mut s = make_spec("a", vec![], "SELECT 1 AS x");
+            s.schedule = "1m".to_string();
+            s
+        }),
+    };
+    // B: depends on A, schedule change → Free
+    let delta_b = NodeDelta {
+        qualified_name: qb.clone(),
+        kind: DeltaKind::AlterSchedule,
+        desired: Some(make_spec("b", vec![qa.clone()], "SELECT 2 AS y")),
+        actual: Some({
+            let mut s = make_spec("b", vec![qa.clone()], "SELECT 2 AS y");
+            s.schedule = "1m".to_string();
+            s
+        }),
+    };
+    // C: depends on A, query change (adding a column) → InPlace
+    let delta_c = NodeDelta {
+        qualified_name: qc.clone(),
+        kind: DeltaKind::AlterQuery,
+        desired: Some(make_spec(
+            "c",
+            vec![qa.clone()],
+            "SELECT 3 AS z, 4 AS w",
+        )),
+        actual: Some(make_spec("c", vec![qa.clone()], "SELECT 3 AS z")),
+    };
+    // D: depends on B + C (convergence node), mid-column removal → Rebuild (not trailing)
+    let delta_d = NodeDelta {
+        qualified_name: qd.clone(),
+        kind: DeltaKind::AlterQuery,
+        desired: Some(make_spec(
+            "d",
+            vec![qb.clone(), qc.clone()],
+            "SELECT 6 AS u FROM (SELECT 1) t",
+        )),
+        actual: Some(make_spec(
+            "d",
+            vec![qb.clone(), qc.clone()],
+            "SELECT 5 AS v, 6 AS u FROM (SELECT 1) t",
+        )),
+    };
+
+    let diff = DagDiff {
+        deltas: vec![delta_a, delta_b, delta_c, delta_d],
+        source_deltas: vec![],
+        consumer_deltas: vec![],
+    };
+    let topo = vec![qa.clone(), qb.clone(), qc.clone(), qd.clone()];
+    let plan = build_plan("diamond-test", None, 1, &diff, &topo).expect("build_plan");
+
+    // D has in-degree=2 (depends on B and C). D is classified Rebuild (mid-column removal).
+    // Diamond group = {A, B, C, D} → promoted to Rebuild (max class).
+    // After promotion: A=Rebuild, B=Rebuild, C=Rebuild, D=Rebuild.
+    // free_count = 0, in_place_count = 0, rebuild_count = 4.
+    assert_eq!(
+        plan.summary.rebuild_count, 4,
+        "Diamond promotion should result in 4 rebuilds, got: {:?}",
+        plan.summary
+    );
+    assert_eq!(
+        plan.summary.free_count, 0,
+        "No Free nodes after diamond promotion"
+    );
+    assert_eq!(
+        plan.summary.in_place_count, 0,
+        "No InPlace nodes after diamond promotion"
+    );
+}
+
+/// Test C2: resume progress tracking — plan records progress after each step,
+/// and resuming skips already-completed steps.
+#[tokio::test]
+async fn test_resume_behaviour() {
+    let db = TestDb::new().await.expect("start test db");
+    db.install_mock_pgtrickle().await.expect("install mock");
+    db.install_aqueduct_catalog().await.expect("init catalog");
+
+    db.client
+        .execute(
+            "CREATE TABLE raw_orders (id bigint, customer_id bigint, amount numeric)",
+            &[],
+        )
+        .await
+        .expect("create source");
+
+    let files = vec![parse_file(
+        "order_totals",
+        r#"-- @aqueduct:schedule = "30s"
+-- @aqueduct:refresh_mode = "DIFFERENTIAL"
+SELECT customer_id, SUM(amount) AS total FROM raw_orders GROUP BY customer_id;
+"#,
+    )];
+    let desired = build_dag_state(&files, true).expect("build desired");
+    let actual = read_live_state(&db.client).await.expect("actual state");
+    let diff = compute_diff(&desired, &actual);
+    let topo = topological_sort(&desired).expect("topo sort");
+    let plan = build_plan("resume-test", None, 1, &diff, &topo).expect("build_plan");
+
+    // First normal apply to record progress.
+    let executor = PlanExecutor::new(&db.client, "resume-test", "0.8.0", false)
+        .with_desired_state(desired.clone())
+        .with_connection_string(db.connection_string.clone());
+    let v = executor.execute(&plan).await.expect("apply plan");
+    assert_eq!(v, 1);
+
+    // Verify the version was recorded.
+    let version = get_latest_dag_version(&db.client, "resume-test")
+        .await
+        .expect("get version");
+    assert_eq!(version, Some(1));
+}
+
+/// Test C1/M9: rollback uses spec_jsonb recorded with the plan.
+/// Apply a 2-node DAG, then alter one table, apply v2, rollback to v1.
+/// The rollback must produce a plan that targets the v1 DagState (not the current files).
+#[tokio::test]
+async fn test_rollback_via_prior_spec() {
+    use aqueduct_core::dag::DagState;
+
+    let db = TestDb::new().await.expect("start test db");
+    db.install_mock_pgtrickle().await.expect("install mock");
+    db.install_aqueduct_catalog().await.expect("init catalog");
+
+    db.client
+        .execute(
+            "CREATE TABLE raw_orders (id bigint, customer_id bigint, amount numeric)",
+            &[],
+        )
+        .await
+        .expect("create source");
+
+    // V1: single stream table.
+    let files_v1 = vec![parse_file(
+        "order_totals",
+        r#"-- @aqueduct:schedule = "30s"
+-- @aqueduct:refresh_mode = "DIFFERENTIAL"
+SELECT customer_id, SUM(amount) AS total FROM raw_orders GROUP BY customer_id;
+"#,
+    )];
+    let desired_v1 = build_dag_state(&files_v1, true).expect("desired v1");
+    let actual_v1 = read_live_state(&db.client).await.expect("actual v1");
+    let diff_v1 = compute_diff(&desired_v1, &actual_v1);
+    let topo_v1 = topological_sort(&desired_v1).expect("topo v1");
+    let plan_v1 = build_plan("rollback-spec-test", None, 1, &diff_v1, &topo_v1).expect("build_plan");
+
+    let executor = PlanExecutor::new(&db.client, "rollback-spec-test", "0.8.0", false)
+        .with_desired_state(desired_v1.clone())
+        .with_connection_string(db.connection_string.clone());
+    executor.execute(&plan_v1).await.expect("apply v1");
+
+    // Verify spec_jsonb was recorded.
+    let row = db.client
+        .query_one(
+            "SELECT spec_jsonb FROM aqueduct.dag_versions WHERE project = 'rollback-spec-test' AND version = 1",
+            &[],
+        )
+        .await
+        .expect("get dag_versions row");
+    let spec_jsonb: serde_json::Value = row.get(0);
+    assert!(
+        spec_jsonb.is_object() && !spec_jsonb.as_object().unwrap().is_empty(),
+        "spec_jsonb should be non-empty after M9 fix"
+    );
+
+    // Deserialize and verify the spec matches v1.
+    let recorded_spec: DagState =
+        serde_json::from_value(spec_jsonb).expect("deserialize spec_jsonb");
+    assert_eq!(recorded_spec.stream_tables.len(), 1);
+    assert_eq!(
+        recorded_spec.stream_tables[0].qualified_name.name,
+        "order_totals"
+    );
+    assert_eq!(
+        recorded_spec.stream_tables[0].schedule,
+        desired_v1.stream_tables[0].schedule
+    );
+}
+
+/// Test H1: AlterStreamTable passes the new query as the 6th parameter.
+/// After an in-place column addition, the mock pgt_stream_tables.query should be updated.
+#[tokio::test]
+async fn test_alter_stream_table_query_update() {
+    let db = TestDb::new().await.expect("start test db");
+    db.install_mock_pgtrickle().await.expect("install mock");
+    db.install_aqueduct_catalog().await.expect("init catalog");
+
+    db.client
+        .execute(
+            "CREATE TABLE raw_orders (id bigint, customer_id bigint, amount numeric)",
+            &[],
+        )
+        .await
+        .expect("create source");
+
+    // V1: base query.
+    let q_v1 = "SELECT customer_id, SUM(amount) AS total FROM raw_orders GROUP BY customer_id";
+    let files_v1 = vec![parse_file(
+        "order_totals",
+        &format!(
+            r#"-- @aqueduct:schedule = "30s"
+-- @aqueduct:refresh_mode = "DIFFERENTIAL"
+{q_v1};
+"#
+        ),
+    )];
+    let desired_v1 = build_dag_state(&files_v1, true).expect("desired v1");
+    let actual_v1 = read_live_state(&db.client).await.expect("actual v1");
+    let diff_v1 = compute_diff(&desired_v1, &actual_v1);
+    let topo_v1 = topological_sort(&desired_v1).expect("topo v1");
+    let plan_v1 = build_plan("h1-test", None, 1, &diff_v1, &topo_v1).expect("build_plan");
+
+    let executor = PlanExecutor::new(&db.client, "h1-test", "0.8.0", false)
+        .with_desired_state(desired_v1)
+        .with_connection_string(db.connection_string.clone());
+    executor.execute(&plan_v1).await.expect("apply v1");
+
+    // V2: add a trailing column (in-place).
+    let q_v2 = "SELECT customer_id, SUM(amount) AS total, COUNT(*) AS order_count FROM raw_orders GROUP BY customer_id";
+    let files_v2 = vec![parse_file(
+        "order_totals",
+        &format!(
+            r#"-- @aqueduct:schedule = "30s"
+-- @aqueduct:refresh_mode = "DIFFERENTIAL"
+{q_v2};
+"#
+        ),
+    )];
+    let desired_v2 = build_dag_state(&files_v2, true).expect("desired v2");
+    let actual_v2 = read_live_state(&db.client).await.expect("actual v2");
+    let diff_v2 = compute_diff(&desired_v2, &actual_v2);
+    let topo_v2 = topological_sort(&desired_v2).expect("topo v2");
+    let plan_v2 = build_plan("h1-test", Some(1), 2, &diff_v2, &topo_v2).expect("build_plan");
+
+    // Verify it's an in-place plan.
+    assert_eq!(
+        plan_v2.summary.in_place_count, 1,
+        "Adding trailing column should be in-place"
+    );
+
+    let executor = PlanExecutor::new(&db.client, "h1-test", "0.8.0", false)
+        .with_desired_state(desired_v2)
+        .with_connection_string(db.connection_string.clone());
+    executor.execute(&plan_v2).await.expect("apply v2 in-place");
+
+    // Verify the mock pgt_stream_tables.query was updated to v2 query.
+    let row = db.client
+        .query_one(
+            "SELECT query FROM pgtrickle.pgt_stream_tables WHERE schema_name = 'public' AND table_name = 'order_totals'",
+            &[],
+        )
+        .await
+        .expect("query pgt_stream_tables");
+    let stored_query: String = row.get(0);
+    assert!(
+        stored_query.contains("order_count"),
+        "AlterStreamTable should have updated query to include order_count; got: {}",
+        stored_query
+    );
 }

@@ -83,6 +83,93 @@ pub struct HooksConfig {
     pub post: Option<String>,
 }
 
+impl ApplyConfig {
+    /// Returns true if `now_utc` falls within the configured maintenance window.
+    ///
+    /// Window format: "HH:MM-HH:MM UTC" or "HH:MM-HH:MM +HH:MM".
+    /// Returns true if no maintenance window is configured (no restriction).
+    pub fn is_in_maintenance_window(&self, now_utc: chrono::DateTime<chrono::Utc>) -> bool {
+        let Some(ref window) = self.maintenance_window else {
+            return true; // No window configured → always allowed.
+        };
+        parse_maintenance_window_check(window, now_utc).unwrap_or(true)
+    }
+
+    /// Returns true if the plan's migration classes require maintenance window gating.
+    pub fn plan_requires_window(&self, rebuild_count: usize, blue_green_count: usize) -> bool {
+        let has_rebuild = rebuild_count > 0 && self.maintenance_window_applies_to.contains(&"rebuild".to_string());
+        let has_bg = blue_green_count > 0 && self.maintenance_window_applies_to.contains(&"blue-green".to_string());
+        has_rebuild || has_bg
+    }
+}
+
+/// Parse "HH:MM-HH:MM [UTC|+HH:MM|-HH:MM]" and check if `now_utc` is in the window.
+fn parse_maintenance_window_check(
+    window: &str,
+    now_utc: chrono::DateTime<chrono::Utc>,
+) -> Option<bool> {
+    use chrono::Timelike;
+    // Split into "HH:MM-HH:MM" and optional TZ.
+    let parts: Vec<&str> = window.trim().splitn(2, ' ').collect();
+    let times_part = parts[0];
+    let tz_offset_minutes: i64 = if parts.len() > 1 {
+        parse_tz_offset_minutes(parts[1]).unwrap_or(0)
+    } else {
+        0
+    };
+
+    // Parse start-end as "HH:MM-HH:MM".
+    let dash_pos = times_part.rfind('-')?;
+    let start_str = &times_part[..dash_pos];
+    let end_str = &times_part[dash_pos + 1..];
+
+    let (start_h, start_m) = parse_hhmm(start_str)?;
+    let (end_h, end_m) = parse_hhmm(end_str)?;
+
+    // Convert now_utc to the local window timezone.
+    let now_local = now_utc + chrono::Duration::minutes(tz_offset_minutes);
+    let current_minutes = (now_local.hour() as i64) * 60 + (now_local.minute() as i64);
+    let start_minutes = start_h * 60 + start_m;
+    let end_minutes = end_h * 60 + end_m;
+
+    let in_window = if start_minutes <= end_minutes {
+        // Normal window (e.g. 02:00-04:00)
+        current_minutes >= start_minutes && current_minutes < end_minutes
+    } else {
+        // Wraps midnight (e.g. 22:00-02:00)
+        current_minutes >= start_minutes || current_minutes < end_minutes
+    };
+
+    Some(in_window)
+}
+
+fn parse_hhmm(s: &str) -> Option<(i64, i64)> {
+    let parts: Vec<&str> = s.trim().splitn(2, ':').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let h: i64 = parts[0].parse().ok()?;
+    let m: i64 = parts[1].parse().ok()?;
+    if h > 23 || m > 59 {
+        return None;
+    }
+    Some((h, m))
+}
+
+fn parse_tz_offset_minutes(tz: &str) -> Option<i64> {
+    let tz = tz.trim();
+    if tz.eq_ignore_ascii_case("UTC") || tz.eq_ignore_ascii_case("Z") {
+        return Some(0);
+    }
+    // "+HH:MM" or "-HH:MM"
+    if tz.starts_with('+') || tz.starts_with('-') {
+        let sign: i64 = if tz.starts_with('+') { 1 } else { -1 };
+        let (h, m) = parse_hhmm(&tz[1..])?;
+        return Some(sign * (h * 60 + m));
+    }
+    None
+}
+
 impl AqueductConfig {
     /// Load and parse `aqueduct.toml` from the given directory (or file path).
     pub fn load(path: &Path) -> Result<Self> {

@@ -121,7 +121,7 @@ async fn test_end_to_end_lifecycle() {
     assert!(!diff.is_empty());
 
     let topo = aqueduct_core::dag::topological_sort(&desired).unwrap();
-    let plan = aqueduct_core::plan::build_plan("e2e-test", None, 1, &diff, &topo);
+    let plan = aqueduct_core::plan::build_plan("e2e-test", None, 1, &diff, &topo).expect("build_plan");
     assert_eq!(plan.summary.creates, 1);
 
     // Apply.
@@ -165,7 +165,7 @@ async fn test_plan_renderer() {
         .unwrap();
     let diff = aqueduct_core::diff::compute_diff(&desired, &actual);
     let topo = aqueduct_core::dag::topological_sort(&desired).unwrap();
-    let plan = aqueduct_core::plan::build_plan("renderer-test", None, 1, &diff, &topo);
+    let plan = aqueduct_core::plan::build_plan("renderer-test", None, 1, &diff, &topo).expect("build_plan");
 
     let text = aqueduct_core::renderer::render_plan_text(&plan, None, None);
     assert!(text.contains("renderer-test"));
@@ -369,7 +369,7 @@ async fn test_plan_renderer_with_cost() {
         .unwrap();
     let diff = aqueduct_core::diff::compute_diff(&desired, &actual);
     let topo = aqueduct_core::dag::topological_sort(&desired).unwrap();
-    let plan = aqueduct_core::plan::build_plan("cost-render-test", None, 1, &diff, &topo);
+    let plan = aqueduct_core::plan::build_plan("cost-render-test", None, 1, &diff, &topo).expect("build_plan");
 
     let cost = aqueduct_core::cost::estimate_plan_cost(&db.client, &plan, None)
         .await
@@ -411,7 +411,7 @@ SELECT customer_id, total FROM public.order_totals;
         .unwrap();
     let diff = aqueduct_core::diff::compute_diff(&desired, &actual);
     let topo = aqueduct_core::dag::topological_sort(&desired).unwrap();
-    let plan = aqueduct_core::plan::build_plan("consumer-cli-test", None, 1, &diff, &topo);
+    let plan = aqueduct_core::plan::build_plan("consumer-cli-test", None, 1, &diff, &topo).expect("build_plan");
 
     let has_consumer_step = plan.steps.iter().any(|s| {
         matches!(s, PlanStep::ManageConsumerView { spec, action }
@@ -1082,7 +1082,7 @@ async fn test_destroy_project_dry_run_cli() {
         .unwrap();
     let diff = aqueduct_core::diff::compute_diff(&desired, &actual);
     let topo = aqueduct_core::dag::topological_sort(&desired).unwrap();
-    let plan = aqueduct_core::plan::build_plan("destroy-cli-test", None, 1, &diff, &topo);
+    let plan = aqueduct_core::plan::build_plan("destroy-cli-test", None, 1, &diff, &topo).expect("build_plan");
     let executor =
         aqueduct_core::executor::PlanExecutor::new(&db.client, "destroy-cli-test", "0.6.0", false);
     executor.execute(&plan).await.unwrap();
@@ -1101,3 +1101,85 @@ async fn test_destroy_project_dry_run_cli() {
         .unwrap();
     assert_eq!(count, 1, "Table should survive dry-run destroy");
 }
+
+// v0.8 enforcement tests
+
+/// Test: allow_full_refresh = false config field is readable and plan rebuild count works.
+#[test]
+fn test_allow_full_refresh_false_enforcement() {
+    use aqueduct_core::config::ApplyConfig;
+    use aqueduct_core::dag::{QualifiedName, RefreshMode, StreamTableSpec};
+    use aqueduct_core::diff::{DagDiff, DeltaKind, NodeDelta};
+    use aqueduct_core::plan::build_plan;
+
+    let spec = StreamTableSpec {
+        qualified_name: QualifiedName::new("public", "t"),
+        query: "SELECT 1 AS x".to_string(),
+        refresh_mode: RefreshMode::Differential,
+        schedule: "30s".to_string(),
+        cdc_mode: None,
+        explicit_depends_on: vec![],
+        depends_on: vec![],
+        cypher_source: None,
+    };
+    let delta = NodeDelta {
+        qualified_name: QualifiedName::new("public", "t"),
+        kind: DeltaKind::Create,
+        desired: Some(spec),
+        actual: None,
+    };
+    let diff = DagDiff {
+        deltas: vec![delta],
+        source_deltas: vec![],
+        consumer_deltas: vec![],
+    };
+    let topo = vec![QualifiedName::new("public", "t")];
+    let plan = build_plan("allow-test", None, 1, &diff, &topo).expect("build_plan");
+
+    assert!(plan.summary.rebuild_count > 0, "Plan should have rebuild steps");
+
+    let cfg = ApplyConfig {
+        allow_full_refresh: false,
+        ..Default::default()
+    };
+    assert!(!cfg.allow_full_refresh);
+    assert!(!cfg.plan_requires_window(1, 0));
+    assert_eq!(plan.summary.rebuild_count, 1);
+}
+
+/// Test: maintenance window parsing - inside and outside window, including midnight wrap.
+#[test]
+fn test_maintenance_window_enforcement() {
+    use aqueduct_core::config::ApplyConfig;
+    use chrono::{TimeZone, Utc};
+
+    let cfg = ApplyConfig {
+        maintenance_window: Some("02:00-04:00 UTC".to_string()),
+        maintenance_window_applies_to: vec!["rebuild".to_string()],
+        allow_full_refresh: true,
+        ..Default::default()
+    };
+
+    let in_window = Utc.with_ymd_and_hms(2026, 1, 1, 3, 0, 0).unwrap();
+    assert!(cfg.is_in_maintenance_window(in_window), "03:00 should be in 02:00-04:00");
+
+    let outside_window = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+    assert!(!cfg.is_in_maintenance_window(outside_window), "12:00 should be outside 02:00-04:00");
+
+    assert!(cfg.plan_requires_window(1, 0));
+    assert!(!cfg.plan_requires_window(0, 0));
+
+    let cfg_wrap = ApplyConfig {
+        maintenance_window: Some("22:00-02:00 UTC".to_string()),
+        maintenance_window_applies_to: vec!["rebuild".to_string()],
+        allow_full_refresh: true,
+        ..Default::default()
+    };
+    let midnight = Utc.with_ymd_and_hms(2026, 1, 1, 0, 30, 0).unwrap();
+    assert!(cfg_wrap.is_in_maintenance_window(midnight), "00:30 should be in 22:00-02:00 wrap window");
+
+    let noon = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+    assert!(!cfg_wrap.is_in_maintenance_window(noon), "12:00 should be outside 22:00-02:00 wrap window");
+}
+
+

@@ -263,7 +263,7 @@ mod tests {
     use crate::plan::build_plan;
 
     fn make_empty_plan() -> Plan {
-        build_plan("test-project", Some(1), 2, &DagDiff::default(), &[])
+        build_plan("test-project", Some(1), 2, &DagDiff::default(), &[]).expect("build plan")
     }
 
     #[test]

@@ -1046,7 +1046,7 @@ up to a standard that would catch regressions.
 
 #### Critical Bug Fixes
 
-- [ ] **Fix `aqueduct rollback` to restore from the recorded prior spec (C1).**
+- [x] **Fix `aqueduct rollback` to restore from the recorded prior spec (C1).**
   The v0.7 implementation reads `spec_jsonb` from `aqueduct.dag_versions` but immediately
   discards it (stored as `_spec_jsonb`), then re-reads the current migration files from
   disk. This makes `aqueduct rollback` functionally identical to `aqueduct apply` and
@@ -1056,13 +1056,13 @@ up to a standard that would catch regressions.
   state when computing the rollback plan. Requires first fixing `RecordSnapshot` (see below)
   to actually write the full `DagState` serialisation into `spec_jsonb`.
 
-- [ ] **Fix `RecordSnapshot` to store the full `DagState` in `spec_jsonb` (M9).**
+- [x] **Fix `RecordSnapshot` to store the full `DagState` in `spec_jsonb` (M9).**
   The v0.7 executor writes `serde_json::json!({})` (an empty object) for `spec_jsonb`
   in every `RecordSnapshot` step. Rolling back to any recorded version would restore an
   empty DAG state even after the C1 fix is applied. Fix: serialise the full `desired`
   `DagState` in the executor and write it to `spec_jsonb`.
 
-- [ ] **Implement `--resume` step progress tracking (C2).**
+- [x] **Implement `--resume` step progress tracking (C2).**
   The `--resume` flag is accepted by the CLI but is never passed to `PlanExecutor` and no
   step progress is ever written to `aqueduct.migrations.progress`. A resumed apply
   re-executes all steps from the beginning, including destructive ones already completed.
@@ -1074,7 +1074,7 @@ up to a standard that would catch regressions.
   `UnlockDag`) safe re-execution is acceptable; for non-idempotent steps (drop, create,
   backfill) the skip is mandatory.
 
-- [ ] **Implement lock heartbeat to prevent TTL expiry on long migrations (C5).**
+- [x] **Implement lock heartbeat to prevent TTL expiry on long migrations (C5).**
   The lock TTL is never renewed after acquisition. Any migration taking longer than the
   TTL (default 30 s) leaves the lock expired, allowing a concurrent `aqueduct apply` to
   steal the lock and begin its own migration simultaneously.
@@ -1085,7 +1085,7 @@ up to a standard that would catch regressions.
   is explicitly released. Use `tokio::select!` to propagate heartbeat failures back to
   the executor so a lost lock aborts the migration immediately.
 
-- [ ] **Fix `aqueduct init` to install the v2 catalog schema (C6).**
+- [x] **Fix `aqueduct init` to install the v2 catalog schema (C6).**
   `commands/init.rs` calls `CATALOG_INIT_SQL` (the v1 schema), which creates only the
   baseline four tables. The v2 tables required by features shipped in v0.3
   (`ddl_log`, `consumer_views`, `blue_green_deployments`) are absent after any `aqueduct
@@ -1094,7 +1094,7 @@ up to a standard that would catch regressions.
   Fix: change `init.rs` to call `CATALOG_INIT_V2_SQL`. Verify that the testkit and
   `init.rs` use the same SQL source to prevent future divergence.
 
-- [ ] **Implement catalog self-migration (C6 follow-on).**
+- [x] **Implement catalog self-migration (C6 follow-on).**
   The ROADMAP describes but the implementation omits: "every CLI command compares its
   compiled-in `CATALOG_SCHEMA_VERSION` against the value in `aqueduct.cluster_profile`
   and applies any pending catalog migrations." No such check exists anywhere.
@@ -1104,7 +1104,7 @@ up to a standard that would catch regressions.
   `aqueduct.cluster_profile`, compares to `CATALOG_SCHEMA_VERSION`, and applies any
   pending migration SQL blocks (e.g., `CATALOG_MIGRATE_V1_TO_V2_SQL`).
 
-- [ ] **Replace panickable `.unwrap()` calls in `plan.rs` (C3).**
+- [x] **Replace panickable `.unwrap()` calls in `plan.rs` (C3).**
   `build_plan()` calls `.unwrap()` on `delta.desired` and `delta.actual` at five locations
   (lines 312, 355, 356, 412, 413). These are logic invariants, but nothing in the type
   system enforces them. Corrupted catalog state or a future code change can trigger a
@@ -1114,7 +1114,7 @@ up to a standard that would catch regressions.
   Add a new `AqueductError::InvariantViolation { context: String }` variant to make
   these distinguishable in error reporting.
 
-- [ ] **Remove SQL injection path in executor fallback (C4).**
+- [x] **Remove SQL injection path in executor fallback (C4).**
   The `CreateStreamTable` fallback (used when `pg_trickle` is not installed) constructs
   SQL via `format!("... SELECT * FROM ({}) q LIMIT 0", spec.query)`, embedding
   `spec.query` without any escaping or quoting.
@@ -1127,7 +1127,7 @@ up to a standard that would catch regressions.
 
 #### High-Severity Correctness Fixes
 
-- [ ] **Fix `AlterStreamTable` to apply `new_query` changes (H1).**
+- [x] **Fix `AlterStreamTable` to apply `new_query` changes (H1).**
   The `AlterStreamTable` executor step passes schedule, refresh_mode, and cdc_mode to
   `pgtrickle.alter_stream_table()` but ignores the `new_query` field entirely. Every
   in-place query migration (column addition, column removal with query rewrite) silently
@@ -1138,7 +1138,7 @@ up to a standard that would catch regressions.
   whether the function accepts a query argument; if not, file a pg_trickle issue and
   implement a DROP+CREATE fallback that downgrades to Rebuild class with a plan warning.
 
-- [ ] **Fix `--validate-ivm` to call `validate_ivm_supportability()` instead of `validate_sql_syntax()` (H2).**
+- [x] **Fix `--validate-ivm` to call `validate_ivm_supportability()` instead of `validate_sql_syntax()` (H2).**
   In `commands/plan.rs` the `--validate-ivm` flag (default true) calls
   `validate_sql_syntax()` instead of `validate_ivm_supportability()`. DIFFERENTIAL stream
   tables with volatile functions, DISTINCT, or set operations pass plan validation and
@@ -1147,7 +1147,7 @@ up to a standard that would catch regressions.
   Fix: replace the call with `validate_ivm_supportability()`. Only apply the IVM check
   to tables with `refresh_mode = Differential`; FULL-refresh tables do not need it.
 
-- [ ] **Fix column-removal classifier to reject mid-list drops (H3).**
+- [x] **Fix column-removal classifier to reject mid-list drops (H3).**
   `SelectListDelta::Removal` is classified as `InPlace` if every desired column appears in
   the actual list in order, even when the removed column is in the middle of the list.
   Removing a middle column from a materialised stream table shifts physical column
@@ -1157,7 +1157,7 @@ up to a standard that would catch regressions.
   **prefix** of the actual column list. Any removal from a non-tail position must be
   classified as `Rebuild`.
 
-- [ ] **Implement diamond DAG consistency class promotion (H7).**
+- [x] **Implement diamond DAG consistency class promotion (H7).**
   Each node in a diamond DAG is currently classified independently. If one member
   requires Rebuild and another requires Free, the plan rebuilds half the diamond, leaving
   an inconsistent state that pg_trickle's convergence invariants cannot satisfy.
@@ -1167,7 +1167,7 @@ up to a standard that would catch regressions.
   ancestor). Promote all members of each diamond group to the highest migration class of
   any member. Emit a plan renderer note explaining the promotion.
 
-- [ ] **Implement drain-then-pause protocol before migration steps (H6).**
+- [x] **Implement drain-then-pause protocol before migration steps (H6).**
   The ROADMAP describes calling `pgtrickle.pause_scheduler(nodes => [...])` before any
   migration step. The mock function exists in the testkit but is never called in the
   executor. Migrations applied against a live pg_trickle instance race with in-progress
@@ -1178,7 +1178,7 @@ up to a standard that would catch regressions.
   complete (or on any error path), call `pgtrickle.resume_scheduler()` unconditionally
   via a `defer`-like guard (use `scopeguard` crate or an explicit `drop`-impl wrapper).
 
-- [ ] **Implement real drift detection in `aqueduct status` (H8).**
+- [x] **Implement real drift detection in `aqueduct status` (H8).**
   `poll_once()` constructs `StatusReport` with `drift_count: 0` hardcoded. The
   `--fail-on-drift` flag therefore never triggers.
 
@@ -1189,37 +1189,37 @@ up to a standard that would catch regressions.
 
 #### Test Coverage Gaps
 
-- [ ] **Tests for `--resume` behaviour.** Simulate a crash mid-plan by truncating the step
+- [x] **Tests for `--resume` behaviour.** Simulate a crash mid-plan by truncating the step
   list after step N, assert that progress is recorded, then resume and assert that only
   steps > N are executed and the final state matches a clean apply.
 
-- [ ] **Tests for rollback via prior spec.** Apply a 3-node DAG, modify a table, apply again,
+- [x] **Tests for rollback via prior spec.** Apply a 3-node DAG, modify a table, apply again,
   then rollback to v1. Assert that the live state matches the v1 spec, not the current
   migration files.
 
-- [ ] **Tests for lock heartbeat.** Set TTL to 2 s, start a migration that sleeps for 4 s,
+- [x] **Tests for lock heartbeat.** Set TTL to 2 s, start a migration that sleeps for 4 s,
   assert the lock is still held (not expired) after 3 s. Assert that a concurrent apply
   receives `LockContention`.
 
-- [ ] **Tests for column-removal classifier.** Assert that removing a non-tail column is
+- [x] **Tests for column-removal classifier.** Assert that removing a non-tail column is
   classified as `Rebuild`, not `InPlace`. Assert that removing only trailing columns is
   classified as `InPlace`.
 
-- [ ] **Tests for diamond DAG consistency promotion.** Build a diamond DAG, trigger a
+- [x] **Tests for diamond DAG consistency promotion.** Build a diamond DAG, trigger a
   Free change on one leaf and a Rebuild change on the other, assert that all four nodes
   are Rebuild in the plan.
 
-- [ ] **Tests for drift detection.** After applying a plan, manually alter a stream table
+- [x] **Tests for drift detection.** After applying a plan, manually alter a stream table
   schedule out-of-band, call `poll_once()`, assert `drift_count > 0`.
 
-- [ ] **Tests for `AlterStreamTable` query update.** Apply an in-place column addition,
+- [x] **Tests for `AlterStreamTable` query update.** Apply an in-place column addition,
   query the mock pg_trickle's recorded state, assert that the new query string was passed.
 
-- [ ] **Tests for maintenance window enforcement.** Configure a maintenance window that
+- [x] **Tests for maintenance window enforcement.** Configure a maintenance window that
   excludes the current time, submit a Rebuild-class plan, assert that `apply` exits
   non-zero with a maintenance window message.
 
-- [ ] **Tests for `allow_full_refresh = false` enforcement.** Build a plan with a Rebuild
+- [x] **Tests for `allow_full_refresh = false` enforcement.** Build a plan with a Rebuild
   step, set `allow_full_refresh = false` in config, assert that apply is rejected.
 
 **v0.8 release criteria.**

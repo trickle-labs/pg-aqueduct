@@ -44,6 +44,12 @@ pub enum AqueductError {
     #[error("Migration resumption error: {0}")]
     Resume(String),
 
+    #[error("pg_trickle is not installed on the target database")]
+    PgTrickleNotInstalled,
+
+    #[error("Invariant violation in {context}")]
+    InvariantViolation { context: String },
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 

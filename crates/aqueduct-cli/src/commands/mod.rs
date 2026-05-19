@@ -29,6 +29,13 @@ pub async fn connect(dsn: &str) -> Result<tokio_postgres::Client> {
     Ok(client)
 }
 
+/// Connect and ensure the aqueduct catalog is up-to-date.
+pub async fn connect_and_migrate(dsn: &str) -> Result<tokio_postgres::Client> {
+    let client = connect(dsn).await?;
+    aqueduct_core::catalog::ensure_catalog_current(&client).await?;
+    Ok(client)
+}
+
 /// Resolve a DSN from either a direct --dsn flag or the config file + --to target.
 pub async fn resolve_dsn(
     dsn: Option<&str>,

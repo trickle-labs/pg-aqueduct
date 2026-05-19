@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::classifier::MigrationClass;
 use crate::dag::{ConsumerSpec, QualifiedName, StreamTableSpec};
 use crate::diff::{ConsumerDeltaKind, DagDiff, DeltaKind, NodeDelta, SourceDeltaKind};
+use crate::error::{AqueductError, Result};
 
 /// A view assignment for a blue/green consumer view swap.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -199,6 +200,97 @@ pub struct PlanChange {
     pub description: String,
 }
 
+/// Rank a MigrationClass for comparison: higher = more disruptive.
+fn class_rank(c: &MigrationClass) -> u8 {
+    match c {
+        MigrationClass::Free => 0,
+        MigrationClass::InPlace => 1,
+        MigrationClass::Rebuild => 2,
+        MigrationClass::BlueGreen => 3,
+    }
+}
+
+/// After per-node classification, detect diamond groups (convergence nodes with
+/// in-degree ≥ 2 among the classified nodes) and promote all ancestors transitively
+/// to the highest migration class in the group.
+fn apply_diamond_consistency_promotion(
+    classifications: &mut std::collections::HashMap<QualifiedName, MigrationClass>,
+    ordered_deltas: &[&NodeDelta],
+) {
+    // Compute in-degree for each classified node (number of direct upstream classified parents).
+    // A "convergence node" has ≥ 2 direct upstream parents (data flow merges into it).
+    let mut in_degree: std::collections::HashMap<QualifiedName, usize> =
+        std::collections::HashMap::new();
+    for n in classifications.keys() {
+        in_degree.entry(n.clone()).or_insert(0);
+    }
+    for delta in ordered_deltas {
+        if !classifications.contains_key(&delta.qualified_name) {
+            continue;
+        }
+        if let Some(spec) = &delta.desired {
+            // Count how many direct upstream dependencies this node has that are classified.
+            let upstream_count = spec
+                .depends_on
+                .iter()
+                .filter(|dep| classifications.contains_key(*dep))
+                .count();
+            if upstream_count > 0 {
+                *in_degree.entry(delta.qualified_name.clone()).or_insert(0) = upstream_count;
+            }
+        }
+    }
+
+    // Convergence nodes have in-degree >= 2.
+    let convergence_nodes: Vec<QualifiedName> = in_degree
+        .iter()
+        .filter(|(_, &deg)| deg >= 2)
+        .map(|(n, _)| n.clone())
+        .collect();
+
+    for conv_node in convergence_nodes {
+        // Collect the diamond group: conv_node + all its transitive ancestors
+        // within classified nodes.
+        let mut group: std::collections::HashSet<QualifiedName> =
+            std::collections::HashSet::new();
+        let mut stack = vec![conv_node.clone()];
+        while let Some(n) = stack.pop() {
+            if group.insert(n.clone()) {
+                // Find which delta has this name and add its depends_on.
+                if let Some(delta) = ordered_deltas
+                    .iter()
+                    .find(|d| d.qualified_name == n)
+                {
+                    if let Some(spec) = &delta.desired {
+                        for dep in &spec.depends_on {
+                            if classifications.contains_key(dep) {
+                                stack.push(dep.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Find the highest class in the group.
+        let max_class = group
+            .iter()
+            .filter_map(|n| classifications.get(n))
+            .max_by_key(|c| class_rank(c))
+            .copied()
+            .unwrap_or(MigrationClass::Free);
+
+        // Promote all members of the group to the maximum class.
+        for n in &group {
+            if let Some(c) = classifications.get_mut(n) {
+                if class_rank(c) < class_rank(&max_class) {
+                    *c = max_class;
+                }
+            }
+        }
+    }
+}
+
 /// Build a Plan from a DagDiff.
 pub fn build_plan(
     project: &str,
@@ -206,7 +298,7 @@ pub fn build_plan(
     next_version: u64,
     diff: &DagDiff,
     topo_order: &[QualifiedName],
-) -> Plan {
+) -> Result<Plan> {
     use crate::classifier::classify_delta;
 
     let mut steps: Vec<PlanStep> = Vec::new();
@@ -284,6 +376,25 @@ pub fn build_plan(
     // Sort deltas by topological order.
     let ordered_deltas = order_deltas(diff, topo_order);
 
+    // Pre-classify all non-cascaded, non-Unchanged deltas, then apply diamond promotion.
+    let mut classifications: std::collections::HashMap<QualifiedName, MigrationClass> =
+        std::collections::HashMap::new();
+    for delta in &ordered_deltas {
+        if delta.kind == DeltaKind::Unchanged {
+            continue;
+        }
+        let already_cascaded = diff.source_changes().iter().any(|s| {
+            s.cascade_impacts
+                .iter()
+                .any(|i| i.stream_table == delta.qualified_name)
+        });
+        if already_cascaded {
+            continue;
+        }
+        classifications.insert(delta.qualified_name.clone(), classify_delta(delta));
+    }
+    apply_diamond_consistency_promotion(&mut classifications, &ordered_deltas);
+
     for delta in &ordered_deltas {
         if delta.kind == DeltaKind::Unchanged {
             continue;
@@ -299,7 +410,10 @@ pub fn build_plan(
             continue;
         }
 
-        let class = classify_delta(delta);
+        let class = classifications
+            .get(&delta.qualified_name)
+            .copied()
+            .unwrap_or_else(|| classify_delta(delta));
         let change_symbol = match &delta.kind {
             DeltaKind::Create => "+",
             DeltaKind::Drop => "-",
@@ -309,7 +423,9 @@ pub fn build_plan(
         // Generate the plan steps for this delta.
         match &delta.kind {
             DeltaKind::Create => {
-                let spec = delta.desired.as_ref().unwrap();
+                let spec = delta.desired.as_ref().ok_or_else(|| AqueductError::InvariantViolation {
+                    context: format!("Create delta for '{}' has no desired spec", delta.qualified_name),
+                })?;
 
                 // Validate query first.
                 if !spec.query.is_empty() {
@@ -352,8 +468,12 @@ pub fn build_plan(
             | DeltaKind::AlterRefreshMode
             | DeltaKind::AlterCdcMode
             | DeltaKind::AlterMetadata => {
-                let desired = delta.desired.as_ref().unwrap();
-                let actual = delta.actual.as_ref().unwrap();
+                let desired = delta.desired.as_ref().ok_or_else(|| AqueductError::InvariantViolation {
+                    context: format!("Alter delta for '{}' has no desired spec", delta.qualified_name),
+                })?;
+                let actual = delta.actual.as_ref().ok_or_else(|| AqueductError::InvariantViolation {
+                    context: format!("Alter delta for '{}' has no actual spec", delta.qualified_name),
+                })?;
 
                 // For FULL→DIFF refresh_mode change, the classifier returns Rebuild.
                 if class == MigrationClass::Rebuild {
@@ -409,8 +529,12 @@ pub fn build_plan(
                 });
             }
             DeltaKind::AlterQuery => {
-                let desired = delta.desired.as_ref().unwrap();
-                let _actual = delta.actual.as_ref().unwrap();
+                let desired = delta.desired.as_ref().ok_or_else(|| AqueductError::InvariantViolation {
+                    context: format!("AlterQuery delta for '{}' has no desired spec", delta.qualified_name),
+                })?;
+                let _actual = delta.actual.as_ref().ok_or_else(|| AqueductError::InvariantViolation {
+                    context: format!("AlterQuery delta for '{}' has no actual spec", delta.qualified_name),
+                })?;
 
                 if !desired.query.is_empty() {
                     steps.push(PlanStep::ValidateQuery {
@@ -528,7 +652,7 @@ pub fn build_plan(
         steps.insert(insert_at + i, cs);
     }
 
-    Plan {
+    Ok(Plan {
         project: project.to_string(),
         from_version,
         to_version: next_version,
@@ -536,7 +660,7 @@ pub fn build_plan(
         summary,
         format_version: 1,
         created_at: Utc::now(),
-    }
+    })
 }
 
 fn order_deltas<'a>(diff: &'a DagDiff, topo_order: &[QualifiedName]) -> Vec<&'a NodeDelta> {
@@ -594,7 +718,7 @@ mod tests {
             consumer_deltas: vec![],
         };
         let topo = vec![QualifiedName::new("public", "order_totals")];
-        let plan = build_plan("test-project", Some(0), 1, &diff, &topo);
+        let plan = build_plan("test-project", Some(0), 1, &diff, &topo).expect("build plan");
 
         assert_eq!(plan.project, "test-project");
         assert_eq!(plan.to_version, 1);
@@ -607,7 +731,7 @@ mod tests {
     #[test]
     fn test_build_plan_empty() {
         let diff = DagDiff::default();
-        let plan = build_plan("test-project", Some(5), 6, &diff, &[]);
+        let plan = build_plan("test-project", Some(5), 6, &diff, &[]).expect("build plan");
         assert!(plan.summary.is_empty());
         // Lock + RecordSnapshot + Unlock
         assert_eq!(plan.steps.len(), 3);

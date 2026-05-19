@@ -9,8 +9,6 @@ use aqueduct_core::{
 };
 use clap::Args;
 
-use super::connect;
-
 #[derive(Debug, Args)]
 pub struct ApplyArgs {
     /// PostgreSQL connection string.
@@ -50,7 +48,7 @@ pub async fn run(args: ApplyArgs) -> anyhow::Result<()> {
     let dsn =
         super::resolve_dsn(args.dsn.as_deref(), args.to.as_deref(), &args.project_dir).await?;
 
-    let client = connect(&dsn).await?;
+    let client = super::connect_and_migrate(&dsn).await?;
 
     // Load config.
     let config = AqueductConfig::load(&args.project_dir).ok();
@@ -85,7 +83,7 @@ pub async fn run(args: ApplyArgs) -> anyhow::Result<()> {
         next_version,
         &diff,
         &topo_order,
-    );
+    )?;
 
     if plan.summary.is_empty() {
         println!("No changes to apply. Project is up to date.");
@@ -114,7 +112,27 @@ pub async fn run(args: ApplyArgs) -> anyhow::Result<()> {
         }
     }
 
-    let executor = PlanExecutor::new(&client, &project_name, env!("CARGO_PKG_VERSION"), false);
+    // Check maintenance window.
+    if !args.ignore_maintenance_window {
+        if let Some(ref cfg) = config {
+            if cfg.apply.plan_requires_window(plan.summary.rebuild_count, plan.summary.blue_green_count) {
+                let now = chrono::Utc::now();
+                if !cfg.apply.is_in_maintenance_window(now) {
+                    anyhow::bail!(
+                        "Plan contains rebuild/blue-green steps but current time is outside the \
+                         configured maintenance window '{}'.\n\
+                         Pass --ignore-maintenance-window to override for this run.",
+                        cfg.apply.maintenance_window.as_deref().unwrap_or("")
+                    );
+                }
+            }
+        }
+    }
+
+    let executor = PlanExecutor::new(&client, &project_name, env!("CARGO_PKG_VERSION"), false)
+        .with_resume(args.resume)
+        .with_connection_string(dsn.clone())
+        .with_desired_state(desired);
     let new_version = executor.execute(&plan).await?;
 
     println!("✓ Applied successfully. New version: v{}", new_version);

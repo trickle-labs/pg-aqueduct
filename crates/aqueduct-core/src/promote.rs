@@ -68,7 +68,7 @@ pub async fn compute_promotion_plan(
         next_version,
         &diff,
         &topo_order,
-    );
+    )?;
 
     Ok(plan)
 }

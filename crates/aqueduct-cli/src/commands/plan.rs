@@ -67,10 +67,18 @@ pub async fn run(args: PlanArgs) -> anyhow::Result<()> {
     if args.validate_ivm {
         for table in &desired.stream_tables {
             if !table.query.is_empty() {
-                aqueduct_core::validate::validate_sql_syntax(
-                    &table.query,
-                    &table.qualified_name.to_string(),
-                )?;
+                use aqueduct_core::dag::RefreshMode;
+                if table.refresh_mode == RefreshMode::Differential {
+                    aqueduct_core::validate::validate_ivm_supportability(
+                        &table.query,
+                        &table.qualified_name.to_string(),
+                    )?;
+                } else {
+                    aqueduct_core::validate::validate_sql_syntax(
+                        &table.query,
+                        &table.qualified_name.to_string(),
+                    )?;
+                }
             }
         }
     }
@@ -96,7 +104,7 @@ pub async fn run(args: PlanArgs) -> anyhow::Result<()> {
         next_version,
         &diff,
         &topo_order,
-    );
+    )?;
 
     // Get versions for the renderer.
     let pgtrickle_version = check_pgtrickle_version(&client).await?;

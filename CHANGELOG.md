@@ -17,10 +17,103 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [v0.5.0 — dbt Interop](#v050--dbt-interop)
 - [v0.6.0 — Production Hardening](#v060--production-hardening)
 - [v0.7.0 — Documentation & Cookbook](#v070--documentation--cookbook)
+- [v0.8.0 — Core Correctness & Safety Hardening](#v080--core-correctness--safety-hardening)
 
 **Archive**
 - [Unreleased — Repository Bootstrap](#unreleased--repository-bootstrap)
 <!-- TOC end -->
+
+---
+
+## [v0.8.0] — Core Correctness & Safety Hardening
+
+**Status:** Released
+
+All roadmap items for v0.8 "Core Correctness & Safety Hardening" are complete.
+This release closes the gap between pg_aqueduct's design guarantees and its
+runtime behaviour: every resumable migration now records step-level progress,
+every rollback restores the exact prior spec from the database, and every
+`--validate-ivm` call truly validates IVM supportability for differential tables.
+
+### What's new
+
+**C1 — Rollback restores the recorded spec, not migration files**  
+`aqueduct rollback` now deserialises the `spec_jsonb` stored alongside each
+`dag_versions` row. If the target version was recorded before the M9 fix it
+falls back to reading migration files from disk.
+
+**C2 — Resume-aware progress tracking**  
+`PlanExecutor` reads the most-recent running migration on startup and skips
+steps whose index falls below the recorded `last_completed_step`. After each
+non-structural step it persists the step index to `aqueduct.migrations.progress`
+so a resumed run continues from the correct point.
+
+**C3 — Plan builder uses `Result<Plan>`**  
+`build_plan()` no longer calls `.unwrap()`. All five option accesses now use
+`ok_or_else(|| AqueductError::InvariantViolation { context: … })?` and the
+function returns `Result<Plan>`. Callers updated throughout.
+
+**C4 — `CreateStreamTable` requires pg_trickle**  
+The SQL-injection fallback that created bare tables on non-pg_trickle instances
+has been removed. Missing pg_trickle now returns
+`AqueductError::PgTrickleNotInstalled` instead of silently creating incorrect
+objects.
+
+**C5 — Lock heartbeat**  
+A background tokio task renews the advisory lock every 10 s while a plan is
+executing. The task creates its own dedicated database connection via the stored
+DSN and shuts down cleanly after the plan finishes or errors.
+
+**C6 — `aqueduct init` uses the v2 catalog schema**  
+`init.rs` now calls `CATALOG_INIT_V2_SQL` and `ensure_catalog_current()` runs
+on every connect to apply the v1→v2 migration if needed.
+
+**H1 — `AlterStreamTable` forwards the new query**  
+The executor passes `new_query` as the 6th argument to
+`pgtrickle.alter_stream_table($1,$2,$3,$4,$5,$6)` for in-place column changes.
+The mock `alter_stream_table` function was updated to accept and persist the
+new query.
+
+**H2 — `--validate-ivm` calls the right validator**  
+`aqueduct plan --validate-ivm` now calls `validate_ivm_supportability()` for
+`DIFFERENTIAL` tables and `validate_sql_syntax()` for non-differential tables,
+instead of always calling `validate_sql_syntax()`.
+
+**H3 — Column removal is only InPlace for trailing columns**  
+The select-list classifier now uses a prefix-match check: `desired` must be a
+leading prefix of `actual`. Removing a column from the middle of the select
+list is now correctly classified as Rebuild.
+
+**H6 — Drain-then-pause protocol**  
+`run_steps()` calls `pgtrickle.pause_scheduler(nodes)` before the first
+migration step and `pgtrickle.resume_scheduler(nodes)` in a deferred cleanup
+guard, so live pg_trickle refreshes cannot race with in-flight migrations.
+
+**H7 — Diamond DAG consistency promotion**  
+After per-node classification, convergence nodes (stream tables with ≥ 2
+classified upstream parents) trigger a group promotion: all transitive ancestors
+are elevated to the highest migration class in the group, preventing
+inconsistent half-rebuilds.
+
+**H8 — Real drift detection in `aqueduct status`**  
+`poll_once()` now loads the migrations directory, reads live state, and computes
+a diff to count non-Unchanged deltas. The `--fail-on-drift` flag now works
+correctly.
+
+**M9 — `RecordSnapshot` stores the full DagState**  
+`spec_jsonb` in `aqueduct.dag_versions` now contains the serialised `DagState`
+instead of an empty `{}` object, enabling reliable rollbacks and auditing.
+
+**L9 — Remove unused `deadpool-postgres` dependency**  
+The `deadpool-postgres` workspace dependency was never used by any crate and has
+been removed from `Cargo.toml`.
+
+### Breaking changes
+
+- `build_plan()` now returns `Result<Plan>` instead of `Plan`. All call sites must
+  propagate the error with `?` or unwrap it.
+- `CreateStreamTable` for non-pg_trickle environments now returns
+  `AqueductError::PgTrickleNotInstalled` instead of silently creating tables.
 
 ---
 
