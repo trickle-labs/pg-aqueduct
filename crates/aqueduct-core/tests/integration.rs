@@ -3397,7 +3397,9 @@ async fn test_two_project_isolation() {
         "-- @aqueduct:schedule = \"30s\"\n-- @aqueduct:refresh_mode = \"DIFFERENTIAL\"\nSELECT id FROM raw_a;\n",
     )];
     let desired_a = build_dag_state(&files_a, true).expect("desired a");
-    let actual0 = read_live_state(&db.client, None).await.expect("actual0");
+    let actual0 = read_live_state(&db.client, Some("project-a"))
+        .await
+        .expect("actual0");
     let diff_a = compute_diff(&desired_a, &actual0);
     let topo_a = topological_sort(&desired_a).expect("topo a");
     let plan_a = build_plan("project-a", None, 1, &diff_a, &topo_a).expect("plan a");
@@ -3407,22 +3409,14 @@ async fn test_two_project_isolation() {
         .await
         .expect("apply project A");
 
-    db.client
-        .execute(
-            "INSERT INTO aqueduct.stream_table_ownership (project, schema_name, table_name)
-             VALUES ('project-a', 'public', 'orders_a')
-             ON CONFLICT (schema_name, table_name) DO UPDATE SET project = 'project-a'",
-            &[],
-        )
-        .await
-        .expect("register A ownership");
-
     let files_b = vec![parse_file(
         "orders_b",
         "-- @aqueduct:schedule = \"30s\"\n-- @aqueduct:refresh_mode = \"DIFFERENTIAL\"\nSELECT id FROM raw_b;\n",
     )];
     let desired_b = build_dag_state(&files_b, true).expect("desired b");
-    let actual1 = read_live_state(&db.client, None).await.expect("actual1");
+    let actual1 = read_live_state(&db.client, Some("project-b"))
+        .await
+        .expect("actual1");
     let diff_b = compute_diff(&desired_b, &actual1);
     let topo_b = topological_sort(&desired_b).expect("topo b");
     let plan_b = build_plan("project-b", None, 1, &diff_b, &topo_b).expect("plan b");
@@ -3431,16 +3425,6 @@ async fn test_two_project_isolation() {
         .execute(&plan_b)
         .await
         .expect("apply project B");
-
-    db.client
-        .execute(
-            "INSERT INTO aqueduct.stream_table_ownership (project, schema_name, table_name)
-             VALUES ('project-b', 'public', 'orders_b')
-             ON CONFLICT (schema_name, table_name) DO UPDATE SET project = 'project-b'",
-            &[],
-        )
-        .await
-        .expect("register B ownership");
 
     let state_both = read_live_state(&db.client, None).await.expect("both");
     assert_eq!(state_both.stream_tables.len(), 2);
