@@ -509,3 +509,43 @@ mod tests {
         assert!(names.contains(&"raw.customers".to_string()));
     }
 }
+
+// ── Q-06: Typed DAG state wrappers ─────────────────────────────────────────────
+//
+// These newtypes prevent accidentally passing the wrong kind of DagState to a
+// function that expects a specific one.  `build_dag_state` returns a
+// `DesiredDagState`, `read_live_state` returns a `LiveDagState`, and
+// `load_recorded_dag_state` (future) returns `RecordedDagState`.
+
+/// The desired DAG state parsed from migration files on disk.
+#[derive(Debug, Clone, Default)]
+pub struct DesiredDagState(pub DagState);
+
+impl std::ops::Deref for DesiredDagState {
+    type Target = DagState;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// The live DAG state read from the target PostgreSQL database.
+#[derive(Debug, Clone, Default)]
+pub struct LiveDagState(pub DagState);
+
+impl std::ops::Deref for LiveDagState {
+    type Target = DagState;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// The recorded DAG state stored in `aqueduct.dag_versions` (historical snapshot).
+#[derive(Debug, Clone, Default)]
+pub struct RecordedDagState(pub DagState);
+
+impl std::ops::Deref for RecordedDagState {
+    type Target = DagState;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}

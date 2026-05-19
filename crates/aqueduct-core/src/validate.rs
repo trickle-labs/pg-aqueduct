@@ -1,4 +1,5 @@
 use crate::dag::DagState;
+use crate::diagnostic::{Diagnostic, DiagnosticSet};
 use crate::error::{AqueductError, Result};
 use crate::parser::MigrationFile;
 
@@ -161,6 +162,42 @@ impl ValidationResult {
     pub fn add_warning(&mut self, msg: impl Into<String>) {
         self.warnings.push(msg.into());
     }
+}
+
+/// Run all offline validation checks and return a unified `DiagnosticSet` (Q-08 / U-09).
+///
+/// Diagnostics include file paths and line numbers where available.
+pub fn validate_migration_files_diagnostic(files: &[MigrationFile]) -> DiagnosticSet {
+    let mut set = DiagnosticSet::new();
+
+    for file in files {
+        // Check SQL syntax.
+        if !file.sql_body.is_empty() {
+            if let Err(e) = validate_sql_syntax(&file.sql_body, &file.name) {
+                set.push(
+                    Diagnostic::error("E101", e.to_string())
+                        .with_file(&file.path)
+                        .with_hint("Check the SQL query body for syntax errors"),
+                );
+            }
+        }
+
+        // Warn about unknown keys (U-09: include file path).
+        for key in &file.unknown_keys {
+            set.push(
+                Diagnostic::warning(
+                    "W001",
+                    format!(
+                        "Unknown front-matter key '@aqueduct:{}' (may be from a newer CLI version)",
+                        key
+                    ),
+                )
+                .with_file(&file.path),
+            );
+        }
+    }
+
+    set
 }
 
 pub fn validate_migration_files(files: &[MigrationFile]) -> ValidationResult {

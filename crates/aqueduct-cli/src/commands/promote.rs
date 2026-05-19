@@ -103,11 +103,11 @@ pub async fn run(args: PromoteArgs) -> anyhow::Result<()> {
         env!("CARGO_PKG_VERSION"),
         false,
     );
-    let new_version = executor.execute(&plan).await?;
+    let result = executor.execute(&plan).await?;
 
     println!(
         "✓ Promoted {} → {}. New version: v{}",
-        args.from, args.to, new_version
+        args.from, args.to, result.dag_version
     );
     Ok(())
 }

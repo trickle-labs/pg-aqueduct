@@ -44,17 +44,20 @@ a CloudNativePG cluster and uses the standard primary check (`pg_is_in_recovery(
 
 ## Maintenance windows
 
-Set a maintenance window in `aqueduct.toml` to gate Rebuild and Blue/green steps:
+Set a maintenance window in `aqueduct.toml` to gate Rebuild steps:
 
 ```toml
 [apply]
 maintenance_window = "02:00-04:00 UTC"
-maintenance_window_applies_to = ["rebuild", "blue-green"]
+maintenance_window_applies_to = ["rebuild"]
 ```
 
 - **Free** and **In-place** steps always execute immediately, regardless of the window.
-- **Rebuild** and **Blue/green** steps are blocked outside the window.
+- **Rebuild** steps are blocked outside the window.
 - `--ignore-maintenance-window` overrides for emergency runs.
+
+> **Note (D-11):** Blue/green migration strategy is planned for v0.13.
+> When implemented, `blue-green` may be added to `maintenance_window_applies_to`.
 
 ## Concurrent apply protection
 

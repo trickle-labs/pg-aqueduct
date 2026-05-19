@@ -17,9 +17,50 @@ pub mod validate;
 use anyhow::Result;
 use tokio_postgres::NoTls;
 
+/// Redact the password portion of a PostgreSQL DSN for safe display in logs or
+/// error messages (U-06/SEC-01).
+///
+/// Handles both URL-form (`postgres://user:pass@host/db`) and
+/// keyword-value form (`host=... password=...`).  Returns the DSN with any
+/// password replaced by `***`.
+pub fn redact_dsn(dsn: &str) -> String {
+    // URL form: postgres://user:PASSWORD@host/db
+    // Match scheme://user:password@... pattern and replace only the password part.
+    if dsn.contains("://") {
+        if let Some(at_pos) = dsn.rfind('@') {
+            // Find the start of the authority section after ://
+            if let Some(scheme_end) = dsn.find("://") {
+                let authority_start = scheme_end + 3;
+                let authority = &dsn[authority_start..at_pos];
+                // authority is either "user:password" or just "user"
+                if let Some(colon_pos) = authority.find(':') {
+                    let before_pass = authority_start + colon_pos + 1;
+                    let mut result = String::with_capacity(dsn.len());
+                    result.push_str(&dsn[..before_pass]);
+                    result.push_str("***");
+                    result.push_str(&dsn[at_pos..]);
+                    return result;
+                }
+            }
+        }
+        return dsn.to_string();
+    }
+
+    // Keyword-value form: host=… password=… or sslmode=…
+    // Replace `password=<value>` (space- or end-of-string terminated).
+    let re = regex::Regex::new(r"(?i)(password\s*=\s*)([^\s]+)").unwrap();
+    re.replace_all(dsn, "${1}***").into_owned()
+}
+
 /// Connect to PostgreSQL using the given DSN.
 pub async fn connect(dsn: &str) -> Result<tokio_postgres::Client> {
-    let (client, connection) = tokio_postgres::connect(dsn, NoTls).await?;
+    let (client, connection) = tokio_postgres::connect(dsn, NoTls).await.map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to connect to database ({}): {}",
+            redact_dsn(dsn),
+            e
+        )
+    })?;
 
     tokio::spawn(async move {
         if let Err(e) = connection.await {
@@ -27,6 +68,17 @@ pub async fn connect(dsn: &str) -> Result<tokio_postgres::Client> {
         }
     });
 
+    Ok(client)
+}
+
+/// Connect to PostgreSQL and execute all subsequent queries in a read-only
+/// transaction.  Used by `plan` and `status` commands to prevent accidental
+/// writes (D-03/SEC-08).
+pub async fn connect_read_only(dsn: &str) -> Result<tokio_postgres::Client> {
+    let client = connect(dsn).await?;
+    client
+        .execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY", &[])
+        .await?;
     Ok(client)
 }
 

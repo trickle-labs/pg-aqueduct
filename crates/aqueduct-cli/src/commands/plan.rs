@@ -11,7 +11,7 @@ use aqueduct_core::{
 };
 use clap::Args;
 
-use super::connect;
+use super::connect_read_only;
 
 #[derive(Debug, Args)]
 pub struct PlanArgs {
@@ -53,7 +53,7 @@ pub async fn run(args: PlanArgs) -> anyhow::Result<()> {
     let dsn =
         super::resolve_dsn(args.dsn.as_deref(), args.to.as_deref(), &args.project_dir).await?;
 
-    let client = connect(&dsn).await?;
+    let client = connect_read_only(&dsn).await?;
 
     // Load config and migration files.
     let (config, vars) = load_config_and_vars(&args.project_dir, args.to.as_deref());
@@ -158,9 +158,11 @@ pub async fn run(args: PlanArgs) -> anyhow::Result<()> {
 
     println!("{}", output);
 
-    // Exit codes: 0 = empty plan, 1 = non-empty plan, 2 = error (handled by main).
-    if !plan.summary.is_empty() {
-        // Non-empty plan → exit 1.
+    // U-02: Exit codes: 0 = empty plan OR non-empty plan with no exit flag,
+    // 1 = non-empty plan AND (--fail-if-changed OR --fail-on-drift), 2 = error.
+    // Default behaviour is exit 0 for both empty and non-empty plans.
+    if !plan.summary.is_empty() && (args.fail_if_changed || args.fail_on_drift) {
+        // Non-empty plan with an explicit "fail" flag → exit 1.
         std::process::exit(1);
     }
 

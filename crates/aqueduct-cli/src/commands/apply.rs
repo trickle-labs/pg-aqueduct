@@ -170,28 +170,31 @@ pub async fn run(args: ApplyArgs) -> anyhow::Result<()> {
         .with_resume(args.resume)
         .with_connection_string(dsn.clone())
         .with_desired_state(desired);
-    let new_version = executor.execute(&plan).await?;
+    let result = executor.execute(&plan).await?;
 
-    // Emit a structured JSON event for CI parsers to extract migration metadata.
+    // U-05: Emit a structured JSON event for CI parsers. Separates migration_id
+    // (aqueduct.migrations row id) from dag_version (aqueduct.dag_versions bigserial).
     let migration_metadata = serde_json::json!({
         "event": "apply_complete",
-        "migration_id": new_version,
+        "migration_id": result.migration_id,
+        "dag_version": result.dag_version,
         "from_version": plan.from_version,
-        "to_version": new_version,
+        "to_version": result.dag_version,
         "project": project_name,
     });
     tracing::info!(
         event = "apply_complete",
-        migration_id = new_version,
+        migration_id = result.migration_id,
+        dag_version = result.dag_version,
         from_version = plan.from_version,
-        to_version = new_version,
+        to_version = result.dag_version,
         project = %project_name,
         "Migration applied successfully"
     );
-    // Also write to stdout for parsers that read stdout rather than the log stream.
+    // Also write to stderr for parsers that read the log stream.
     eprintln!("{}", serde_json::to_string(&migration_metadata)?);
 
-    println!("✓ Applied successfully. New version: v{}", new_version);
+    println!("✓ Applied successfully. New version: v{}", result.dag_version);
     Ok(())
 }
 

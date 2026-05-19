@@ -11,6 +11,19 @@ use crate::dag::DagState;
 use crate::error::{AqueductError, Result};
 use crate::plan::{Plan, PlanStep};
 
+/// Result of a successful plan execution (U-05).
+///
+/// Separates the `migration_id` (row id in `aqueduct.migrations`) from the
+/// `dag_version` (bigserial in `aqueduct.dag_versions`) so CI consumers can
+/// refer to either independently.
+#[derive(Debug, Clone)]
+pub struct ExecutionResult {
+    /// Row id in `aqueduct.migrations` — stable identifier for this migration run.
+    pub migration_id: i64,
+    /// Bigserial version recorded in `aqueduct.dag_versions`.
+    pub dag_version: u64,
+}
+
 /// Generate a unique lock holder string that includes version, hostname, PID,
 /// and a timestamp so concurrent processes with the same CLI version are
 /// distinguishable (S-13).
@@ -74,6 +87,44 @@ impl<'a> PlanExecutor<'a> {
         self
     }
 
+    // Q-02: Typed constructors document intent and make tests self-explanatory.
+
+    /// Create an executor for `aqueduct apply` (normal apply, no dry run).
+    pub fn for_apply(
+        client: &'a tokio_postgres::Client,
+        project: &'a str,
+        cli_version: &'a str,
+    ) -> Self {
+        Self::new(client, project, cli_version, false)
+    }
+
+    /// Create an executor for `aqueduct rollback`.
+    pub fn for_rollback(
+        client: &'a tokio_postgres::Client,
+        project: &'a str,
+        cli_version: &'a str,
+    ) -> Self {
+        Self::new(client, project, cli_version, false)
+    }
+
+    /// Create an executor for `aqueduct promote`.
+    pub fn for_promote(
+        client: &'a tokio_postgres::Client,
+        project: &'a str,
+        cli_version: &'a str,
+    ) -> Self {
+        Self::new(client, project, cli_version, false)
+    }
+
+    /// Create a dry-run executor (plan preview, never writes to the database).
+    pub fn for_dry_run(
+        client: &'a tokio_postgres::Client,
+        project: &'a str,
+        cli_version: &'a str,
+    ) -> Self {
+        Self::new(client, project, cli_version, true)
+    }
+
     /// Provide a DSN so the executor can spawn a heartbeat task to renew the
     /// advisory lock while long-running steps are in progress.
     pub fn with_connection_string(mut self, dsn: String) -> Self {
@@ -89,8 +140,8 @@ impl<'a> PlanExecutor<'a> {
         self
     }
 
-    /// Execute the plan, returning the new DAG version.
-    pub async fn execute(&self, plan: &Plan) -> Result<u64> {
+    /// Execute the plan, returning the new DAG version and migration id (U-05).
+    pub async fn execute(&self, plan: &Plan) -> Result<ExecutionResult> {
         // Check we're connected to a primary.
         let is_primary: bool = self
             .client
@@ -103,7 +154,7 @@ impl<'a> PlanExecutor<'a> {
 
         if self.dry_run {
             tracing::info!("Dry run: not executing plan");
-            return Ok(plan.to_version);
+            return Ok(ExecutionResult { migration_id: 0, dag_version: plan.to_version });
         }
 
         // Determine starting step index when resuming.
@@ -158,7 +209,7 @@ impl<'a> PlanExecutor<'a> {
         // Finish migration record.
         // On failure, write `recoverable_failure` so `--resume` can pick it
         // up later (S-01/S-02).  On success, write `committed`.
-        let (status, new_version) = match &result {
+        let (status, new_dag_version) = match &result {
             Ok(v) => ("committed", Some(*v as i64)),
             Err(_) => ("recoverable_failure", None),
         };
@@ -166,12 +217,13 @@ impl<'a> PlanExecutor<'a> {
         self.client
             .execute(
                 FINISH_MIGRATION_SQL,
-                &[&migration_id, &status, &new_version, &serde_json::json!({})],
+                &[&migration_id, &status, &new_dag_version, &serde_json::json!({})],
             )
             .await
             .ok();
 
-        result
+        // U-05: Return both migration_id and dag_version separately.
+        result.map(|dag_version| ExecutionResult { migration_id, dag_version })
     }
 
     /// Find the step index to resume from by reading progress from the running
@@ -680,13 +732,14 @@ impl<'a> PlanExecutor<'a> {
                     }
 
                     PlanStep::ManageWalSlot { stream_table, action } => {
+                        use crate::plan::WalSlotAction;
                         tracing::info!(
                             "{} WAL replication slot for '{}'",
-                            action.to_uppercase(),
+                            action,
                             stream_table
                         );
-                        match action.as_str() {
-                            "drop" => {
+                        match action {
+                            WalSlotAction::Drop => {
                                 let slot_name = format!(
                                     "aqueduct_{}_{}_wal",
                                     stream_table.schema, stream_table.name
@@ -701,7 +754,7 @@ impl<'a> PlanExecutor<'a> {
                                     .await
                                     .ok();
                             }
-                            "create" => {
+                            WalSlotAction::Create => {
                                 // Replication slot creation is managed by pg_trickle on
                                 // the next CREATE STREAM TABLE call; this step is a
                                 // no-op for the executor.
@@ -709,9 +762,6 @@ impl<'a> PlanExecutor<'a> {
                                     "WAL slot for '{}' will be created by pg_trickle on next apply",
                                     stream_table
                                 );
-                            }
-                            _ => {
-                                tracing::warn!("Unknown ManageWalSlot action: '{}'", action);
                             }
                         }
                     }

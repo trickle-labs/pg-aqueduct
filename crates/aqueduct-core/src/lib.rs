@@ -4,6 +4,7 @@ pub mod config;
 pub mod cost;
 pub mod dag;
 pub mod destroy;
+pub mod diagnostic;
 pub mod diff;
 pub mod error;
 pub mod executor;
@@ -22,4 +23,5 @@ pub mod validate;
 pub use error::{AqueductError, Result};
 
 /// Current CLI version string, used in migration records.
+/// Single-source: read from Cargo.toml at compile time (Q-09).
 pub const CLI_VERSION: &str = env!("CARGO_PKG_VERSION");

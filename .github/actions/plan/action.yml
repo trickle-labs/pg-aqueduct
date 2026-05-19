@@ -139,8 +139,10 @@ runs:
         echo "$PLAN_OUTPUT" >> "$GITHUB_OUTPUT"
         echo "EOF" >> "$GITHUB_OUTPUT"
 
-        # Detect whether the plan is a no-op (exit 0 = empty plan).
-        if [ "${EXIT_CODE:-0}" = "0" ]; then
+        # U-02: After fixing plan exit semantics, exit 0 means either empty plan or
+        # non-empty plan without --fail-if-changed/--fail-on-drift.
+        # Detect is_empty by checking for "No changes detected" in the plan output.
+        if echo "$PLAN_OUTPUT" | grep -q "No changes detected"; then
           echo "is_empty=true" >> "$GITHUB_OUTPUT"
         else
           echo "is_empty=false" >> "$GITHUB_OUTPUT"
@@ -148,12 +150,12 @@ runs:
 
         # Exit 0 regardless of whether the plan is empty or non-empty — the
         # fail-if-changed / fail-on-drift flags control whether the step fails.
-        # Exit code 2 (error) is propagated; exit code 1 (non-empty plan) is
-        # surfaced only when fail-if-changed=true.
+        # Exit code 2 (error) is propagated; exit code 1 (non-empty plan with flag) is
+        # surfaced only when fail-if-changed=true or fail-on-drift=true.
         if [ "${EXIT_CODE:-0}" = "2" ]; then
           exit 2
         fi
-        if [ "${{ inputs.fail-if-changed }}" = "true" ] && [ "${EXIT_CODE:-0}" = "1" ]; then
+        if [ "${EXIT_CODE:-0}" = "1" ]; then
           exit 1
         fi
         exit 0

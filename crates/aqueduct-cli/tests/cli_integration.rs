@@ -128,8 +128,8 @@ async fn test_end_to_end_lifecycle() {
     // Apply.
     let executor =
         aqueduct_core::executor::PlanExecutor::new(&db.client, "e2e-test", "0.1.0", false);
-    let version = executor.execute(&plan).await.unwrap();
-    assert_eq!(version, 1);
+    let exec_result = executor.execute(&plan).await.unwrap();
+    assert_eq!(exec_result.dag_version, 1);
 
     // Status: stream table count should be 1.
     let count = aqueduct_core::live_state::get_stream_table_count(&db.client)

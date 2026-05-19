@@ -34,7 +34,9 @@ inputs:
     default: 'false'
 
   strategy:
-    description: 'Migration strategy: default or blue-green'
+    description: >
+      Migration strategy. Currently only "default" is supported.
+      "blue-green" is planned for v0.13 and is accepted but treated as a no-op.
     required: false
     default: 'default'
 
@@ -139,9 +141,10 @@ runs:
         if [ "${{ inputs.dry-run }}" = "true" ]; then
           EXTRA_FLAGS="$EXTRA_FLAGS --dry-run"
         fi
-        if [ "${{ inputs.strategy }}" = "blue-green" ]; then
-          EXTRA_FLAGS="$EXTRA_FLAGS --strategy blue-green"
-        fi
+        # D-04: blue-green strategy is planned (v0.13) — accepted but no-op until then.
+        # if [ "${{ inputs.strategy }}" = "blue-green" ]; then
+        #   EXTRA_FLAGS="$EXTRA_FLAGS --strategy blue-green"
+        # fi
 
         DSN_FLAG=""
         if [ -n "${AQUEDUCT_DSN:-}" ]; then
@@ -159,7 +162,7 @@ runs:
           $EXTRA_FLAGS 2>/tmp/aqueduct-apply-stderr.json
 
         # Extract migration metadata from the structured apply_complete JSON event
-        # emitted on stderr by `aqueduct apply`.
+        # emitted on stderr by `aqueduct apply` (U-05: dag_version is separate from migration_id).
         if [ -f /tmp/aqueduct-apply-stderr.json ]; then
           APPLY_COMPLETE_LINE="$(grep '"event":"apply_complete"' /tmp/aqueduct-apply-stderr.json | tail -1 || true)"
           if [ -n "$APPLY_COMPLETE_LINE" ]; then
@@ -168,7 +171,7 @@ runs:
             FROM_VER="$(echo "$APPLY_COMPLETE_LINE" | python3 -c \
               "import sys, json; d=json.loads(sys.stdin.read()); print(d.get('from_version') or '')" 2>/dev/null || echo '')"
             TO_VER="$(echo "$APPLY_COMPLETE_LINE" | python3 -c \
-              "import sys, json; d=json.loads(sys.stdin.read()); print(d.get('to_version',''))" 2>/dev/null || echo '')"
+              "import sys, json; d=json.loads(sys.stdin.read()); print(d.get('dag_version',''))" 2>/dev/null || echo '')"
             echo "migration_id=${MIG_ID}" >> "$GITHUB_OUTPUT"
             echo "from_version=${FROM_VER}" >> "$GITHUB_OUTPUT"
             echo "to_version=${TO_VER}" >> "$GITHUB_OUTPUT"

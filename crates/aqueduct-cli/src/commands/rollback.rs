@@ -168,8 +168,8 @@ pub async fn run(args: RollbackArgs) -> anyhow::Result<()> {
     let executor = PlanExecutor::new(&client, &project_name, env!("CARGO_PKG_VERSION"), false)
         .with_desired_state(desired)
         .with_connection_string(dsn.clone());
-    let new_version = executor.execute(&plan).await?;
+    let result = executor.execute(&plan).await?;
 
-    println!("✓ Rollback applied. New version: v{}", new_version);
+    println!("✓ Rollback applied. New version: v{}", result.dag_version);
     Ok(())
 }

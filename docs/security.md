@@ -66,14 +66,18 @@ dsn = "postgresql://app:${secret:vault:database/prod-dsn}@db.example.com/app"
 
 Supported backends:
 
-| Backend | Flag value | Credential source |
-|---------|-----------|------------------|
-| Environment variable | `env` | `${VAR}` (default) |
-| AWS Secrets Manager | `aws` | `AWS_REGION` + SDK credentials |
-| GCP Secret Manager | `gcp` | `GOOGLE_APPLICATION_CREDENTIALS` |
-| HashiCorp Vault | `vault` | `VAULT_ADDR` + `VAULT_TOKEN` |
-| SOPS-encrypted file | `sops` | `sops -d <file>` subprocess |
-| age-encrypted file | `age` | `age -d -i <identity> <file>` subprocess |
+| Backend | Flag value | Status | Credential source |
+|---------|-----------|--------|------------------|
+| Environment variable | `env` | **Implemented** | `${VAR}` (default) |
+| SOPS-encrypted file | `sops` | **Implemented** | `sops -d <file>` subprocess |
+| age-encrypted file | `age` | **Implemented** | `age -d -i <identity> <file>` subprocess |
+| AWS Secrets Manager | `aws` | **Planned (v0.12)** | `AWS_REGION` + SDK credentials |
+| GCP Secret Manager | `gcp` | **Planned (v0.12)** | `GOOGLE_APPLICATION_CREDENTIALS` |
+| HashiCorp Vault | `vault` | **Planned (v0.12)** | `VAULT_ADDR` + `VAULT_TOKEN` |
+
+> **Note:** The `aws`, `gcp`, and `vault` backends are documented here for API
+> stability purposes. They are planned for v0.12 and will return an error if used
+> in the current release.
 
 ## Read-only transactions
 

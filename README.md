@@ -4,7 +4,7 @@
 
 `pg_aqueduct` is the missing migration tool for teams running [`pg_trickle`](https://github.com/trickle-labs/pg-trickle) in production. Where Atlas manages relational schema and Terraform manages infrastructure, `pg_aqueduct` manages the third axis that neither tool covers: the *evolution of a streaming, incrementally-maintained DAG of materialized views* over time — without losing differential state, without taking the pipeline offline, and without making the topology of your stream tables your problem to figure out by hand.
 
-> **Status:** v0.7.0 — Documentation & Cookbook release. 197 tests passing (101 unit + 63 integration + 33 CLI). Implementation complete through Phase 8 of the roadmap.
+> **Status:** v0.11.0 — Diagnostic & CLI Surface release. 125+ unit tests passing. Unified Diagnostic type, stable error codes, read-only plan/status transactions, `--fail-on-drift` for diff, YAML status output, DSN password redaction, and documentation correctness audit. See [CHANGELOG](CHANGELOG.md) for full details.
 
 ---
 
@@ -144,7 +144,7 @@ See [`benchmarks/`](benchmarks/) for full results.
 
 ```
 pg-aqueduct/
-├── Cargo.toml                    # workspace (version 0.7.0)
+├── Cargo.toml                    # workspace (version 0.11.0)
 ├── crates/
 │   ├── aqueduct-core/            # planner, differ, plan executor
 │   ├── aqueduct-cli/             # aqueduct binary

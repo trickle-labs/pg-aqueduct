@@ -85,6 +85,49 @@ pub enum AqueductError {
     Other(String),
 }
 
+impl AqueductError {
+    /// Return the stable numeric error code for this variant (Q-04).
+    ///
+    /// These codes are stable across releases and can be used in CI scripts
+    /// to detect and handle specific error conditions.
+    ///
+    /// Range conventions:
+    /// - 1000–1099: database connectivity / primary checks
+    /// - 1100–1199: configuration / parsing
+    /// - 1200–1299: planning / classification
+    /// - 1300–1399: execution / safety
+    /// - 1400–1499: catalog / schema management
+    pub fn error_code(&self) -> u32 {
+        match self {
+            AqueductError::Database(_)         => 1000,
+            AqueductError::NotPrimary          => 1001,
+            AqueductError::PgTrickleNotInstalled => 1002,
+            AqueductError::PgTrickleVersion(_) => 1003,
+            AqueductError::Config(_)           => 1100,
+            AqueductError::Parse { .. }        => 1101,
+            AqueductError::SqlParse(_)         => 1102,
+            AqueductError::MissingVariable(_)  => 1103,
+            AqueductError::Toml(_)             => 1104,
+            AqueductError::PlaintextPassword   => 1105,
+            AqueductError::InvalidSecretPath { .. } => 1106,
+            AqueductError::IvmUnsupportable { .. } => 1200,
+            AqueductError::Cycle(_)            => 1201,
+            AqueductError::InvariantViolation { .. } => 1202,
+            AqueductError::FullRefreshNotAllowed(_) => 1203,
+            AqueductError::MaintenanceWindow { .. } => 1204,
+            AqueductError::LockContention { .. } => 1300,
+            AqueductError::LockLost            => 1301,
+            AqueductError::Resume(_)           => 1302,
+            AqueductError::DataLossRequired    => 1303,
+            AqueductError::OwnershipRequired { .. } => 1304,
+            AqueductError::Catalog(_)          => 1400,
+            AqueductError::Io(_)               => 1500,
+            AqueductError::Json(_)             => 1501,
+            AqueductError::Other(_)            => 9999,
+        }
+    }
+}
+
 impl From<toml::de::Error> for AqueductError {
     fn from(e: toml::de::Error) -> Self {
         AqueductError::Toml(e.to_string())

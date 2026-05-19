@@ -119,6 +119,7 @@ OPTIONS:
     --project-dir <DIR>     Project root (default: current directory)
     --table <NAME>          Filter to a single table (schema.name)
     --format <FORMAT>       text (default), json, yaml, markdown
+    --fail-on-drift         Exit 1 when any delta is non-Unchanged (U-03)
     --allow-plaintext-password  Allow DSN with embedded password
 ```
 
@@ -238,8 +239,9 @@ dsn = "${PROD_DSN}"              # required; may use ${ENV_VAR} or ${secret:...}
 dsn = "${STAGING_DSN}"
 
 [apply]
-maintenance_window = "02:00-04:00 UTC"  # optional; gate Rebuild/BlueGreen steps
-maintenance_window_applies_to = ["rebuild", "blue-green"]
+maintenance_window = "02:00-04:00 UTC"  # optional; gate Rebuild steps
+maintenance_window_applies_to = ["rebuild"]
+# "blue-green" is planned for v0.13 — see ROADMAP.md
 lock_timeout = "60s"                    # default 60s
 step_timeout = "30m"                    # default 30m per plan step
 patroni_endpoint = "${PATRONI_ENDPOINT}" # optional; Patroni primary check URL

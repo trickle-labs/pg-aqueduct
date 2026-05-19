@@ -6,6 +6,28 @@ use crate::dag::{ConsumerSpec, QualifiedName, StreamTableSpec};
 use crate::diff::{ConsumerDeltaKind, DagDiff, DeltaKind, NodeDelta, SourceDeltaKind};
 use crate::error::{AqueductError, Result};
 
+/// Typed action for `ManageWalSlot` plan step (Q-03).
+///
+/// Replaces the previous `action: String` field, eliminating the `Unknown` arm
+/// in the executor and preventing invalid values at the type level.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WalSlotAction {
+    /// Drop the logical replication slot (used before dropping the stream table).
+    Drop,
+    /// Create a new logical replication slot (used after recreating the stream table).
+    Create,
+}
+
+impl std::fmt::Display for WalSlotAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WalSlotAction::Drop => write!(f, "drop"),
+            WalSlotAction::Create => write!(f, "create"),
+        }
+    }
+}
+
 /// A view assignment for a blue/green consumer view swap.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ViewAssignment {
@@ -121,8 +143,8 @@ pub enum PlanStep {
     /// Drop or recreate the logical replication slot for a cdc_mode='wal' table.
     ManageWalSlot {
         stream_table: QualifiedName,
-        /// "drop" | "create"
-        action: String,
+        /// Typed action: `Create` or `Drop` (Q-03).
+        action: WalSlotAction,
     },
 
     /// Temporarily switch an IMMEDIATE mode stream table to DIFFERENTIAL.
@@ -225,7 +247,7 @@ impl PlanStep {
                 stream_table,
                 action,
             } => {
-                format!("{} WAL slot for '{}'", action.to_uppercase(), stream_table)
+                format!("{} WAL slot for '{}'", action.to_string().to_uppercase(), stream_table)
             }
             PlanStep::PauseImmediate { name } => {
                 format!("PAUSE IMMEDIATE mode for '{}'", name)
@@ -940,7 +962,7 @@ mod tests {
     fn test_manage_wal_slot_description() {
         let step = PlanStep::ManageWalSlot {
             stream_table: QualifiedName::new("public", "events"),
-            action: "drop".to_string(),
+            action: WalSlotAction::Drop,
         };
         let desc = step.description();
         assert!(
@@ -983,5 +1005,130 @@ mod tests {
             statement: "ANALYZE;".to_string(),
         };
         assert!(step.description().contains("post_migration"));
+    }
+
+    /// Q-01: Step registry contract test — every PlanStep variant must have a
+    /// non-empty description.  This is an exhaustive match so adding a new
+    /// variant without updating `description()` is a compile error.
+    #[test]
+    fn test_all_plan_steps_have_descriptions() {
+        use crate::dag::{ConsumerSpec, RefreshMode, StreamTableSpec};
+
+        let dummy_qname = QualifiedName::new("public", "_test");
+        let dummy_spec = StreamTableSpec {
+            qualified_name: dummy_qname.clone(),
+            query: "SELECT 1".to_string(),
+            schedule: "30s".to_string(),
+            refresh_mode: RefreshMode::Differential,
+            cdc_mode: Some("none".to_string()),
+            explicit_depends_on: vec![],
+            depends_on: vec![],
+            cypher_source: None,
+        };
+        let dummy_consumer = ConsumerSpec {
+            name: "_test_consumer".to_string(),
+            source: dummy_qname.clone(),
+            expose_as: dummy_qname.clone(),
+            sql_body: None,
+        };
+
+        let steps: Vec<PlanStep> = vec![
+            PlanStep::LockDag {
+                project: "p".to_string(),
+                ttl: "60s".to_string(),
+            },
+            PlanStep::ValidateQuery {
+                name: "_test".to_string(),
+                query: "SELECT 1".to_string(),
+            },
+            PlanStep::AlterBaseTable {
+                name: dummy_qname.clone(),
+                statement: "ALTER TABLE public._test ADD COLUMN x int".to_string(),
+            },
+            PlanStep::CreateStreamTable {
+                spec: dummy_spec.clone(),
+            },
+            PlanStep::AlterStreamTable {
+                name: dummy_qname.clone(),
+                schedule: None,
+                refresh_mode: None,
+                cdc_mode: None,
+                new_query: None,
+            },
+            PlanStep::DropStreamTable {
+                name: dummy_qname.clone(),
+                cascade: false,
+            },
+            PlanStep::Backfill {
+                name: dummy_qname.clone(),
+                mode: "full".to_string(),
+            },
+            PlanStep::RecordSnapshot { version: 1 },
+            PlanStep::UnlockDag { force: false },
+            PlanStep::CreateGreenSchema {
+                schema: "public_green".to_string(),
+            },
+            PlanStep::CreateStreamTableInGreen {
+                spec: dummy_spec.clone(),
+                green_schema: "public_green".to_string(),
+            },
+            PlanStep::WaitForConvergence {
+                green_schema: "public_green".to_string(),
+                node_names: vec![],
+                max_wait_secs: 300,
+            },
+            PlanStep::SwapConsumerViews {
+                assignments: vec![],
+                blue_schema: "public".to_string(),
+                green_schema: "public_green".to_string(),
+            },
+            PlanStep::RetireBlueSchema {
+                schema: "public".to_string(),
+                retain_secs: 3600,
+            },
+            PlanStep::ManageConsumerView {
+                spec: dummy_consumer,
+                action: "create".to_string(),
+            },
+            PlanStep::RecreatePolicy {
+                name: dummy_qname.clone(),
+                policy_sql: "CREATE POLICY p ON t USING (true)".to_string(),
+            },
+            PlanStep::DetachOutbox {
+                stream_table: dummy_qname.clone(),
+                outbox_name: "_test_outbox".to_string(),
+            },
+            PlanStep::ReattachOutbox {
+                stream_table: dummy_qname.clone(),
+                outbox_name: "_test_outbox".to_string(),
+                retention_hours: 24,
+            },
+            PlanStep::ManageWalSlot {
+                stream_table: dummy_qname.clone(),
+                action: WalSlotAction::Create,
+            },
+            PlanStep::PauseImmediate {
+                name: dummy_qname.clone(),
+            },
+            PlanStep::ResumeImmediate {
+                name: dummy_qname.clone(),
+            },
+            PlanStep::WaitForRefresh {
+                name: dummy_qname.clone(),
+                deadline_secs: 60,
+            },
+            PlanStep::RunHook {
+                hook_name: "post".to_string(),
+                statement: "ANALYZE".to_string(),
+            },
+        ];
+
+        for step in &steps {
+            let desc = step.description();
+            assert!(
+                !desc.is_empty(),
+                "PlanStep variant has empty description()"
+            );
+        }
     }
 }

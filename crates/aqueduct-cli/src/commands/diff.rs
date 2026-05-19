@@ -4,7 +4,6 @@ use aqueduct_core::{
     diff::{compute_diff, DeltaKind},
     live_state::read_live_state,
     parser::load_migrations,
-    renderer::{render_plan_json, render_plan_markdown, render_plan_text},
 };
 use clap::Args;
 
@@ -31,6 +30,10 @@ pub struct DiffArgs {
     /// Output format: text (default), json, markdown, or yaml.
     #[arg(long, default_value = "text")]
     pub format: String,
+
+    /// Exit 1 when any diff delta is non-Unchanged, exit 0 for a clean diff (U-03).
+    #[arg(long)]
+    pub fail_on_drift: bool,
 }
 
 pub async fn run(args: DiffArgs) -> anyhow::Result<()> {
@@ -50,9 +53,14 @@ pub async fn run(args: DiffArgs) -> anyhow::Result<()> {
         })
         .unwrap_or_default();
 
+    let project_name = config
+        .as_ref()
+        .map(|c| c.project.name.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+
     let files = load_migrations(&args.project_dir, &vars)?;
     let desired = build_dag_state(&files, true)?;
-    let actual = read_live_state(&client, None).await?;
+    let actual = read_live_state(&client, Some(&project_name)).await?;
     let diff = compute_diff(&desired, &actual);
 
     // Filter to a single table if requested.
@@ -67,7 +75,7 @@ pub async fn run(args: DiffArgs) -> anyhow::Result<()> {
         diff.deltas.iter().collect()
     };
 
-    // Count non-Unchanged deltas.
+    // Count non-Unchanged deltas (U-04: use Result-propagating computation).
     let changed_count = deltas
         .iter()
         .filter(|d| d.kind != DeltaKind::Unchanged)
@@ -121,41 +129,45 @@ pub async fn run(args: DiffArgs) -> anyhow::Result<()> {
             // Text format.
             if changed_count == 0 {
                 println!("No differences detected between desired and actual state.");
-                return Ok(());
-            }
-            println!(
-                "Diff: {} change{} detected\n",
-                changed_count,
-                if changed_count == 1 { "" } else { "s" }
-            );
-            for d in deltas.iter().filter(|d| d.kind != DeltaKind::Unchanged) {
-                let symbol = match d.kind {
-                    DeltaKind::Create => "+",
-                    DeltaKind::Drop => "-",
-                    _ => "~",
-                };
+            } else {
                 println!(
-                    "  {} {:40}  {:?}",
-                    symbol,
-                    d.qualified_name.to_string(),
-                    d.kind
+                    "Diff: {} change{} detected\n",
+                    changed_count,
+                    if changed_count == 1 { "" } else { "s" }
                 );
-                if let (Some(desired), Some(actual)) = (&d.desired, &d.actual) {
-                    if desired.schedule != actual.schedule {
-                        println!("      schedule: {} → {}", actual.schedule, desired.schedule);
-                    }
-                    if desired.query.trim() != actual.query.trim() {
-                        println!("      query changed");
+                for d in deltas.iter().filter(|d| d.kind != DeltaKind::Unchanged) {
+                    let symbol = match d.kind {
+                        DeltaKind::Create => "+",
+                        DeltaKind::Drop => "-",
+                        _ => "~",
+                    };
+                    println!(
+                        "  {} {:40}  {:?}",
+                        symbol,
+                        d.qualified_name.to_string(),
+                        d.kind
+                    );
+                    if let (Some(desired), Some(actual)) = (&d.desired, &d.actual) {
+                        if desired.schedule != actual.schedule {
+                            println!(
+                                "      schedule: {} → {}",
+                                actual.schedule, desired.schedule
+                            );
+                        }
+                        if desired.query.trim() != actual.query.trim() {
+                            println!("      query changed");
+                        }
                     }
                 }
             }
         }
     }
 
-    // Suppress unused import warnings — these are used in the yaml/markdown branches.
-    let _ = render_plan_json;
-    let _ = render_plan_markdown;
-    let _ = render_plan_text;
+    // U-03: --fail-on-drift: exit 1 when any delta is non-Unchanged, exit 0 for clean.
+    // Exit 2 is reserved for errors (handled by main()).
+    if args.fail_on_drift && changed_count > 0 {
+        std::process::exit(1);
+    }
 
     Ok(())
 }

@@ -12,6 +12,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [v0.8.0 — Core Correctness & Safety Hardening](#v080--core-correctness--safety-hardening)
 - [v0.9.0 — Feature Completeness & Ergonomics](#v090--feature-completeness--ergonomics)
 - [v0.10.0 — Safety Contract Repair & Multi-Project Isolation](#v0100--safety-contract-repair--multi-project-isolation)
+- [v0.11.0 — Diagnostic Quality, CLI Surface & Documentation Correctness](#v0110--diagnostic-quality-cli-surface--documentation-correctness)
 
 **Planned**
 - [v0.2.0 — Online Schema Evolution](#v020--online-schema-evolution)
@@ -24,6 +25,112 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 **Archive**
 - [Unreleased — Repository Bootstrap](#unreleased--repository-bootstrap)
 <!-- TOC end -->
+
+---
+
+## [v0.11.0] — Diagnostic Quality, CLI Surface & Documentation Correctness
+
+**Status:** Released
+
+All roadmap items for v0.11 "Phase 14 — Diagnostic Quality, CLI Surface &
+Documentation Correctness" are complete. This release focuses on making the CLI
+output trustworthy, the error messages actionable, and the documentation honest.
+
+### What's new
+
+**Diagnostic Infrastructure**
+
+- **Q-08:** New unified `Diagnostic` type (`aqueduct_core::diagnostic`) replaces
+  the separate `ValidationError`, `LintDiagnostic`, and ad-hoc parse error strings.
+  `DiagnosticSet` collects diagnostics with file/line/column context. Both the
+  validate and lint subsystems now emit `DiagnosticSet` results.
+
+- **Q-04:** Stable numeric error codes (`error_code()` method on `AqueductError`).
+  Error categories: 1000–1099 database, 1100–1199 configuration, 1200–1299 planning,
+  1300–1399 execution, 1400–1499 catalog. Codes are stable across releases.
+
+- **Q-03:** `ManageWalSlot` plan step uses typed `WalSlotAction` enum (`Create`/`Drop`)
+  instead of a free-form `String`. Eliminates the "Unknown action" dead code path.
+
+**CLI Surface Correctness**
+
+- **U-02:** Fixed `aqueduct plan` exit semantics. Previously exited 1 for any non-empty
+  plan. Now exits 0 by default; exits 1 only when `--fail-if-changed` or
+  `--fail-on-drift` is explicitly set. CI pipelines that just want to _see_ a plan
+  without failing now work correctly.
+
+- **U-03:** New `--fail-on-drift` flag for `aqueduct diff`. Exits 1 when any delta is
+  non-Unchanged, exits 0 for a clean diff.
+
+- **U-05:** `executor.execute()` now returns `ExecutionResult { migration_id, dag_version }`
+  instead of a bare `u64`. The `apply_complete` JSON event on stderr now emits both
+  `migration_id` (aqueduct.migrations row id) and `dag_version` (bigserial) as separate
+  fields.
+
+- **U-06/SEC-01:** Password redaction for all connection strings displayed in error
+  messages. `redact_dsn()` replaces passwords with `***` in both URL-form and
+  keyword-value DSNs.
+
+- **U-10:** YAML output format for `aqueduct status` (use `--format yaml`).
+
+**Read-Only Safety (D-03/SEC-08)**
+
+- `aqueduct plan` and `aqueduct status` now use `connect_read_only()`, which issues
+  `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY` immediately after connecting.
+  These commands cannot accidentally mutate data.
+
+**Documentation Correctness**
+
+- **D-01:** README updated to v0.11.0 status and feature list.
+
+- **D-04/D-05:** Blue/green migration strategy (still planned for v0.13) is now clearly
+  marked as `[PLANNED]` in `docs/api-reference.md`, `docs/ha-operations.md`, and the
+  apply action YAML. The `--strategy blue-green` flag in the apply action is disabled
+  (no-op) pending the v0.13 implementation.
+
+- **D-07:** Unimplemented features (YAML output, IMMEDIATE mode, real secret backends)
+  moved from `[Released]` to `[Planned]` sections in CHANGELOG. 
+
+- **D-09/SEC-02:** `docs/security.md` now clearly marks AWS/GCP/Vault secret backends
+  as "Planned (v0.12)". Only `env`, `sops`, and `age` are implemented today.
+
+- **D-11:** `docs/ha-operations.md` maintenance window documentation updated to remove
+  blue/green from the implemented `maintenance_window_applies_to` values.
+
+- **D-12:** Example workflow version pins in `aqueduct-plan.yml` and `aqueduct-apply.yml`
+  updated from `@v0.4.0` to `@v0.11.0`.
+
+**Code Quality**
+
+- **Q-01:** Step registry contract test — exhaustive match on all `PlanStep` variants
+  ensures every variant has a non-empty `description()`. Adding a new variant without
+  updating `description()` is now a compile error.
+
+- **Q-02:** Typed `PlanExecutor` constructors: `for_apply()`, `for_rollback()`,
+  `for_promote()`, `for_dry_run()`. The generic `new()` constructor is still available.
+
+- **Q-06:** Typed DAG state wrappers: `DesiredDagState`, `LiveDagState`,
+  `RecordedDagState` newtypes wrapping `DagState`. Prevents mixing state kinds in
+  function signatures.
+
+- **Q-09:** `lib.rs` exports `CLI_VERSION = env!("CARGO_PKG_VERSION")` as the single
+  source of version truth. All commands use `env!("CARGO_PKG_VERSION")` directly.
+
+**CI Improvements**
+
+- **M-13:** `docs-build` job in CI runs `mdbook build` and `mdbook test` on every push.
+
+- **U-01/D-02:** `docs-lint` job in CI builds the release binary and verifies that
+  every subcommand responds to `--help`, and that the binary `--version` matches
+  `Cargo.toml`.
+
+- New `docs-cli` recipe in `justfile` generates a Markdown CLI reference from
+  `--help` output.
+
+**Security**
+
+- **SEC-07:** New `docs/roles.sql` contains SQL grant templates for the four aqueduct
+  roles: `aqueduct_planner`, `aqueduct_applier`, `aqueduct_preview`, `aqueduct_destroy`.
 
 ---
 

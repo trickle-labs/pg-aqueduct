@@ -5,7 +5,7 @@ use aqueduct_core::{
 };
 use clap::Args;
 
-use super::connect;
+use super::connect_read_only;
 
 #[derive(Debug, Args)]
 pub struct StatusArgs {
@@ -78,31 +78,16 @@ async fn poll_once(
     };
 
     // H8: compute real drift count by comparing desired state to live state.
+    // U-04: errors in drift computation are propagated as Result, not silently swallowed.
     let drift_count: usize = {
-        let live_result = aqueduct_core::live_state::read_live_state(client, None).await;
-        match (|| -> anyhow::Result<_> {
-            let files = aqueduct_core::parser::load_migrations(project_dir, &Default::default())?;
-            let desired = aqueduct_core::dag::build_dag_state(&files, true)?;
-            Ok(desired)
-        })() {
-            Ok(desired) => match live_result {
-                Ok(live) => {
-                    let diff = aqueduct_core::diff::compute_diff(&desired, &live);
-                    diff.deltas
-                        .iter()
-                        .filter(|d| d.kind != aqueduct_core::diff::DeltaKind::Unchanged)
-                        .count()
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to read live state for drift detection: {}", e);
-                    0
-                }
-            },
-            Err(e) => {
-                tracing::warn!("Failed to load migrations for drift detection: {}", e);
-                0
-            }
-        }
+        let live = aqueduct_core::live_state::read_live_state(client, Some(project_name)).await?;
+        let files = aqueduct_core::parser::load_migrations(project_dir, &Default::default())?;
+        let desired = aqueduct_core::dag::build_dag_state(&files, true)?;
+        let diff = aqueduct_core::diff::compute_diff(&desired, &live);
+        diff.deltas
+            .iter()
+            .filter(|d| d.kind != aqueduct_core::diff::DeltaKind::Unchanged)
+            .count()
     };
 
     let status = StatusReport {
@@ -129,6 +114,15 @@ async fn poll_once(
                     "polled_at": chrono::Utc::now().to_rfc3339(),
                 }))?
             );
+        }
+        "yaml" | "yml" => {
+            // U-10: YAML format for status output (no serde_yaml dep needed).
+            println!("project: \"{}\"", status.project);
+            println!("version: {}", status.current_version.map_or("null".to_string(), |v| v.to_string()));
+            println!("stream_tables: {}", status.stream_table_count);
+            println!("drift: {}", status.drift_count);
+            println!("pgtrickle_version: {}", status.pgtrickle_version.as_deref().map_or("null".to_string(), |v| format!("\"{}\"", v)));
+            println!("polled_at: \"{}\"", chrono::Utc::now().to_rfc3339());
         }
         _ => {
             println!("{}", render_status_text(&status));
@@ -177,7 +171,8 @@ pub async fn run(args: StatusArgs) -> anyhow::Result<()> {
     let dsn =
         super::resolve_dsn(args.dsn.as_deref(), args.to.as_deref(), &args.project_dir).await?;
 
-    let client = connect(&dsn).await?;
+    // D-03/SEC-08: Use a read-only session for status (no writes).
+    let client = connect_read_only(&dsn).await?;
 
     let config = AqueductConfig::load(&args.project_dir).ok();
     let project_name = config
@@ -207,8 +202,9 @@ pub async fn run(args: StatusArgs) -> anyhow::Result<()> {
 
     loop {
         // Create a fresh connection each poll to handle reconnections gracefully.
+        // D-03/SEC-08: Each poll uses a read-only session.
         let poll_result = async {
-            let client = connect(&dsn).await?;
+            let client = connect_read_only(&dsn).await?;
             poll_once(
                 &client,
                 &project_name,

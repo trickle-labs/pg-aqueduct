@@ -59,6 +59,37 @@ coverage:
 clean:
     cargo clean
 
+# ── Docs ─────────────────────────────────────────────────────────────────────
+
+# Build the mdBook documentation site.
+docs-build:
+    mdbook build
+
+# Test mdBook code blocks.
+docs-test:
+    mdbook test
+
+# Generate CLI reference from --help output (U-01/D-02).
+# Writes a Markdown summary of every subcommand's --help to stdout.
+# Compare against docs/api-reference.md to detect drift.
+docs-cli:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    BIN="./target/debug/aqueduct"
+    if [ ! -f "$BIN" ]; then cargo build --bin aqueduct; fi
+    echo "# CLI Reference (generated)"
+    echo ""
+    echo "Binary version: $($BIN --version)"
+    echo ""
+    for cmd in plan apply diff status validate lint import rollback promote destroy unlock init preview ingest fmt; do
+        echo "## aqueduct $cmd"
+        echo ""
+        echo '```'
+        $BIN "$cmd" --help 2>&1 || true
+        echo '```'
+        echo ""
+    done
+
 # ── Dev ─────────────────────────────────────────────────────────────────────
 
 # Run the aqueduct binary in development mode.

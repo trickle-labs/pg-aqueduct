@@ -9,6 +9,7 @@
 //! 6. Missing consumer view declarations for stream tables.
 
 use crate::dag::DagState;
+use crate::diagnostic::{Diagnostic, DiagnosticSet, DiagnosticSeverity};
 use crate::parser::MigrationFile;
 
 /// A single lint diagnostic.
@@ -22,6 +23,28 @@ pub struct LintDiagnostic {
     pub message: String,
     /// Source file that triggered the lint (if applicable).
     pub file: Option<std::path::PathBuf>,
+}
+
+impl From<&LintDiagnostic> for Diagnostic {
+    fn from(d: &LintDiagnostic) -> Self {
+        let severity = match d.level {
+            LintLevel::Error => DiagnosticSeverity::Error,
+            LintLevel::Warning => DiagnosticSeverity::Warning,
+        };
+        let mut diag = Diagnostic {
+            severity,
+            file: d.file.clone(),
+            line: None,
+            column: None,
+            code: format!("L:{}", d.rule),
+            message: d.message.clone(),
+            hint: None,
+        };
+        if let Some(ref f) = d.file {
+            diag.file = Some(f.clone());
+        }
+        diag
+    }
 }
 
 /// Severity of a lint diagnostic.
@@ -83,6 +106,16 @@ pub fn lint_migrations(files: &[MigrationFile], state: &DagState) -> LintResult 
     lint_consumer_coverage(files, state, &mut result);
 
     result
+}
+
+/// Run lint and return a unified `DiagnosticSet` (Q-08).
+pub fn lint_migrations_diagnostic(files: &[MigrationFile], state: &DagState) -> DiagnosticSet {
+    let lint_result = lint_migrations(files, state);
+    let mut set = DiagnosticSet::new();
+    for d in &lint_result.diagnostics {
+        set.push(Diagnostic::from(d));
+    }
+    set
 }
 
 fn lint_file(file: &MigrationFile, state: &DagState, result: &mut LintResult) {

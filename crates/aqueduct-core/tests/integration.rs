@@ -151,8 +151,8 @@ SELECT customer_id, SUM(amount) AS total FROM raw_orders GROUP BY customer_id;
 
     // Execute the plan.
     let executor = PlanExecutor::new(&db.client, "test-project", "0.1.0", false);
-    let new_version = executor.execute(&plan).await.expect("execute plan");
-    assert_eq!(new_version, 1);
+    let result = executor.execute(&plan).await.expect("execute plan");
+    assert_eq!(result.dag_version, 1);
 
     // Verify the stream table was "created" in the mock catalog.
     let state_after = read_live_state(&db.client, None)
@@ -2141,8 +2141,8 @@ SELECT id, AVG(score) AS avg_score FROM raw_c18 GROUP BY id;
     assert_eq!(plan.summary.creates, 1);
 
     let executor = PlanExecutor::new(&db.client, "cookbook-18", "0.7.0", false);
-    let version = executor.execute(&plan).await.expect("execute");
-    assert_eq!(version, 1);
+    let exec_result = executor.execute(&plan).await.expect("execute");
+    assert_eq!(exec_result.dag_version, 1);
 
     let state_after = read_live_state(&db.client, None)
         .await
@@ -3013,8 +3013,8 @@ SELECT customer_id, SUM(amount) AS total FROM raw_orders GROUP BY customer_id;
     let executor = PlanExecutor::new(&db.client, "resume-test", "0.8.0", false)
         .with_desired_state(desired.clone())
         .with_connection_string(db.connection_string.clone());
-    let v = executor.execute(&plan).await.expect("apply plan");
-    assert_eq!(v, 1);
+    let exec_result = executor.execute(&plan).await.expect("apply plan");
+    assert_eq!(exec_result.dag_version, 1);
 
     // Verify the version was recorded.
     let version = get_latest_dag_version(&db.client, "resume-test")
