@@ -4,6 +4,13 @@
 
 ---
 
+# Tutorials
+
+- [5-Minute Tutorial](tutorial-5min.md)
+- [30-Minute Tutorial](tutorial-30min.md)
+
+---
+
 # Reference
 
 - [API Reference](api-reference.md)
