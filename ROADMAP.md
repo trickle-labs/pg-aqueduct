@@ -35,8 +35,12 @@ versions build on earlier ones without breaking the established CLI surface.
 | [v0.7](#v07--documentation--cookbook) | Documentation & cookbook | 8 | 1 week |
 | [v0.8](#v08--core-correctness--safety-hardening) | Core correctness & safety hardening | 10 | 3–4 weeks |
 | [v0.9](#v09--feature-completeness--ergonomics) | Feature completeness & ergonomics | 11 | 3–4 weeks |
-| [v1.0](#v10--release-engineering) | Release engineering | 12 | 2 weeks |
-| [v1.1](#v11--consumer-layer-management) | Consumer layer management | — | TBD |
+| [v1.0](#v10--safety-contract-repair--multi-project-isolation) | Safety contract repair & multi-project isolation | 13 | 5–6 weeks |
+| [v1.1](#v11--documentation-truthfulness-cli-surface--code-quality) | Documentation truthfulness, CLI surface & code quality | 14 | 3–4 weeks |
+| [v1.2](#v12--real-pgtrickle-integration-security--cicd-hardening) | Real pg_trickle integration, security & CI/CD hardening | 15 | 4–5 weeks |
+| [v1.3](#v13--bluegreen-end-to-end-immediate-mode--advanced-features) | Blue/green end-to-end, IMMEDIATE mode & advanced features | 16 | 6–8 weeks |
+| [v1.4](#v14--release-engineering) | Release engineering | 17 | 2 weeks |
+| [v1.5](#v15--consumer-layer-management) | Consumer layer management | — | TBD |
 | [v2.0](#v20--multi-executor-support) | Multi-executor support | — | TBD |
 
 ---
@@ -1486,11 +1490,791 @@ a test in `integration.rs`, and a renderer in `render_plan_text()`.
 
 ---
 
-## v1.0 — Release Engineering
+## v1.0 — Safety Contract Repair & Multi-Project Isolation
+
+**Target effort:** 5–6 weeks.
+**Builds on:** v0.9 complete.
+**Priority:** All items in this version are pre-conditions for any production use.
+
+A second comprehensive engineering audit (`plans/overall-assessment-2.md`) found nine
+critical and 37 high-severity issues remaining after v0.9. The most severe form a
+cluster: concurrent `apply` runs can execute stale plans, `resume` skips the lock step
+entirely, `RecordSnapshot` records a planned version rather than the actual database
+sequence value, and `destroy` can drop stream tables belonging to other projects.
+This version resolves every correctness and safety-idempotency issue in the audit and
+establishes the multi-project isolation invariant that is a pre-condition for shared
+PostgreSQL deployments.
+
+### Phase 13 — Safety Contract Repair & Multi-Project Isolation (5–6 weeks)
+
+#### Critical Correctness Bugs
+
+- [ ] **Fix consumer-only plans skipped as no-ops (C-01).** `PlanSummary::is_empty`
+  only checks `creates`, `drops`, and `alters`. Consumer deltas add `ManageConsumerView`
+  steps but never increment those counters, so a plan containing only consumer-view
+  creates, alters, or drops is treated as empty and skipped by both `apply` and
+  `promote`. Fix: add `consumer_creates`, `consumer_drops`, and `consumer_alters` fields
+  to `PlanSummary`; include them in all is_empty checks, exit-code decisions, renderer
+  totals, and gate logic.
+
+- [ ] **Move lock acquisition before live-state read and next-version computation (C-02).**
+  `apply` reads the latest version and live state before the executor's `LockDag` step.
+  Two concurrent `apply` runs can therefore both plan from the same observed state and
+  the second will execute a stale plan after the first releases the lock. Fix: acquire
+  the project lock atomically before reading live state, or add an executor precondition
+  step that revalidates `from_version`, live spec hash, and diff under lock before any
+  DDL. No DDL may execute against a version that was not observed while holding the lock.
+
+- [ ] **Make `RecordSnapshot` read the actual inserted `dag_versions.version` (C-03).**
+  `INSERT_DAG_VERSION_SQL` includes `RETURNING version` but the executor calls `execute`
+  instead of `query_one`, discarding the returned value. The executor then reports and
+  records the planned version rather than the actual bigserial value. Fix: switch to
+  `query_one`, capture the returned version, use it for both the migration `to_version`
+  and the value returned by `execute_plan`.
+
+- [ ] **Wire real backfill or remove from the success contract (C-04).** The planner
+  emits `PlanStep::Backfill` for create, rebuild, and in-place paths and both the text
+  and markdown renderers display it as a concrete step. The executor marks it as a no-op
+  with a comment saying it is mock-only. Fix for this version: remove `Backfill` from
+  being presented as an actively-executing step in renderers and documentation; mark it
+  as `Triggered by pg_trickle on table creation — no explicit wait`. Real backfill
+  completion waiting is implemented end-to-end in v1.3 once the pg_trickle compatibility
+  layer (v1.2) is in place.
+
+- [ ] **Enforce project scoping on stream-table live state (C-06, C-07, M-11).**
+  `read_live_state` scans `pgtrickle.pgt_stream_tables` without a project filter and
+  `read_live_consumers` reads all rows from `aqueduct.consumer_views` without filtering
+  by project. Fix:
+  - Add `aqueduct.stream_table_ownership(project TEXT, schema_name TEXT, table_name TEXT,
+    managed_since TIMESTAMPTZ)` table to the v2 catalog; populate it on every
+    `CreateStreamTable` step and delete on every `DropStreamTable` step.
+  - Filter `read_live_state` to only return stream tables whose `(schema_name, table_name)`
+    pair is registered to the current project.
+  - Add `WHERE project = $1` to `read_live_consumers`.
+  - Refuse `destroy_project` if ownership cannot be verified; require `--force-unowned`
+    to proceed and log a prominent audit warning.
+  - Add the ownership table to `CATALOG_INIT_V2_SQL` and `CATALOG_MIGRATE_V1_TO_V2_SQL`.
+
+#### Safety and Idempotency Bugs
+
+- [ ] **Redesign resume to support failure-recovery, not only crash-recovery (S-01, S-02).**
+  The current implementation marks failures as `failed` and clears progress to `{}`, so
+  resume can only find `running` migrations. Any migration that fails a step becomes
+  non-resumable. Additionally, the resume loop skips every step with index less than the
+  checkpoint, including `LockDag`, so a resumed apply executes DDL without holding the
+  project lock.
+
+  Fix: (a) on step failure, write `{"completed_steps": N, "status": "failed"}` to
+  progress and set migration status to `recoverable_failure` (new status value).
+  (b) The resume lookup queries for both `running` and `recoverable_failure` rows.
+  (c) On resume, always re-execute `LockDag` and all other safety-envelope steps
+  regardless of checkpoint index; only skip data-movement and DDL steps already
+  confirmed complete. (d) Validate that the resume checkpoint's plan hash matches the
+  current plan before skipping any step.
+
+- [ ] **Move scheduler pause to after lock acquisition (S-03).** `run_steps` calls
+  `pgtrickle.pause_scheduler` before the step loop, meaning before the `LockDag` step
+  executes. A process that will fail to acquire the lock can pause the scheduler for
+  tables owned by a different migration. Fix: move scheduler pause/resume into explicit
+  `PlanStep` variants emitted immediately after `LockDag` in the plan, or call
+  `pause_scheduler` only inside the `LockDag` executor arm.
+
+- [ ] **Make heartbeat holder-bound and treat heartbeat loss as fatal (S-04).**
+  `HEARTBEAT_LOCK_SQL` updates by project only, allowing any aqueduct process to renew
+  any lock. Heartbeat errors are logged but non-fatal. Fix: change the SQL to
+  `UPDATE aqueduct.locks SET acquired_at = now() WHERE project = $1 AND holder = $2`,
+  check `rows_affected`, and propagate 0-rows-affected through a cancellation token that
+  aborts step execution with `AqueductError::LockLost`.
+
+- [ ] **Release lock on graceful errors (S-05).** The lock is only released on the success
+  path. Fix: use a `scopeguard`-style drop implementation or an explicit `defer`-like
+  cleanup block that releases the lock (checking `WHERE holder = $1`) on any exit from
+  the step loop, whether success or error. Preserve TTL-expiry-only release for hard
+  crashes.
+
+- [ ] **Treat step progress checkpoint failures as fatal (S-06).** After each step the
+  executor calls `.ok()` on the progress-write result. Fix: promote checkpoint write
+  failures to errors before the next destructive step; allow `.ok()` only for genuinely
+  non-destructive bookkeeping steps.
+
+- [ ] **Use a read-only connection path for dry-run apply (S-07).** `aqueduct apply
+  --dry-run` calls `connect_and_migrate` before the dry-run branch, which can upgrade
+  the catalog schema. Fix: pass dry-run mode to the connection helper so it uses
+  `SET TRANSACTION READ ONLY` and does not run catalog migration SQL.
+
+- [ ] **Share a single `execute_plan` path across apply, rollback, and promote (S-08).**
+  `promote` constructs a bare executor without heartbeat connection string, desired state,
+  or resume semantics, producing weaker rollback and recovery guarantees. Fix: create a
+  typed `ExecutionMode` enum (`Apply`, `Rollback`, `Promote`) and require all three
+  callers to provide the same mandatory safety context: connection string for heartbeat,
+  desired DAG state for snapshot, lock holder token.
+
+- [ ] **Enforce `connect_and_migrate` uniformly across all catalog-reading commands (S-09).**
+  Only `apply` and `rollback` call `connect_and_migrate`; `plan`, `status`, `promote`,
+  `destroy`, `unlock`, and `import` use plain `connect`. Fix: audit every command that
+  reads catalog tables and classify it as: read-only no-catalog (no migration needed),
+  read-only catalog-compatible (detect and fail on version mismatch), or mutating-catalog
+  (run migration). Apply the appropriate connection path to each.
+
+- [ ] **Make destroy `CASCADE` fallback opt-in (S-10).** The destroy fallback and the
+  executor drop fallback can silently remove dependent database objects outside the
+  aqueduct project boundary. Fix: replace `DROP TABLE ... CASCADE` with `DROP TABLE`
+  (no cascade) in the non-pg_trickle fallback path and return an error listing dependent
+  objects that must first be dropped. Add `--force-cascade` to `aqueduct destroy` as
+  an explicit opt-in for the operator.
+
+- [ ] **Enforce `accept_data_loss` in rollback (S-11).** `RollbackArgs` declares the
+  flag but the flow never reads it. Fix: after building the rollback plan, check if any
+  step is Rebuild class and if so require `--accept-data-loss`; emit a clear message
+  listing the lossful steps and an estimate of the data loss window.
+
+- [ ] **Separate `create_count` from `rebuild_count` in `PlanSummary` (S-12).** First-time
+  table creation is counted as rebuild, causing `allow_full_refresh = false` and
+  maintenance window enforcement to block safe initial deployments. Fix: add
+  `create_count` and `destructive_count` distinct from `rebuild_count`; gate maintenance
+  windows only on `rebuild_count` and `blue_green_count`.
+
+- [ ] **Include hostname, PID, and UUID in lock holder string (S-13).** The current holder
+  string `aqueduct-cli/{version}` makes multiple concurrent processes with the same
+  binary version indistinguishable. Fix: format as `aqueduct/{version}/{hostname}/{pid}/{uuid}`.
+
+- [ ] **Fail closed for scheduler pause and IMMEDIATE toggle failures (S-14).** Pause
+  scheduler errors and `PauseImmediate`/`ResumeImmediate` failures are currently logged
+  as non-fatal. Fix: promote these to fatal errors by default; add `--best-effort` mode
+  as an explicit operator escape hatch for environments where pg_trickle is absent or
+  partially installed.
+
+#### Additional Correctness Fixes
+
+- [ ] **Populate consumer and source counters in PlanSummary and renderer (C-11).**
+  Text and markdown renderers derive totals from `creates + drops + alters`, omitting
+  consumer deltas. Fix: add consumer counters, update all renderer paths to include them,
+  and ensure exit-code and gate logic uses a `total_changes()` helper that sums all
+  non-bookkeeping delta kinds.
+
+- [ ] **Fix source DDL state: read from recorded snapshots (C-05).** `read_live_state`
+  always returns `sources: vec![]`. Fix: deserialise the latest `spec_jsonb` from
+  `aqueduct.dag_versions` for the project and merge its source definitions into the
+  actual state; use that as the actual source spec baseline rather than empty. Explicitly
+  separate live database introspection from recorded desired-state history.
+
+- [ ] **Fix `check_pgtrickle_version` graceful absence handling (C-09).** The function
+  directly queries `SELECT pgtrickle.pgt_extension_version()`, which errors if the schema
+  or function is absent. Fix: probe `to_regprocedure('pgtrickle.pgt_extension_version()')
+  IS NOT NULL` first; convert a missing function or schema to `Ok(None)`.
+
+- [ ] **Fix `classify_delta` panic paths in `AlterQuery` arm (C-10).** `classify_delta`
+  unwraps both `desired` and `actual` in the `AlterQuery` arm. Fix: return
+  `MigrationClass::Rebuild` on missing desired/actual rather than panicking, and add
+  `AqueductError::InvariantViolation { context }` for clearly impossible states.
+
+- [ ] **Implement three-way comparison in diff and status (C-12).** `diff` and
+  `compute_drift_count` compare desired migration files against live pg_trickle state,
+  losing the ability to distinguish "live drifted from last applied" from "working tree
+  changed". Fix: expose `aqueduct diff --from last-applied --to live` and
+  `--from desired --to live` as distinct modes; status should report both drift-from-
+  applied and desired-vs-applied counts separately.
+
+#### New Tests
+
+- [ ] Consumer-only apply end-to-end: create, alter, and drop a consumer view with no
+  stream-table changes; assert apply succeeds and consumer view reflects the change.
+- [ ] Concurrent apply race: start two applies against the same project from the same
+  planned state; assert exactly one succeeds and the other receives a clear error.
+- [ ] Stale-plan rejection: apply v1, plan from v1 state, manually apply a change to
+  reach v2, then attempt to execute the stale v1→? plan; assert rejection with a
+  from-version mismatch error.
+- [ ] Two-project isolation: apply tables for project A and project B in one database;
+  destroy project A; assert all project A tables are gone and all project B tables are
+  intact.
+- [ ] Resume skips non-safety steps: checkpoint after step 3, restart apply; assert
+  `LockDag` re-executes and DDL steps 0–3 are skipped.
+- [ ] Heartbeat loss aborts migration: set TTL to 1 s; externally delete the lock row
+  mid-migration; assert the executor aborts with `LockLost`.
+
+**v1.0 release criteria.**
+- Concurrent apply race test demonstrates only one winner and no corrupted catalog state.
+- Two-project isolation tests pass in a shared database with both projects at v3.
+- Consumer-only apply test succeeds end-to-end.
+- Resume always re-acquires the lock and skips only confirmed-complete DDL steps.
+- `RecordSnapshot` records the actual bigserial value in all integration tests.
+- `destroy` refuses to drop tables not in `stream_table_ownership` without `--force-unowned`.
+- All v0.9 tests continue to pass.
+
+---
+
+## v1.1 — Documentation Truthfulness, CLI Surface & Code Quality
+
+**Target effort:** 3–4 weeks.
+**Builds on:** v1.0 complete.
+
+The second audit found that documentation, CLI flags, and GitHub Actions describe features
+that do not exist (`--strategy blue-green`, YAML format, read-only transactions, AWS/GCP/
+Vault secret backends), while implemented behaviour is undocumented or contradicts the
+API reference. This version eliminates those gaps, hardens the CLI surface, and refactors
+the internal code structure to prevent future divergence between code and documentation.
+
+### Phase 14 — Documentation Truthfulness, CLI Surface & Code Quality (3–4 weeks)
+
+#### CLI Surface Correctness
+
+- [ ] **Generate CLI reference from clap (U-01, D-02).** Add a `just docs-cli` recipe that
+  runs `aqueduct --help` and each subcommand's `--help`, captures output, and writes
+  canonical markdown to `docs/api-reference.md`. Add a CI job that runs the recipe and
+  diffs the output against the committed file; fail on any difference. Remove all
+  manually maintained flag tables from docs.
+
+- [ ] **Fix `plan --fail-if-changed` exit semantics (U-02).** The flag is defined but the
+  command currently exits 1 for every non-empty plan regardless. Implement the correct
+  behaviour from `ROADMAP.md` §v0.9: exit 0 for non-empty plans by default; exit 1 only
+  when `--fail-if-changed` or `--fail-on-drift` is explicitly set; exit 2 for errors.
+  Update the GitHub Actions plan action to stop wrapping exit 1.
+
+- [ ] **Add `--fail-on-drift` to `aqueduct diff` (U-03).** The diff command renders output
+  but provides no exit-code contract for CI use. Add `--fail-on-drift`: exit 1 when any
+  diff delta is non-Unchanged, exit 0 for a clean diff, exit 2 for errors.
+
+- [ ] **Propagate errors in `compute_drift_count` (U-04).** Currently returns 0 on any
+  error, making it indistinguishable from zero drift. Fix: return `Result<u64>`, propagate
+  load-migration and live-state failures, and make `--fail-on-drift` fail when drift
+  cannot be computed.
+
+- [ ] **Separate `migration_id` from `dag_version` in apply output (U-05).** The apply
+  JSON event conflates the two. Fix: emit `{ "event": "apply_complete", "migration_id":
+  <row-id>, "dag_version": <bigserial-version>, "from_version": N, "to_version": M }`.
+  Update the apply action extraction logic accordingly.
+
+- [ ] **Redact credentials in all displayed DSNs (U-06, SEC-01).** Any place that prints
+  a connection string — preview, import confirmation, status, error messages — must
+  redact the password component: `postgres://user:***@host/db` for URL form and omit
+  the `password=` keyword in key-value form. Add `--show-dsn` as an explicit opt-in.
+
+- [ ] **Improve `aqueduct init` new-project flow (U-07).** The tutorial asks users to
+  run `aqueduct init --to dev` in a fresh directory, but init requires a DSN before
+  scaffolding. Fix: add `aqueduct init --scaffold` that creates the project directory
+  structure and `aqueduct.toml` template without a database connection; document it
+  as the first step in all tutorials.
+
+- [ ] **Centralize output through a command context with format and verbosity (U-08).**
+  Many commands call `println!`/`eprintln!` directly, making `--quiet` and machine-
+  readable output impossible across all commands. Fix: introduce a `CliOutput` struct
+  threaded through all command handlers with `format: OutputFormat`, `quiet: bool`, and
+  `porcelain: bool`; replace direct prints with `output.emit(...)` calls.
+
+- [ ] **Add location information to validation diagnostics (U-09).** Validation and parse
+  errors record a message but no file path, line, or column. Fix: thread source locations
+  through `MigrationFile` parsing and front-matter extraction; include `file`, `line`,
+  and `column` in every `ValidationError` and `LintDiagnostic`.
+
+- [ ] **Implement YAML output for `aqueduct status` (U-10).** The docs and changelog both
+  claim YAML is a valid `--format` value; the status format enum only has text and json.
+  Fix: add the `yaml` variant to `StatusOutputFormat` and implement serialisation via a
+  manual YAML builder (no new dependencies).
+
+#### Documentation Accuracy
+
+- [ ] **Update README to current version with accurate test count and feature state (D-01).**
+  Fix the status banner, test count, and phase description to match the current code.
+  Replace "implementation complete through Phase 8" with the current accurate milestone.
+
+- [ ] **Implement read-only transactions for DB-reading commands or retract the guarantee
+  (D-03, SEC-08).** Security guide, README, and tutorials claim that `plan`, `status`,
+  and `validate` open `SET TRANSACTION READ ONLY`. Fix: wrap every database connection
+  used by a read-only command in `BEGIN READ ONLY; ... COMMIT`. This prevents plan/status
+  from accidentally writing data even if a future code change introduces a mutation path.
+
+- [ ] **Mark blue/green as planned/experimental in all docs and actions (D-04, D-05).**
+  Tutorials describe blue/green as delivered. Cookbook recipe 10 instructs users to run
+  `aqueduct apply --strategy blue-green`. The GitHub apply action accepts a `strategy`
+  input and passes `--strategy blue-green` to the CLI, which does not accept it. Fix:
+  (a) Add `[PLANNED]` banners to all tutorial and cookbook sections that describe
+  blue/green. (b) Remove the `strategy` input from the apply action or document it as a
+  no-op until v1.3. (c) Remove `--strategy blue-green` from cookbook recipe 10 and link
+  to the v1.3 planned feature instead.
+
+- [ ] **Fix `aqueduct import --from` to resolve target-or-DSN with clear precedence
+  (D-06).** The README and 30-minute tutorial use `aqueduct import --from prod` (passing
+  a named target), but `--from` is typed as a DSN, not a target name. Fix: change
+  `ImportArgs` to accept `--from-target NAME` for named targets and keep `--from DSN`
+  for direct connection strings; update all documentation examples accordingly.
+
+- [ ] **Separate unreleased and planned items in CHANGELOG (D-07).** Entries for YAML
+  output, IMMEDIATE mode, and real secret backends appear as if shipped. Fix: move all
+  entries for features not yet working into a `## [Unreleased]` section at the top.
+
+- [ ] **Add version placeholder mechanism to docs (D-08).** Installation docs pin
+  `VERSION=0.7.0` manually. Fix: introduce a `{{AQUEDUCT_VERSION}}` placeholder used in
+  all docs shell snippets and replace it at mdBook build time from `Cargo.toml`. Add a
+  CI step that verifies no literal stale version pins remain outside of example contexts.
+
+- [ ] **Split secret-store docs into implemented and planned sections (D-09, SEC-02).**
+  Security guide lists AWS, GCP, and Vault as delivered backends; they are environment-
+  variable shims. Fix: clearly separate "Implemented: env, SOPS, age" from "Planned
+  (v1.2): AWS Secrets Manager SDK, GCP Secret Manager API, HashiCorp Vault API".
+
+- [ ] **Redefine roadmap "done" criteria (D-10).** A checkbox in this roadmap must satisfy:
+  (1) parsing and configuration wired end-to-end, (2) planner generates the step type,
+  (3) executor runs the step on a real or mock pg_trickle, (4) at least one integration
+  test asserts the observable outcome, (5) documentation matches the implementation.
+  Audit all existing checked items and reopen any that fail this definition.
+
+- [ ] **Remove blue/green maintenance gate from HA docs until planner support exists
+  (D-11).** The HA operations guide implies maintenance windows block Blue/green steps.
+  The planner never produces them. Fix: remove Blue/green from the gate description and
+  add a note linking to v1.3.
+
+- [ ] **Update example workflow version pins in GitHub Actions examples (D-12, CI-08).**
+  `aqueduct-plan.yml` and `aqueduct-apply.yml` both reference `@v0.4.0`. Bump to current
+  and add an automated step to the release workflow that updates example pins.
+
+#### Code Quality Refactoring
+
+- [ ] **Introduce step registry / contract tests for plan-execute-render coverage (Q-01).**
+  Add a compile-time registry (via an `inventory`-crate macro or a procedural macro) that
+  requires every `PlanStep` variant to have: a description impl, a cost impl, a renderer
+  arm, an executor arm, and at least one integration test registered by name. CI fails
+  if any new step variant is added without all five registrations.
+
+- [ ] **Type `PlanExecutor` construction by mode (Q-02).** Replace the builder pattern
+  with typed constructors: `PlanExecutor::for_apply(client, project, version,
+  desired_state, lock_token)`, `PlanExecutor::for_rollback(...)`,
+  `PlanExecutor::for_promote(...)`, `PlanExecutor::for_test(mock_client)`. Each
+  constructor enforces required fields at compile time.
+
+- [ ] **Replace `ManageWalSlot` string `action` with a typed enum (Q-03, C-14).** Change
+  `action: String` to `action: WalSlotAction` (enum: `Create`, `Drop`). Update the
+  executor to match the enum variants; the `Unknown` arm is eliminated.
+
+- [ ] **Define stable error codes for CLI/CI output (Q-04).** Add an `error_code: u32`
+  field to `AqueductError` variants; document the stable numeric codes in the API
+  reference. Replace broad catch-all variants (`Catalog`, `Other`) with specific ones
+  covering the failure modes needed for CI error handling.
+
+- [ ] **Validate plan hash and format version on resume (Q-05).** Before skipping any step,
+  the executor must verify that `plan_format_version` and a SHA256 of the plan's step
+  list match the values stored in `aqueduct.migrations.progress`. Add plan hash storage
+  to `START_MIGRATION_SQL`.
+
+- [ ] **Introduce typed DAG state wrappers (Q-06, C-12).** Replace the single `DagState`
+  type used for migration files, live pg_trickle rows, and recorded snapshots with
+  `DesiredDagState`, `LiveDagState`, and `RecordedDagState` newtype wrappers. Each
+  enforces which fields may be absent and documents trust level. Add explicit conversion
+  functions rather than implicit `From` impls.
+
+- [ ] **Mark placeholder executor paths with feature flags not production comments (Q-07).**
+  Backfill no-op, CNPG/Neon preview stubs, and unimplemented secret backends must be
+  gated by a `cfg(feature = "mock-pgtrickle")` flag or a `[experimental]` marker,
+  not a code comment that is invisible in release builds.
+
+- [ ] **Unify diagnostics across parse, validate, lint, and plan preflight (Q-08).**
+  Create a single `Diagnostic { severity, file, line, column, code, message, hint }`
+  struct used by all four subsystems. Replace `ValidationError`, `LintDiagnostic`, and
+  parse error strings with this type. The CLI `validate` and `lint` commands render
+  a unified diagnostic list.
+
+- [ ] **Single-source version references (Q-09, D-08).** Audit all files that contain a
+  hard-coded version string. Replace with `env!("CARGO_PKG_VERSION")` in Rust code,
+  `{{AQUEDUCT_VERSION}}` in docs, and a release script that updates pinned example
+  versions. Make stale version references a CI lint failure.
+
+- [ ] **Define hook security policy and enforce it (SEC-06).** Before `RunHook` is wired
+  into planner generation (v1.3), document and enforce: (a) hooks run in a separate
+  non-transactional connection, (b) the hook statement is validated as a single
+  non-DDL SQL statement, (c) hook execution is recorded in `aqueduct.migrations` with
+  the SQL text, the role, and the wall time, (d) a `hooks.allowed_statements` allowlist
+  in `aqueduct.toml` limits what SQL patterns may appear in hook bodies.
+
+- [ ] **Ship SQL grant templates for all roles (SEC-07).** Add `docs/roles.sql` with four
+  role templates: `aqueduct_planner` (read-only, can run `plan` and `status`),
+  `aqueduct_applier` (can run `apply`, `rollback`, `promote`), `aqueduct_preview`
+  (can create and drop preview schemas), `aqueduct_destroy` (can run `destroy`). Each
+  template lists minimum `GRANT` statements for `aqueduct.*` catalog tables and
+  `pgtrickle.*` functions.
+
+- [ ] **Centralize DSN resolution and plaintext-password policy (SEC-04, SEC-05).**
+  `import`, `promote`, `plan`, and `status` each resolve DSNs differently. Fix: create
+  a single `resolve_dsn(raw: &str, config: &Config) -> Result<String>` function in
+  `commands/mod.rs` that: expands `${VAR}` references, expands `${secret:...}` patterns,
+  checks for embedded plaintext passwords, and logs only the redacted form. Call it
+  from every command that opens a database connection.
+
+- [ ] **Redact SOPS and age paths in logs (SEC-05).** Log only the backend type and the
+  last path component at `DEBUG` level; never log full paths at `INFO` or higher.
+
+- [ ] **Add identity-file policy and redaction for age (SEC-09).** Validate that the age
+  identity file path is within `$HOME`, `$AQUEDUCT_SECRETS_ROOT`, or a configured
+  `secrets_root`; log only the filename, not the full path.
+
+- [ ] **Add mdBook build and link checking to CI (M-13).** Add a `docs-build` job to
+  `ci.yml` that runs `mdbook build` and `mdbook test`. Add a `just docs-links` recipe
+  that runs a link checker (e.g., `lychee`) against the generated HTML.
+
+**v1.1 release criteria.**
+- `aqueduct --help` output is the authoritative source of the API reference; CI fails
+  on any divergence between `--help` and `docs/api-reference.md`.
+- Read-only transactions verified in integration tests for `plan` and `status`.
+- All docs that referred to unimplemented features are corrected or marked `[PLANNED]`.
+- mdBook builds without errors in CI.
+- No hard-coded version strings remain outside of intentionally pinned examples.
+- Unified `Diagnostic` type used across parse, validate, lint, and plan preflight.
+
+---
+
+## v1.2 — Real pg_trickle Integration, Security & CI/CD Hardening
+
+**Target effort:** 4–5 weeks.
+**Builds on:** v1.1 complete.
+
+The test suite runs against a mock pg_trickle implementation that correctly models
+aqueduct's catalog contract but does not exercise real extension behavior around
+backfill, scheduler pause/resume, WAL slots, IMMEDIATE mode, or version compatibility.
+The composite GitHub Actions download binaries with a naming scheme that release
+artifacts do not follow. Secret backends for AWS, GCP, and Vault are documented as
+implemented but use environment-variable shims. This version closes all of those gaps.
+
+### Phase 15 — Real pg_trickle Integration, Security & CI/CD Hardening (4–5 weeks)
+
+#### Real pg_trickle Extension Compatibility
+
+- [ ] **Implement pg_trickle capability probe (M-07).** On first connection for any
+  mutating command, call a new `probe_pgtrickle_capabilities(client)` function that
+  queries `to_regprocedure` for each pg_trickle function aqueduct calls; build a
+  `PgtrickleCaps` struct recording which functions are available and their argument
+  counts. Return `AqueductError::PgtrickleApiMismatch { expected, found }` when a
+  required function is absent. Cache the caps in the executor for the session lifetime.
+
+- [ ] **Add real pg_trickle release-gate CI job (T-02, CI-04).** Add a `pgtrickle-
+  integration` job to `ci.yml` that builds or downloads a real pg_trickle extension
+  image (Docker compose or pre-built artifact), installs it into the Testcontainers
+  Postgres instance, and runs the full integration test suite. This job must pass for
+  every PR merge and every release tag. The mock-based tests remain for fast local
+  iteration; the real pg_trickle job is the release gate.
+
+- [ ] **Implement real backfill completion waiting in `WaitForRefresh` (C-04 full).** Now
+  that the capability probe exists, wire `WaitForRefresh` to poll
+  `pgtrickle.pgt_stream_tables.refresh_status` until it transitions from `running` to
+  `idle`. Enforce the `deadline_secs` timeout; abort and surface the partial state to
+  the operator if the deadline expires.
+
+#### Comprehensive Test Coverage
+
+- [ ] **Add failure-injection tests for resume (T-03).** Using the mock pg_trickle
+  environment, inject a failing step at index N by replacing the executor step handler
+  with one that errors. Assert: progress records N completed steps, migration status is
+  `recoverable_failure`, resuming re-acquires the lock, skips steps 0–N, and reaches
+  the same final state as a clean apply.
+
+- [ ] **Rename blue/green test and add real topology fixture (T-05).** Rename
+  `test_blue_green_plan_steps` to `test_plan_steps_for_query_change`. Add a new test
+  `test_blue_green_topology_restructure` that uses a diamond DAG, restructures it into
+  two parallel branches, and asserts that `CreateGreenSchema`, `CreateStreamTableInGreen`,
+  `WaitForConvergence`, `SwapConsumerViews`, and `RetireBlueSchema` appear in the plan
+  when `--strategy blue-green` is passed.
+
+- [ ] **Expand coverage to all crates (T-06, CI-05).** Change `tarpaulin` invocation to
+  `--all-targets --workspace`. Set minimum coverage thresholds: `aqueduct-core` ≥ 75%,
+  `aqueduct-cli` ≥ 60%. Add a coverage badge to the README.
+
+- [ ] **Convert CLI tests to binary-level execution (T-07).** Replace direct library-
+  function calls in `crates/aqueduct-cli/tests/cli_integration.rs` with
+  `assert_cmd::Command::cargo_bin("aqueduct")` invocations. Test at minimum: correct
+  exit codes for empty plan (0), non-empty plan (1), and error (2); `--help` includes
+  expected flags; `--format json` produces valid JSON; `--quiet` suppresses output.
+
+- [ ] **Add project-isolation destructive tests (T-08).** Spin up a database, apply a
+  3-table DAG for project A and a 3-table DAG for project B. Destroy project A. Assert
+  all three project A tables and catalog rows are gone and all three project B tables
+  and catalog rows are intact.
+
+- [ ] **Add artifact/action compatibility smoke test (T-09, CI-01).** Add a workflow
+  `action-smoke.yml` that (a) builds the `aqueduct` binary for the CI platform, (b)
+  publishes a local release artifact with the correct naming scheme, (c) runs the plan
+  and apply composite actions pointing at that local release, and (d) asserts both
+  actions exit 0 on a no-op plan.
+
+- [ ] **Expand planner fuzz tests with proptest generators (T-10).** Replace the LCG-
+  based random mutator with `proptest` generators for `DagState`, SQL query snippets,
+  delta kinds, and consumer specs. Add invariants: no panics, every generated plan is
+  deterministic for the same input, apply followed by plan produces an empty plan.
+
+- [ ] **Add smoke harness for tutorial commands (T-11).** Parse `docs/tutorial-5min.md`
+  and `docs/tutorial-30min.md` for fenced code blocks tagged `bash`; run each command
+  against a Testcontainers environment with the minimal example project. Fail CI if
+  any command in a tutorial errors.
+
+#### CI/CD & Release Engineering Fixes
+
+- [ ] **Align composite action artifact naming with release archives (CI-01).** The plan
+  and apply actions download `aqueduct-${OS}-${ARCH}` but release archives are named
+  `aqueduct-${VERSION}-${artifact_suffix}`. Fix: update action download logic to
+  download and extract `aqueduct-${VERSION}-${OS}-${ARCH}.tar.gz` (Linux/macOS) or
+  `.zip` (Windows); make `VERSION` a required action input.
+
+- [ ] **Make Windows release build required (CI-03).** Remove `continue-on-error: true`
+  from the Windows release job. If Windows cross-compilation is not feasible in CI, add
+  an explicit `KNOWN_ISSUE.md` entry and remove Windows from the installation docs
+  platform table until it is resolved.
+
+- [ ] **Make release pipeline depend on CI gate (CI-06).** Add a `needs: [ci-gate]` to
+  the release workflow's build matrix, or add a GitHub Actions requirement that the
+  release tag must have a passing CI run on the same commit SHA before the release
+  workflow may execute.
+
+- [ ] **Add macOS x86_64 artifact to release matrix (CI-07).** The roadmap and
+  installation docs mention macOS x86_64. Add `macos-13` (Intel) to the release matrix
+  alongside `macos-15` (Apple Silicon).
+
+- [ ] **Add MSRV job pinned to Rust 1.80 (CI-09).** Add a `msrv` job to `ci.yml` that
+  pins `toolchain: "1.80"` and runs `cargo check --workspace`. This prevents silent MSRV
+  regressions when stable Rust gains new constructs used in the codebase.
+
+#### Performance Improvements
+
+- [ ] **Build a source-to-stream dependency index and reuse it (P-01).** Replace the
+  `O(changed_sources × stream_tables × parse_cost)` cascade analysis with: (a) parse
+  each stream query once during `load_migrations`; (b) build a `HashMap<table_ref,
+  Vec<stream_name>>` index; (c) `find_cascade_impacts` looks up the index rather than
+  re-parsing. Apply the same index to lint and destroy dependency analysis.
+
+- [ ] **Add project indexes to catalog tables (P-02).** Emit the following indexes in
+  `CATALOG_INIT_V2_SQL` and `CATALOG_MIGRATE_V1_TO_V2_SQL`:
+  - `CREATE INDEX IF NOT EXISTS aqueduct_dag_versions_project ON aqueduct.dag_versions (project, version DESC)`
+  - `CREATE INDEX IF NOT EXISTS aqueduct_migrations_project_status ON aqueduct.migrations (project, status)`
+  - `CREATE INDEX IF NOT EXISTS aqueduct_migrations_project_started ON aqueduct.migrations (project, started_at DESC)`
+  - `CREATE INDEX IF NOT EXISTS aqueduct_locks_project ON aqueduct.locks (project)`
+
+- [ ] **Wrap all read-only commands in `BEGIN READ ONLY` with `statement_timeout` (P-03).**
+  Connect read-only commands with `SET LOCAL statement_timeout = '30s'; BEGIN READ ONLY`.
+  Make the timeout configurable via `read_timeout` in `aqueduct.toml`. This also
+  fulfills the security guide's read-only transaction claim (now implemented in v1.1).
+
+- [ ] **Derive plan summaries from the step stream (P-06).** Remove the parallel
+  counter-tracking in the planner in favour of a single `plan_stats(steps: &[PlanStep])
+  -> PlanSummary` function that classifies each step once. Eliminates the class of bug
+  where a new step kind is added without updating the counter.
+
+- [ ] **Add subgraph preview option (P-07).** Add `aqueduct preview --table <name>`
+  that limits the preview schema to the named table's subgraph (ancestors and descendants
+  only). Use the dependency index from P-01 to compute the subgraph. Skip source sampling
+  for tables outside the subgraph.
+
+- [ ] **Distinguish `estimate_rows` errors from unsupported-cost warnings (P-08).**
+  Change `estimate_rows` return type to `Result<Option<u64>, CostError>` where
+  `CostError::SqlError` wraps a query failure and `CostError::Unsupported` is returned
+  when the planner cannot estimate (e.g., no active connection). Surface `SqlError` as
+  a plan warning.
+
+#### Real Secret Backend Implementations
+
+- [ ] **Implement AWS Secrets Manager SDK client (SEC-02 partial).** Replace the
+  environment-variable shim in `secrets.rs` `Backend::Aws` with a real
+  `aws-sdk-secretsmanager` client call. Use `AWS_REGION` from the environment.
+  Implement and test with LocalStack in CI. Document required IAM permissions.
+
+- [ ] **Implement GCP Secret Manager API client (SEC-02 partial).** Replace the shim
+  with a real `google-cloud-secret-manager` client call. Document required IAM
+  permissions and `GOOGLE_APPLICATION_CREDENTIALS` setup.
+
+- [ ] **Implement HashiCorp Vault KV client (SEC-02 partial).** Replace the shim with
+  an HTTP call to the Vault KV v2 `GET /v1/{mount}/data/{path}` endpoint using
+  `VAULT_ADDR` and `VAULT_TOKEN`. Document required Vault policy.
+
+- [ ] **Implement AST-based preview query rewriting (SEC-03).** Replace the string-
+  replacement `rewrite_query_for_preview` with a pg_query.rs parse → AST rewrite →
+  deparse pipeline that replaces all unqualified and schema-qualified table references
+  with their preview-schema equivalents. Add property tests that verify the rewrite
+  produces semantically equivalent SQL for 20+ query patterns.
+
+- [ ] **Wire OIDC credentials through to action and real backend calls (SEC-10).**
+  Update the apply action to use `aws-actions/configure-aws-credentials` for OIDC-based
+  AWS credential injection when `aws-role-arn` is set. Document the equivalent for GCP
+  and Vault.
+
+**v1.2 release criteria.**
+- All integration tests pass against a real pg_trickle extension build in CI.
+- Composite action artifact smoke test passes end-to-end.
+- AWS Secrets Manager backend tested against LocalStack in CI.
+- AST-based preview query rewriting passes 20+ property test cases.
+- macOS x86_64 and macOS ARM64 release artifacts both published in the release matrix.
+- MSRV job passes at Rust 1.80.
+- Coverage ≥ 75% for `aqueduct-core`, ≥ 60% for `aqueduct-cli`.
+- Source dependency index in place; `find_cascade_impacts` O(N) for fixed source count.
+
+---
+
+## v1.3 — Blue/Green End-to-End, IMMEDIATE Mode & Advanced Features
+
+**Target effort:** 6–8 weeks.
+**Builds on:** v1.2 complete.
+
+With the safety contract repaired (v1.0), the surface truthful (v1.1), and the
+extension compatibility proven (v1.2), this version implements the advanced migration
+features that were described in docs and partially scaffolded in earlier versions but
+never end-to-end wired: blue/green planner generation, IMMEDIATE mode, config-driven
+hooks, a first-class observability model, immutable plan artifacts, and full preview
+backend support. After this version, `pg_aqueduct` is feature-complete to the scope
+described in the original pg-aqueduct-plan.
+
+### Phase 16 — Blue/Green End-to-End, IMMEDIATE Mode & Advanced Features (6–8 weeks)
+
+#### Blue/Green End-to-End Implementation
+
+- [ ] **Wire blue/green planner generation from `--strategy blue-green` (M-01).**
+  `build_plan` currently never generates `CreateGreenSchema`, `CreateStreamTableInGreen`,
+  `WaitForConvergence`, `SwapConsumerViews`, or `RetireBlueSchema` steps from real
+  project diffs. Fix:
+  - Add `strategy: MigrationStrategy` (enum: `Default`, `BlueGreen`) to
+    `BuildPlanOptions`.
+  - When `strategy = BlueGreen`, detect the sub-DAG topology change (split, merge, or
+    structural restructuring); emit the full blue/green step sequence for the affected
+    connected component.
+  - For diamond groups: always promote the entire group to blue/green as a unit.
+  - Emit `CreateGreenSchema { name: "{project}__v{version}" }` as the first step.
+  - Emit `CreateStreamTableInGreen` for each node in migration order.
+  - Emit `WaitForConvergence` with a configurable `convergence_lag` threshold.
+  - Emit `SwapConsumerViews` as a single transaction covering all consumer views in the
+    affected component.
+  - Emit `RetireBlueSchema` scheduled after `--blue-ttl` (default 1 h).
+  - Add `--strategy blue-green` to `ApplyArgs`; update apply action accordingly.
+
+- [ ] **Implement `WaitForConvergence` with real pg_trickle API (M-02).** Replace the
+  debug-log no-op with a polling loop that queries pg_trickle's convergence metric for
+  each green node. Add a `convergence_lag` config key to `aqueduct.toml` (default: 30 s
+  max lag). Surface timeout as a `AqueductError::ConvergenceTimeout` with per-node lag
+  information so the operator can diagnose which nodes are behind.
+
+- [ ] **Add real blue/green integration tests.** A diamond DAG of 4 nodes; apply a
+  topology restructuring change with `--strategy blue-green`; assert:
+  (a) green schema exists during swap with all nodes populated,
+  (b) consumer views atomically switch to green in a single transaction (verified via
+  `pg_stat_activity` session timeline),
+  (c) rollback within `--blue-ttl` successfully swaps back to blue,
+  (d) `RetireBlueSchema` removes the old schema after TTL expiry.
+
+#### IMMEDIATE Mode Full Support
+
+- [ ] **Add `IMMEDIATE` to `RefreshMode` enum (M-03).** Extend `parser.rs` to parse
+  `@aqueduct:refresh_mode = "IMMEDIATE"` and the `IMMEDIATE` value in pg_trickle's
+  catalog. Add `RefreshMode::Immediate` to the `DagState` stream-table spec. Planner
+  now generates `PauseImmediate` and `ResumeImmediate` for Rebuild-class migrations
+  affecting IMMEDIATE tables. Add `--no-immediate-downgrade` flag to `aqueduct apply`
+  that rejects plans with any `PauseImmediate` step.
+
+- [ ] **Wire `PauseImmediate` and `ResumeImmediate` via the capability probe.** Call
+  `pgtrickle.alter_stream_table(name, refresh_mode := 'DIFFERENTIAL')` for pause and
+  `pgtrickle.alter_stream_table(name, refresh_mode := 'IMMEDIATE')` for resume.
+  Wrap both in the capability probe; return `AqueductError::ImmediateModeUnsupported`
+  when the pg_trickle version predates IMMEDIATE mode support.
+
+- [ ] **Add IMMEDIATE mode integration tests.** Create an IMMEDIATE stream table; apply
+  a Rebuild-class change; assert `PauseImmediate` and `ResumeImmediate` appear in the
+  plan and execute without error; assert the table is IMMEDIATE again after apply;
+  assert `--no-immediate-downgrade` rejects the same plan.
+
+#### Config-Driven Hooks
+
+- [ ] **Wire `RunHook` from `[apply.hooks]` config through planner (M-04).** Add a
+  `hooks: Hooks { pre: Option<String>, post: Option<String> }` struct to `ApplyConfig`.
+  When `hooks.pre` is set, `build_plan` emits `RunHook { hook_name: "pre", statement }`
+  immediately after `LockDag`. When `hooks.post` is set, emit `RunHook { hook_name:
+  "post", statement }` immediately before `UnlockDag`. The security policy from v1.1
+  (single non-DDL statement, audit log, allowlist) is enforced during planning.
+  Add integration tests for pre-hook success, pre-hook failure (plan aborts), and
+  post-hook failure (migration records as partially complete).
+
+#### Advanced Observability
+
+- [ ] **Add `aqueduct.migration_steps` catalog table (M-08).** Add the table in
+  `CATALOG_INIT_V2_SQL`:
+  ```sql
+  CREATE TABLE IF NOT EXISTS aqueduct.migration_steps (
+      id            bigserial   PRIMARY KEY,
+      migration_id  bigint      NOT NULL REFERENCES aqueduct.migrations(id),
+      step_index    int         NOT NULL,
+      step_type     text        NOT NULL,
+      step_hash     text        NOT NULL,
+      status        text        NOT NULL DEFAULT 'pending',
+      started_at    timestamptz,
+      finished_at   timestamptz,
+      error_message text,
+      UNIQUE (migration_id, step_index)
+  );
+  ```
+  Write a row for each step at start and finish. Expose the table via
+  `aqueduct status --verbose` and the `aqueduct.migration_history()` SQL view.
+
+- [ ] **Version JSON output schemas (M-12).** Add `"schema_version": 1` to every JSON
+  event emitted by the CLI. Publish the schema as `docs/cli-events-schema.json`.
+  Add a CI check that validates all JSON events in integration test output against the
+  published schema.
+
+#### Immutable Plan Artifacts
+
+- [ ] **Support `aqueduct plan --out plan.json` and `aqueduct apply --plan plan.json`
+  (M-09).** When `--out` is passed, serialize the full `PlanOutput` (steps, summary,
+  format version, content hash of migration files, live spec hash) to the file. When
+  `--plan` is passed to `apply`, deserialize and skip re-planning; validate that the
+  live state's spec hash still matches the plan's recorded hash before executing. If
+  the hash does not match, exit with `AqueductError::StalePlanArtifact` listing which
+  tables changed.
+
+#### Rollback Strategy by Change Class
+
+- [ ] **Render rollback-specific classifications (M-10, S-11 full).** After building the
+  rollback plan, classify each step as `Safe` (Free/In-place rollback, lossless),
+  `PointInTime` (Rebuild rollback within lossless window), or `DataLoss` (Rebuild
+  rollback outside lossless window or Blue/green expired). Render these classifications
+  in the rollback plan output. Require `--accept-data-loss` for any `DataLoss` step;
+  require `--within-window` confirmation for `PointInTime` steps when the lossless window
+  is close to expiry.
+
+#### Preview Backend Completions
+
+- [ ] **Implement CloudNativePG clone preview backend (M-05 partial).** Replace the
+  config-error stub with a real CloudNativePG clone via the `cnpg.io/v1` `Clone` API.
+  Requires `--cnpg-namespace` and `--cnpg-cluster` args. Tear down the clone on
+  `aqueduct preview --drop`.
+
+- [ ] **Implement Neon branch preview backend (M-05 partial).** Replace the stub with a
+  real Neon branch via the Neon management API. Requires `--neon-project-id` and
+  `NEON_API_KEY` env var. Delete the branch on `aqueduct preview --drop`.
+
+#### Import Baseline Snapshot
+
+- [ ] **Record a baseline DAG version on `aqueduct import` (M-06).** After writing
+  migration files and `aqueduct.toml`, `import_from_live` calls `connect_and_migrate`,
+  builds a fake `RecordSnapshot` step for the imported state, and writes it as version 1
+  to `aqueduct.dag_versions`. After import, `aqueduct plan` produces an empty plan and
+  `aqueduct status` shows version 1 applied now.
+
+#### Step Registry Enforcement (via v1.1 contract)
+
+- [ ] **Verify all previously-scaffolded step variants satisfy the v1.1 "done" definition.**
+  `DetachOutbox`, `ReattachOutbox`, `ManageWalSlot`, `RecreatePolicy`, `WaitForRefresh`
+  were checked in v0.9 but the planner never generated them. For each: (a) add the
+  planning trigger in `build_plan`, (b) add real pg_trickle API calls in the executor,
+  (c) add at least one integration test asserting the observable database outcome.
+
+**v1.3 release criteria.**
+- Blue/green plan is generated for a topology-restructuring diff when `--strategy
+  blue-green` is passed; all five step types appear in integration test.
+- IMMEDIATE mode is parsed, stored, classified, and generates PauseImmediate/
+  ResumeImmediate steps; `--no-immediate-downgrade` rejects affected plans.
+- Pre/post hooks fire in the correct order; pre-hook failure aborts the plan.
+- `aqueduct plan --out plan.json && aqueduct apply --plan plan.json` round-trips
+  correctly and rejects a stale plan artifact.
+- `aqueduct.migration_steps` rows are written for every step in integration tests.
+- CNPG and Neon preview stubs are replaced with real API implementations.
+- Import records version 1; subsequent plan is empty in integration test.
+- All v1.0–v1.2 tests continue to pass.
+
+---
+
+## v1.4 — Release Engineering
 
 **Target effort:** ~2 weeks.
-**Builds on:** v0.9 complete.
-**Milestone:** Public 1.0 release.
+**Builds on:** v1.3 complete.
+**Milestone:** Public 1.0 release — the first version declared production-ready.
 
 This version produces the release artefacts and performs the final gate checks needed
 for the public 1.0 announcement.
@@ -1508,7 +2292,7 @@ Every cookbook example in `docs/cookbook/` is run end-to-end against a Testconta
 cluster as part of the release gate. This supersedes the v0.7 claim of 30 verified
 cookbook patterns (which was incomplete — only ~15 integration scenarios existed).
 
-**v1.0 release criteria.**
+**v1.4 release criteria.**
 - Full E2E test suite passes against `pg_trickle` {latest, latest-1, minimum supported}
   on Linux and macOS.
 - All 30 cookbook patterns verified end-to-end as part of the CI release gate.
@@ -1517,13 +2301,15 @@ cookbook patterns (which was incomplete — only ~15 integration scenarios exist
 - `aqueduct plan` + `aqueduct apply` roundtrip verified against all 30 cookbook patterns.
 - No known data-loss bugs.
 - CHANGELOG accurately reflects all shipped features as released (not "planned").
+- All safety, documentation, compatibility, and advanced-feature work from v1.0–v1.3 is
+  verified end-to-end in the release CI pipeline.
 
 ---
 
-## v1.1 — Consumer Layer Management
+## v1.5 — Consumer Layer Management
 
-**Target effort:** TBD (post-v1.0).
-**Builds on:** v1.0 complete.
+**Target effort:** TBD (post-v1.4).
+**Builds on:** v1.4 complete.
 
 This version extends `pg_aqueduct`'s management scope to the consumer layer: the sinks
 and connectors that read from stream tables and relay their output to external systems.
@@ -1559,14 +2345,14 @@ their source stream tables, and their current drift status.
 
 ## v2.0 — Multi-Executor Support
 
-**Target effort:** TBD (post-v1.0).
-**Builds on:** v1.0 complete.
+**Target effort:** TBD (post-v1.4).
+**Builds on:** v1.4 complete.
 **Note:** The pluggable `StreamExecutor` trait (§7.7) is designed from v0.1 to
 accommodate these executors cleanly. v2.0 validates and ships the first non-pg_trickle
 executors.
 
 The following IVM systems are the hot-candidate executor targets. None are in scope
-before v1.0, but the trait boundary is designed so that each can be implemented without
+before v1.4, but the trait boundary is designed so that each can be implemented without
 restructuring the planning logic.
 
 ### RisingWave Executor
