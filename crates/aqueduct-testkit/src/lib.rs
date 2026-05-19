@@ -94,7 +94,7 @@ impl TestDb {
 }
 
 fn aqueduct_catalog_sql() -> &'static str {
-    // v2 catalog schema — keeps parity with aqueduct-core::catalog::CATALOG_INIT_V2_SQL.
+    // v3 catalog schema — keeps parity with aqueduct-core::catalog::CATALOG_INIT_V3_SQL.
     // Inlined here to avoid a circular crate dependency.
     r#"
 CREATE SCHEMA IF NOT EXISTS aqueduct;
@@ -121,7 +121,7 @@ CREATE TABLE IF NOT EXISTS aqueduct.migrations (
     progress        jsonb NOT NULL DEFAULT '{}',
     cli_version     text,
     plan_format_version int NOT NULL DEFAULT 1,
-    CONSTRAINT status_check CHECK (status IN ('running', 'committed', 'failed', 'rolled_back'))
+    CONSTRAINT status_check CHECK (status IN ('running', 'committed', 'failed', 'rolled_back', 'recoverable_failure'))
 );
 
 CREATE TABLE IF NOT EXISTS aqueduct.locks (
@@ -176,8 +176,16 @@ CREATE TABLE IF NOT EXISTS aqueduct.blue_green_deployments (
     CONSTRAINT bg_status_check CHECK (status IN ('active', 'swapped', 'retired', 'failed'))
 );
 
+CREATE TABLE IF NOT EXISTS aqueduct.stream_table_ownership (
+    project      text        NOT NULL,
+    schema_name  text        NOT NULL,
+    table_name   text        NOT NULL,
+    managed_since timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (schema_name, table_name)
+);
+
 INSERT INTO aqueduct.cluster_profile (key, value_jsonb, measured_at)
-VALUES ('catalog_schema_version', '2'::jsonb, now())
+VALUES ('catalog_schema_version', '3'::jsonb, now())
 ON CONFLICT (key) DO NOTHING;
 "#
 }
