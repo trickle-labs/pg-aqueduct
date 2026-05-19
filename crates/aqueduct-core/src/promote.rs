@@ -52,7 +52,7 @@ pub async fn compute_promotion_plan(
     let desired = build_dag_state(files, true)?;
 
     // Read the live state from the destination environment.
-    let actual = read_live_state(client).await?;
+    let actual = read_live_state(client, None).await?;
 
     // Get the current DAG version from the destination.
     let current_version = get_latest_dag_version(client, &options.project).await?;
@@ -83,7 +83,7 @@ pub async fn validate_source_clean(
     project: &str,
 ) -> Result<()> {
     let desired = build_dag_state(files, false)?;
-    let actual = read_live_state(source_client).await?;
+    let actual = read_live_state(source_client, None).await?;
     let diff = compute_diff(&desired, &actual);
 
     if !diff.is_empty() {

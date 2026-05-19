@@ -89,7 +89,7 @@ pub async fn run(args: PlanArgs) -> anyhow::Result<()> {
     }
 
     // Read actual live state.
-    let actual = read_live_state(&client).await?;
+    let actual = read_live_state(&client, Some(&project_name)).await?;
 
     // Get current version.
     let current_version =

@@ -49,7 +49,8 @@ fn render_plan_text_inner(
         return out;
     }
 
-    let total_changes = plan.summary.creates + plan.summary.drops + plan.summary.alters;
+    // C-11: Use total_changes() which includes consumer view deltas.
+    let total_changes = plan.summary.total_changes();
     out.push_str(&format!(
         "Changes  {} node{} affected\n\n",
         total_changes,

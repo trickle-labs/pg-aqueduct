@@ -2,7 +2,13 @@ use crate::dag::{ConsumerSpec, DagState, QualifiedName, RefreshMode, StreamTable
 use crate::error::Result;
 
 /// Read the live stream-table state from the pg_trickle catalog.
-pub async fn read_live_state(client: &tokio_postgres::Client) -> Result<DagState> {
+///
+/// When `project` is `Some(p)`, only stream tables registered in
+/// `aqueduct.stream_table_ownership` for that project are returned (C-06).
+pub async fn read_live_state(
+    client: &tokio_postgres::Client,
+    project: Option<&str>,
+) -> Result<DagState> {
     // Check if pg_trickle is installed by looking for the pgtrickle schema.
     let pgtrickle_exists: bool = client
         .query_one(
@@ -16,22 +22,66 @@ pub async fn read_live_state(client: &tokio_postgres::Client) -> Result<DagState
         return Ok(DagState::default());
     }
 
-    let rows = client
-        .query(
-            r#"
-            SELECT
-                schema_name,
-                table_name,
-                query,
-                refresh_mode,
-                schedule,
-                cdc_mode
-            FROM pgtrickle.pgt_stream_tables
-            ORDER BY schema_name, table_name
-            "#,
-            &[],
-        )
-        .await?;
+    let rows = if let Some(proj) = project {
+        // C-06: filter by project via the ownership catalog table.
+        let ownership_exists: bool = client
+            .query_one(
+                "SELECT EXISTS (
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_schema = 'aqueduct'
+                      AND table_name   = 'stream_table_ownership'
+                )",
+                &[],
+            )
+            .await?
+            .get(0);
+
+        if ownership_exists {
+            client
+                .query(
+                    r#"
+                    SELECT
+                        s.schema_name,
+                        s.table_name,
+                        s.query,
+                        s.refresh_mode,
+                        s.schedule,
+                        s.cdc_mode
+                    FROM pgtrickle.pgt_stream_tables s
+                    JOIN aqueduct.stream_table_ownership o
+                      ON o.schema_name = s.schema_name
+                     AND o.table_name  = s.table_name
+                     AND o.project     = $1
+                    ORDER BY s.schema_name, s.table_name
+                    "#,
+                    &[&proj],
+                )
+                .await?
+        } else {
+            // Ownership table not yet created (fresh install) — return all.
+            client
+                .query(
+                    r#"
+                    SELECT schema_name, table_name, query, refresh_mode, schedule, cdc_mode
+                    FROM pgtrickle.pgt_stream_tables
+                    ORDER BY schema_name, table_name
+                    "#,
+                    &[],
+                )
+                .await?
+        }
+    } else {
+        client
+            .query(
+                r#"
+                SELECT schema_name, table_name, query, refresh_mode, schedule, cdc_mode
+                FROM pgtrickle.pgt_stream_tables
+                ORDER BY schema_name, table_name
+                "#,
+                &[],
+            )
+            .await?
+    };
 
     let mut stream_tables = Vec::new();
     for row in rows {
@@ -56,18 +106,55 @@ pub async fn read_live_state(client: &tokio_postgres::Client) -> Result<DagState
         });
     }
 
-    // Read live consumer views from the aqueduct catalog if it exists.
-    let consumers = read_live_consumers(client).await.unwrap_or_default();
+    // C-05: Read sources from the last recorded spec_jsonb so base-table DDL
+    // changes are accurately reflected.
+    let sources = if let Some(proj) = project {
+        read_live_sources(client, proj).await.unwrap_or_default()
+    } else {
+        vec![]
+    };
+
+    // C-07: filter consumers by project too.
+    let consumers = read_live_consumers(client, project).await.unwrap_or_default();
 
     Ok(DagState {
         stream_tables,
-        sources: vec![],
+        sources,
         consumers,
     })
 }
 
+/// Read source (base-table) DDL from the last recorded `spec_jsonb` for a project (C-05).
+async fn read_live_sources(
+    client: &tokio_postgres::Client,
+    project: &str,
+) -> Result<Vec<crate::dag::SourceSpec>> {
+    let row = client
+        .query_opt(
+            "SELECT spec_jsonb FROM aqueduct.dag_versions \
+             WHERE project = $1 ORDER BY version DESC LIMIT 1",
+            &[&project],
+        )
+        .await?;
+
+    let Some(r) = row else {
+        return Ok(vec![]);
+    };
+
+    let spec_json: serde_json::Value = r.get(0);
+    // Deserialise into a DagState and extract sources.
+    if let Ok(dag_state) = serde_json::from_value::<DagState>(spec_json) {
+        return Ok(dag_state.sources);
+    }
+    Ok(vec![])
+}
+
 /// Read live consumer views from the aqueduct catalog.
-async fn read_live_consumers(client: &tokio_postgres::Client) -> Result<Vec<ConsumerSpec>> {
+/// When `project` is Some, only views belonging to that project are returned (C-07).
+async fn read_live_consumers(
+    client: &tokio_postgres::Client,
+    project: Option<&str>,
+) -> Result<Vec<ConsumerSpec>> {
     // Check if the consumer_views table exists.
     let table_exists: bool = client
         .query_one(
@@ -84,12 +171,25 @@ async fn read_live_consumers(client: &tokio_postgres::Client) -> Result<Vec<Cons
         return Ok(vec![]);
     }
 
-    let rows = client
-        .query(
-            "SELECT name, expose_as, source, sql_body FROM aqueduct.consumer_views ORDER BY name",
-            &[],
-        )
-        .await?;
+    let rows = if let Some(proj) = project {
+        // C-07: filter by project.
+        client
+            .query(
+                "SELECT name, expose_as, source, sql_body \
+                 FROM aqueduct.consumer_views \
+                 WHERE project = $1 \
+                 ORDER BY name",
+                &[&proj],
+            )
+            .await?
+    } else {
+        client
+            .query(
+                "SELECT name, expose_as, source, sql_body FROM aqueduct.consumer_views ORDER BY name",
+                &[],
+            )
+            .await?
+    };
 
     let consumers = rows
         .iter()
@@ -113,7 +213,24 @@ async fn read_live_consumers(client: &tokio_postgres::Client) -> Result<Vec<Cons
 
 /// Check the pg_trickle version installed on the target database.
 /// Returns the version string, or None if pg_trickle is not installed.
+///
+/// C-09: First probe with `to_regprocedure` to avoid a panic if the function
+/// does not exist.
 pub async fn check_pgtrickle_version(client: &tokio_postgres::Client) -> Result<Option<String>> {
+    // Probe whether the function exists before calling it.
+    let exists: bool = client
+        .query_one(
+            "SELECT to_regprocedure('pgtrickle.pgt_extension_version()') IS NOT NULL",
+            &[],
+        )
+        .await
+        .map(|r| r.get::<_, bool>(0))
+        .unwrap_or(false);
+
+    if !exists {
+        return Ok(None);
+    }
+
     let row = client
         .query_opt("SELECT pgtrickle.pgt_extension_version()", &[])
         .await?;

@@ -85,10 +85,15 @@ pub fn classify_delta(delta: &NodeDelta) -> MigrationClass {
             }
         }
 
-        DeltaKind::AlterQuery => classify_query_change(
-            delta.desired.as_ref().unwrap(),
-            delta.actual.as_ref().unwrap(),
-        ),
+        DeltaKind::AlterQuery => {
+            // C-10: Use safe fallbacks instead of panicking .unwrap() calls.
+            // A missing desired or actual spec means we can't prove safety →
+            // conservatively classify as Rebuild.
+            match (delta.desired.as_ref(), delta.actual.as_ref()) {
+                (Some(desired), Some(actual)) => classify_query_change(desired, actual),
+                _ => MigrationClass::Rebuild,
+            }
+        }
     }
 }
 

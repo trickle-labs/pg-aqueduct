@@ -14,6 +14,12 @@ pub struct DestroyOptions {
     pub project: String,
     /// If true, only compute what would be done without executing.
     pub dry_run: bool,
+    /// If true, allow CASCADE on the DROP TABLE (removes dependent objects).
+    /// By default, DROP TABLE refuses if there are dependents (S-10).
+    pub force_cascade: bool,
+    /// If true, skip ownership verification and drop tables not in this
+    /// project's ownership registry (C-06).
+    pub force_unowned: bool,
 }
 
 /// Summary of what was (or would be) destroyed.
@@ -58,7 +64,45 @@ pub async fn destroy_project(
     }
 
     // Read the live state to find managed stream tables.
-    let live = read_live_state(client).await?;
+    // C-06: filter by project so we only touch this project's tables.
+    let live = read_live_state(client, Some(&options.project)).await?;
+
+    // C-06: Verify ownership for each stream table before dropping.
+    // If `force_unowned` is false, reject any table not owned by this project.
+    if !options.force_unowned {
+        let ownership_exists: bool = client
+            .query_one(
+                "SELECT EXISTS (
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_schema = 'aqueduct'
+                      AND table_name   = 'stream_table_ownership'
+                )",
+                &[],
+            )
+            .await?
+            .get(0);
+
+        if ownership_exists {
+            for table in &live.stream_tables {
+                let owner: Option<String> = client
+                    .query_opt(
+                        "SELECT project FROM aqueduct.stream_table_ownership \
+                         WHERE schema_name = $1 AND table_name = $2",
+                        &[&table.qualified_name.schema, &table.qualified_name.name],
+                    )
+                    .await?
+                    .map(|r| r.get(0));
+                match owner {
+                    Some(ref o) if o != &options.project => {
+                        return Err(AqueductError::OwnershipRequired {
+                            table: table.qualified_name.to_string(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
 
     // Compute reverse topological order for safe drops.
     let topo_names = crate::dag::topological_sort(&live)?;
@@ -122,17 +166,34 @@ pub async fn destroy_project(
                 .await
                 .ok(); // Best-effort; table may already be gone.
         } else {
-            client
+            // S-10: No CASCADE by default to avoid silently destroying
+            // dependent objects. Use `--force-cascade` to opt in.
+            let cascade_clause = if options.force_cascade { " CASCADE" } else { "" };
+            if let Err(e) = client
                 .execute(
                     &format!(
-                        "DROP TABLE IF EXISTS {}.{} CASCADE",
+                        "DROP TABLE IF EXISTS {}.{}{}",
                         quote_ident(&name.schema),
-                        quote_ident(&name.name)
+                        quote_ident(&name.name),
+                        cascade_clause,
                     ),
                     &[],
                 )
                 .await
-                .ok();
+            {
+                // If the error is about dependent objects and cascade is not enabled,
+                // return a clear error message.
+                if !options.force_cascade
+                    && e.to_string().contains("depends on")
+                {
+                    return Err(AqueductError::Other(format!(
+                        "Cannot drop '{}': dependent objects exist. \
+                         Use --force-cascade to also drop them.",
+                        name
+                    )));
+                }
+                tracing::warn!("DROP TABLE '{}' failed (continuing): {}", name, e);
+            }
         }
         dropped_tables.push(name.clone());
     }
@@ -150,7 +211,7 @@ pub async fn destroy_project(
         client
             .execute(
                 &format!(
-                    "DROP VIEW IF EXISTS {}.{} CASCADE",
+                    "DROP VIEW IF EXISTS {}.{}",
                     quote_ident(schema),
                     quote_ident(view)
                 ),
@@ -214,6 +275,15 @@ pub async fn destroy_project(
         .unwrap_or(0);
     catalog_deleted += ver_del as usize;
 
+    // Delete stream_table_ownership rows (best-effort; table may not exist in v2 catalogs).
+    client
+        .execute(
+            "DELETE FROM aqueduct.stream_table_ownership WHERE project = $1",
+            &[&options.project],
+        )
+        .await
+        .ok();
+
     Ok(DestroyResult {
         stream_tables_dropped: dropped_tables,
         consumer_views_dropped: dropped_views,
@@ -236,6 +306,8 @@ mod tests {
         let opts = DestroyOptions {
             project: "test".to_string(),
             dry_run: true,
+            force_cascade: false,
+            force_unowned: false,
         };
         assert!(opts.dry_run);
     }

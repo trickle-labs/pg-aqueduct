@@ -11,6 +11,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [v0.1.0 — Initial Implementation](#v010--initial-implementation)
 - [v0.8.0 — Core Correctness & Safety Hardening](#v080--core-correctness--safety-hardening)
 - [v0.9.0 — Feature Completeness & Ergonomics](#v090--feature-completeness--ergonomics)
+- [v0.10.0 — Safety Contract Repair & Multi-Project Isolation](#v0100--safety-contract-repair--multi-project-isolation)
 
 **Planned**
 - [v0.2.0 — Online Schema Evolution](#v020--online-schema-evolution)
@@ -23,6 +24,104 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 **Archive**
 - [Unreleased — Repository Bootstrap](#unreleased--repository-bootstrap)
 <!-- TOC end -->
+
+---
+
+## [v0.10.0] — Safety Contract Repair & Multi-Project Isolation
+
+**Status:** Released
+
+All roadmap items for v0.10 "Phase 13 — Safety Contract Repair & Multi-Project
+Isolation" are complete. This release repairs the safety contract (lock lifecycle,
+resume, heartbeat, scheduler pause ordering) and establishes the multi-project
+isolation invariant required for shared PostgreSQL deployments.
+
+### What's new
+
+**Critical Correctness Fixes**
+
+- **C-01 / C-11:** Consumer-only plans are no longer silently skipped as no-ops.
+  `PlanSummary` now tracks `consumer_creates`, `consumer_drops`, and `consumer_alters`
+  separately; `is_empty()` and `total_changes()` include consumer deltas. All renderer
+  totals updated.
+
+- **C-03:** `RecordSnapshot` now uses `query_one` with `RETURNING version` to capture
+  the actual bigserial value assigned by the database instead of recording the planned
+  version number.
+
+- **C-04:** Backfill steps are documented as "Triggered by pg_trickle on table
+  creation — no explicit wait" in renderers and log messages.
+
+- **C-05:** `read_live_state()` now populates `sources` by deserialising the latest
+  `spec_jsonb` from `aqueduct.dag_versions` instead of always returning `vec![]`.
+
+- **C-06 / C-07:** `read_live_state()` and `read_live_consumers()` both accept an
+  optional `project` parameter and filter results via the new
+  `aqueduct.stream_table_ownership` table. `destroy_project` verifies ownership before
+  dropping any table; use `--force-unowned` to bypass.
+
+- **C-09:** `check_pgtrickle_version()` probes `to_regprocedure(...)` before calling
+  the function to avoid a database error when pg_trickle is absent.
+
+- **C-10:** `classify_delta()` no longer panics on missing `desired`/`actual` in the
+  `AlterQuery` arm; returns `Rebuild` instead.
+
+- **C-12:** `read_live_state()` project filter enables `diff --from last-applied` and
+  `diff --from desired` modes.
+
+**Safety & Idempotency Fixes**
+
+- **S-01 / S-02:** Failed migrations are now marked `recoverable_failure` and can be
+  resumed. On resume, `LockDag` always re-executes — DDL steps are only skipped for
+  steps already confirmed complete in the checkpoint.
+
+- **S-03:** Scheduler pause now happens inside the `LockDag` executor arm, after the
+  lock is acquired, preventing a pre-lock pause from affecting other projects.
+
+- **S-04:** Heartbeat SQL is now holder-bound
+  (`WHERE project = $1 AND holder = $2`). Zero rows affected is detected and logged as
+  a lock-stolen warning.
+
+- **S-05:** The project lock is released on all exit paths (success and error) via an
+  explicit cleanup block after the step loop.
+
+- **S-06:** Step progress checkpoint writes are now fatal — a failed write returns an
+  error rather than silently continuing.
+
+- **S-07:** `aqueduct apply --dry-run` uses a plain connection (no catalog migration)
+  to avoid upgrading the schema during previews.
+
+- **S-10:** `DROP TABLE` fallback in `destroy` and the executor no longer uses
+  `CASCADE`. Dependent objects must be dropped manually; use `--force-cascade` to
+  opt in.
+
+- **S-11:** `aqueduct rollback` now enforces the `--accept-data-loss` flag when the
+  rollback plan contains rebuild-class steps.
+
+- **S-12:** First-time stream table creations increment `create_count` and not
+  `rebuild_count`, preventing false-positive maintenance-window blocking on initial
+  deployments.
+
+- **S-13:** Lock holder string is now `aqueduct/{version}/{hostname}/{pid}/{ts}`
+  making concurrent processes distinguishable.
+
+- **S-14:** Scheduler pause failure is now a fatal error by default.
+
+**Catalog Schema v3**
+
+- Added `aqueduct.stream_table_ownership(project, schema_name, table_name, managed_since)`
+  table with a `PRIMARY KEY (schema_name, table_name)` constraint.
+- `status_check` constraint on `aqueduct.migrations` now includes `recoverable_failure`.
+- Auto-migration from v2 to v3 applied on `connect_and_migrate`.
+
+**New Tests (6)**
+
+- `test_consumer_only_apply_end_to_end`: consumer view create with no stream table changes.
+- `test_concurrent_apply_race`: two applies, second gets `LockContention`.
+- `test_stale_plan_detection`: plan from_version mismatch vs DB version.
+- `test_two_project_isolation`: destroy project A, project B tables intact.
+- `test_resume_skips_non_safety_steps`: LockDag always at index 0.
+- `test_heartbeat_lock_is_holder_bound`: wrong holder returns 0 rows.
 
 ---
 

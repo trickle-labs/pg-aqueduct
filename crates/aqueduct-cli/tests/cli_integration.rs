@@ -114,7 +114,7 @@ async fn test_end_to_end_lifecycle() {
         aqueduct_core::parser::load_migrations(tmp.path(), &std::collections::HashMap::new())
             .unwrap();
     let desired = aqueduct_core::dag::build_dag_state(&files, true).unwrap();
-    let actual = aqueduct_core::live_state::read_live_state(&db.client)
+    let actual = aqueduct_core::live_state::read_live_state(&db.client, None)
         .await
         .unwrap();
     let diff = aqueduct_core::diff::compute_diff(&desired, &actual);
@@ -138,7 +138,7 @@ async fn test_end_to_end_lifecycle() {
     assert_eq!(count, 1);
 
     // Plan again: should be a no-op.
-    let actual2 = aqueduct_core::live_state::read_live_state(&db.client)
+    let actual2 = aqueduct_core::live_state::read_live_state(&db.client, None)
         .await
         .unwrap();
     let diff2 = aqueduct_core::diff::compute_diff(&desired, &actual2);
@@ -161,7 +161,7 @@ async fn test_plan_renderer() {
     .unwrap();
 
     let desired = aqueduct_core::dag::build_dag_state(&[file], false).unwrap();
-    let actual = aqueduct_core::live_state::read_live_state(&db.client)
+    let actual = aqueduct_core::live_state::read_live_state(&db.client, None)
         .await
         .unwrap();
     let diff = aqueduct_core::diff::compute_diff(&desired, &actual);
@@ -366,7 +366,7 @@ async fn test_plan_renderer_with_cost() {
     .unwrap();
 
     let desired = aqueduct_core::dag::build_dag_state(&[file], false).unwrap();
-    let actual = aqueduct_core::live_state::read_live_state(&db.client)
+    let actual = aqueduct_core::live_state::read_live_state(&db.client, None)
         .await
         .unwrap();
     let diff = aqueduct_core::diff::compute_diff(&desired, &actual);
@@ -409,7 +409,7 @@ SELECT customer_id, total FROM public.order_totals;
     let desired = aqueduct_core::dag::build_dag_state(&[consumer_file], false).unwrap();
     assert_eq!(desired.consumers.len(), 1);
 
-    let actual = aqueduct_core::live_state::read_live_state(&db.client)
+    let actual = aqueduct_core::live_state::read_live_state(&db.client, None)
         .await
         .unwrap();
     let diff = aqueduct_core::diff::compute_diff(&desired, &actual);
@@ -1081,7 +1081,7 @@ async fn test_destroy_project_dry_run_cli() {
     .unwrap();
 
     let desired = aqueduct_core::dag::build_dag_state(&[file], false).unwrap();
-    let actual = aqueduct_core::live_state::read_live_state(&db.client)
+    let actual = aqueduct_core::live_state::read_live_state(&db.client, None)
         .await
         .unwrap();
     let diff = aqueduct_core::diff::compute_diff(&desired, &actual);

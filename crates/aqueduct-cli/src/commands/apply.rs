@@ -52,7 +52,13 @@ pub async fn run(args: ApplyArgs) -> anyhow::Result<()> {
     let dsn =
         super::resolve_dsn(args.dsn.as_deref(), args.to.as_deref(), &args.project_dir).await?;
 
-    let client = super::connect_and_migrate(&dsn).await?;
+    // S-07: For dry-run mode, use a plain connect() to avoid accidentally
+    // upgrading the catalog schema when only previewing.
+    let client = if args.dry_run {
+        super::connect(&dsn).await?
+    } else {
+        super::connect_and_migrate(&dsn).await?
+    };
 
     // Load config.
     let config = AqueductConfig::load(&args.project_dir).ok();
@@ -73,7 +79,7 @@ pub async fn run(args: ApplyArgs) -> anyhow::Result<()> {
     // Read migration files.
     let files = aqueduct_core::parser::load_migrations(&args.project_dir, &vars)?;
     let desired = build_dag_state(&files, true)?;
-    let actual = read_live_state(&client).await?;
+    let actual = read_live_state(&client, Some(&project_name)).await?;
 
     let current_version =
         aqueduct_core::live_state::get_latest_dag_version(&client, &project_name).await?;
