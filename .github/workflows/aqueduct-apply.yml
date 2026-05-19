@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: production   # optional: require manual approval in GitHub Environments
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Apply migrations
         uses: trickle-labs/pg-aqueduct/.github/actions/apply@v0.4.0

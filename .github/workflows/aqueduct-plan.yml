@@ -19,7 +19,7 @@ jobs:
   plan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Run aqueduct plan
         uses: trickle-labs/pg-aqueduct/.github/actions/plan@v0.4.0
