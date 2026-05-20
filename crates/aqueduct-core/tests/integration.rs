@@ -5101,7 +5101,10 @@ async fn test_v015_catalog_schema_validation() {
     assert!(CatalogSchema::new("UPPER").is_ok(), "uppercase letters");
 
     // Invalid: empty.
-    assert!(CatalogSchema::new("").is_err(), "empty name must be rejected");
+    assert!(
+        CatalogSchema::new("").is_err(),
+        "empty name must be rejected"
+    );
 
     // Invalid: SQL injection markers.
     assert!(
@@ -5166,8 +5169,14 @@ async fn test_v015_multi_schema_isolation() {
     let sql_a = CATALOG_INIT_V5_SQL.replace("aqueduct", "aqueduct_a");
     let sql_b = CATALOG_INIT_V5_SQL.replace("aqueduct", "aqueduct_b");
 
-    db.client.batch_execute(&sql_a).await.expect("init aqueduct_a");
-    db.client.batch_execute(&sql_b).await.expect("init aqueduct_b");
+    db.client
+        .batch_execute(&sql_a)
+        .await
+        .expect("init aqueduct_a");
+    db.client
+        .batch_execute(&sql_b)
+        .await
+        .expect("init aqueduct_b");
 
     // Insert a migration row into aqueduct_a.
     db.client
@@ -5187,7 +5196,10 @@ async fn test_v015_multi_schema_isolation() {
         .await
         .expect("count aqueduct_b migrations")
         .get(0);
-    assert_eq!(count_b, 0, "ARCH-1: aqueduct_b must not see aqueduct_a rows");
+    assert_eq!(
+        count_b, 0,
+        "ARCH-1: aqueduct_b must not see aqueduct_a rows"
+    );
 
     // aqueduct_a must have the row.
     let count_a: i64 = db
@@ -5199,7 +5211,10 @@ async fn test_v015_multi_schema_isolation() {
         .await
         .expect("count aqueduct_a migrations")
         .get(0);
-    assert_eq!(count_a, 1, "ARCH-1: aqueduct_a must contain the inserted row");
+    assert_eq!(
+        count_a, 1,
+        "ARCH-1: aqueduct_a must contain the inserted row"
+    );
 }
 
 /// CORR-2 (v0.15): A compensating step (DROP) is written to aqueduct.ddl_log
@@ -5342,8 +5357,7 @@ SELECT 1 AS id;
         .iter()
         .map(|t| t.qualified_name.clone())
         .collect();
-    let plan_v1 =
-        build_plan("rls-rebuild-proj", None, 1, &diff_v1, &topo_v1).expect("plan v1");
+    let plan_v1 = build_plan("rls-rebuild-proj", None, 1, &diff_v1, &topo_v1).expect("plan v1");
 
     PlanExecutor::new(&db.client, "rls-rebuild-proj", "0.15.0", false)
         .with_desired_state(desired_v1.clone())
@@ -5481,7 +5495,10 @@ SELECT 1 AS x
             .iter()
             .any(|s| matches!(s, PlanStep::StartBlueGreenDeployment { .. })),
         "ARCH-3: blue/green plan must include StartBlueGreenDeployment step; steps: {:?}",
-        plan.steps.iter().map(|s| s.description()).collect::<Vec<_>>()
+        plan.steps
+            .iter()
+            .map(|s| s.description())
+            .collect::<Vec<_>>()
     );
 }
 
@@ -5534,9 +5551,8 @@ SELECT 1 AS x
         strategy: MigrationStrategy::BlueGreen,
         ..Default::default()
     };
-    let plan =
-        build_plan_with_options("bg-lifecycle-proj", None, 1, &diff, &topo, &opts)
-            .expect("build plan");
+    let plan = build_plan_with_options("bg-lifecycle-proj", None, 1, &diff, &topo, &opts)
+        .expect("build plan");
 
     // Apply the full blue/green plan.
     PlanExecutor::new(&db.client, "bg-lifecycle-proj", "0.15.0", false)
@@ -5616,14 +5632,15 @@ async fn test_v015_blue_green_swap_is_all_or_nothing() {
     );
 
     // Execute a successful transaction swap: swap the view to green_atomic.
-    db.client.batch_execute(
-        "BEGIN; \
+    db.client
+        .batch_execute(
+            "BEGIN; \
          CREATE OR REPLACE VIEW reporting_atomic.src_view AS \
            SELECT * FROM green_atomic.src_table_atomic; \
          COMMIT;",
-    )
-    .await
-    .expect("swap to green_atomic");
+        )
+        .await
+        .expect("swap to green_atomic");
 
     // View must now point to green_atomic.
     let swapped_def: String = db
@@ -5642,14 +5659,15 @@ async fn test_v015_blue_green_swap_is_all_or_nothing() {
     );
 
     // Now simulate a failed swap (ROLLBACK) — view should stay on green_atomic.
-    db.client.batch_execute(
-        "BEGIN; \
+    db.client
+        .batch_execute(
+            "BEGIN; \
          CREATE OR REPLACE VIEW reporting_atomic.src_view AS \
            SELECT * FROM public.src_table_atomic; \
          ROLLBACK;",
-    )
-    .await
-    .expect("rolled-back swap");
+        )
+        .await
+        .expect("rolled-back swap");
 
     // View must still point to green_atomic (ROLLBACK preserved state).
     let after_rollback_def: String = db
@@ -5707,8 +5725,7 @@ SELECT 1 AS x
         convergence_timeout_secs: 60,
         ..Default::default()
     };
-    let plan =
-        build_plan_with_options("perf1-proj", None, 1, &diff, &topo, &opts).expect("plan");
+    let plan = build_plan_with_options("perf1-proj", None, 1, &diff, &topo, &opts).expect("plan");
 
     // WaitForConvergence step must carry the configured poll interval.
     let convergence_step = plan
@@ -5751,7 +5768,10 @@ async fn test_v015_validate_migration_files_diagnostic_structured_errors() {
     );
 
     let first = &diagnostics.diagnostics[0];
-    assert_eq!(first.code, "E101", "M6: error code must be E101 for SQL syntax errors");
+    assert_eq!(
+        first.code, "E101",
+        "M6: error code must be E101 for SQL syntax errors"
+    );
     assert!(
         first.message.contains("bad_query") || !first.message.is_empty(),
         "M6: diagnostic must have a non-empty message"
@@ -5835,7 +5855,9 @@ async fn test_v015_catalog_v7_migration() {
     use aqueduct_core::catalog::ensure_catalog_current;
 
     let db = TestDb::new().await.expect("start test db");
-    db.install_aqueduct_catalog().await.expect("init v5 catalog");
+    db.install_aqueduct_catalog()
+        .await
+        .expect("init v5 catalog");
 
     // Before migration: catalog is at v5.
     let version_before: i32 = db
@@ -5864,7 +5886,10 @@ async fn test_v015_catalog_v7_migration() {
         .await
         .expect("version after")
         .get(0);
-    assert_eq!(version_after, 7, "ARCH-1: catalog must be at v7 after migration");
+    assert_eq!(
+        version_after, 7,
+        "ARCH-1: catalog must be at v7 after migration"
+    );
 
     // The ddl_log table must have migration_id and compensating_sql columns.
     let ddl_log_cols: Vec<String> = db

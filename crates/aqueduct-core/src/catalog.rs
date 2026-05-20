@@ -27,10 +27,7 @@ impl CatalogSchema {
             )));
         }
         // Only allow valid PostgreSQL identifier characters.
-        if !name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
-        {
+        if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
             return Err(crate::error::AqueductError::Other(format!(
                 "catalog schema name '{}' contains non-identifier characters \
                  (only letters, digits, and '_' are allowed)",
@@ -38,7 +35,12 @@ impl CatalogSchema {
             )));
         }
         // Must not start with a digit.
-        if name.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+        if name
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(false)
+        {
             return Err(crate::error::AqueductError::Other(format!(
                 "catalog schema name '{}' must not start with a digit",
                 name

@@ -280,16 +280,20 @@ pub fn validate_dag_diagnostic(state: &DagState) -> DiagnosticSet {
 
     // Check for cycles.
     if let Err(e) = crate::dag::topological_sort(state) {
-        set.push(Diagnostic::error("E201", format!("Dependency cycle detected: {}", e)));
+        set.push(Diagnostic::error(
+            "E201",
+            format!("Dependency cycle detected: {}", e),
+        ));
     }
 
     // Validate each stream table's query.
     for table in &state.stream_tables {
         if !table.query.is_empty() {
             if let Err(e) = validate_sql_syntax(&table.query, &table.qualified_name.to_string()) {
-                set.push(
-                    Diagnostic::error("E202", format!("{}: {}", table.qualified_name, e))
-                );
+                set.push(Diagnostic::error(
+                    "E202",
+                    format!("{}: {}", table.qualified_name, e),
+                ));
             }
         }
     }
