@@ -5869,7 +5869,10 @@ async fn test_v015_catalog_v7_migration() {
         .await
         .expect("version before")
         .get(0);
-    assert_eq!(version_before, 8, "catalog must start at v8 (current version)");
+    assert_eq!(
+        version_before, 8,
+        "catalog must start at v8 (current version)"
+    );
 
     // ensure_catalog_current must be idempotent when already at v8.
     ensure_catalog_current(&db.client)
@@ -5934,9 +5937,8 @@ async fn test_v015_catalog_v7_migration() {
 async fn test_v017_catalog_v8_migration() {
     use aqueduct_core::catalog::{
         ensure_catalog_current, CATALOG_INIT_SQL, CATALOG_MIGRATE_V1_TO_V2_SQL,
-        CATALOG_MIGRATE_V2_TO_V3_SQL, CATALOG_MIGRATE_V3_TO_V4_SQL,
-        CATALOG_MIGRATE_V4_TO_V5_SQL, CATALOG_MIGRATE_V5_TO_V6_SQL,
-        CATALOG_MIGRATE_V6_TO_V7_SQL,
+        CATALOG_MIGRATE_V2_TO_V3_SQL, CATALOG_MIGRATE_V3_TO_V4_SQL, CATALOG_MIGRATE_V4_TO_V5_SQL,
+        CATALOG_MIGRATE_V5_TO_V6_SQL, CATALOG_MIGRATE_V6_TO_V7_SQL,
     };
 
     let db = TestDb::new().await.expect("start test db");
