@@ -85,7 +85,7 @@ impl std::fmt::Display for CatalogSchema {
 /// SQL statements for bootstrapping the aqueduct catalog schema.
 /// These are embedded directly in the binary via include_str!() in a real deployment;
 /// for v0.1 we keep them as a constant in this module.
-pub const CATALOG_SCHEMA_VERSION: u32 = 7;
+pub const CATALOG_SCHEMA_VERSION: u32 = 8;
 
 /// The SQL to create the aqueduct catalog schema (v1, baseline).
 pub const CATALOG_INIT_SQL: &str = r#"
@@ -312,7 +312,7 @@ CREATE TABLE IF NOT EXISTS aqueduct.migrations (
     progress        jsonb NOT NULL DEFAULT '{}',
     cli_version     text,
     plan_format_version int NOT NULL DEFAULT 1,
-    CONSTRAINT status_check CHECK (status IN ('running', 'committed', 'failed', 'rolled_back', 'recoverable_failure'))
+    CONSTRAINT status_check CHECK (status IN ('running', 'committed', 'failed', 'rolled_back', 'recoverable_failure', 'interrupted'))
 );
 
 -- Per-step execution tracking for advanced observability (M-08 / v0.13).
@@ -412,11 +412,34 @@ CREATE INDEX IF NOT EXISTS aqueduct_locks_project
 CREATE INDEX IF NOT EXISTS aqueduct_migration_steps_migration
     ON aqueduct.migration_steps (migration_id, step_index);
 
+-- Migration history view: human-readable table of migrations with step detail.
+CREATE OR REPLACE VIEW aqueduct.migration_history AS
+SELECT
+    m.id          AS migration_id,
+    m.project,
+    m.status,
+    m.started_at,
+    m.finished_at,
+    dv.version    AS to_version,
+    m.cli_version,
+    COUNT(ms.id)  AS step_count,
+    SUM(CASE WHEN ms.status = 'failed' THEN 1 ELSE 0 END) AS failed_steps,
+    MAX(ms.error_message) AS last_error
+FROM aqueduct.migrations m
+LEFT JOIN aqueduct.dag_versions dv ON dv.version = m.to_version
+LEFT JOIN aqueduct.migration_steps ms ON ms.migration_id = m.id
+GROUP BY m.id, m.project, m.status, m.started_at, m.finished_at, dv.version, m.cli_version
+ORDER BY m.started_at DESC;
+
 -- Record the catalog schema version.
 INSERT INTO aqueduct.cluster_profile (key, value_jsonb, measured_at)
-VALUES ('catalog_schema_version', '5'::jsonb, now())
+VALUES ('catalog_schema_version', '8'::jsonb, now())
 ON CONFLICT (key) DO NOTHING;
 "#;
+
+/// Combined init SQL for fresh installations at v8 (current canonical schema).
+/// Alias kept for clarity; use this constant in new code.
+pub const CATALOG_INIT_V8_SQL: &str = CATALOG_INIT_V5_SQL;
 
 /// Catalog migration from v5 to v6 (CORR-1 / TEST-3 / v0.14):
 /// - Adds pgtrickle_mock.scheduler_state table for mock-based scheduler pause/resume
@@ -467,6 +490,48 @@ ALTER TABLE aqueduct.blue_green_deployments
 -- Bump catalog version to 7.
 UPDATE aqueduct.cluster_profile
 SET value_jsonb = '7'::jsonb, measured_at = now()
+WHERE key = 'catalog_schema_version';
+"#;
+
+/// Catalog migration from v7 to v8 (DOC-2 / v0.17):
+/// - Adds `'interrupted'` to the `status` check constraint in `aqueduct.migrations`
+///   to support HA failover detection (DOC-2).
+/// - Creates `aqueduct.migration_history` view for human-readable migration audit.
+pub const CATALOG_MIGRATE_V7_TO_V8_SQL: &str = r#"
+-- Add 'interrupted' status to migrations constraint (DOC-2 / v0.17).
+ALTER TABLE aqueduct.migrations DROP CONSTRAINT IF EXISTS status_check;
+ALTER TABLE aqueduct.migrations
+    ADD CONSTRAINT status_check
+    CHECK (status IN ('running', 'committed', 'failed', 'rolled_back', 'recoverable_failure', 'interrupted'));
+
+-- Update partial index to include 'interrupted' for resume queries.
+DROP INDEX IF EXISTS aqueduct_migrations_project_status;
+CREATE INDEX IF NOT EXISTS aqueduct_migrations_project_status
+    ON aqueduct.migrations (project, status)
+    WHERE status IN ('running', 'recoverable_failure', 'interrupted');
+
+-- Migration history view: human-readable table of migrations with step detail.
+CREATE OR REPLACE VIEW aqueduct.migration_history AS
+SELECT
+    m.id          AS migration_id,
+    m.project,
+    m.status,
+    m.started_at,
+    m.finished_at,
+    dv.version    AS to_version,
+    m.cli_version,
+    COUNT(ms.id)  AS step_count,
+    SUM(CASE WHEN ms.status = 'failed' THEN 1 ELSE 0 END) AS failed_steps,
+    MAX(ms.error_message) AS last_error
+FROM aqueduct.migrations m
+LEFT JOIN aqueduct.dag_versions dv ON dv.version = m.to_version
+LEFT JOIN aqueduct.migration_steps ms ON ms.migration_id = m.id
+GROUP BY m.id, m.project, m.status, m.started_at, m.finished_at, dv.version, m.cli_version
+ORDER BY m.started_at DESC;
+
+-- Bump catalog version to 8.
+UPDATE aqueduct.cluster_profile
+SET value_jsonb = '8'::jsonb, measured_at = now()
 WHERE key = 'catalog_schema_version';
 "#;
 
@@ -706,6 +771,13 @@ pub async fn ensure_catalog_current(client: &tokio_postgres::Client) -> crate::e
                 .await
                 .map_err(|e| crate::error::AqueductError::Catalog(e.to_string()))?;
         }
+        // Apply the v7→v8 migration if needed (DOC-2 / v0.17).
+        if current_version < 8 {
+            client
+                .batch_execute(CATALOG_MIGRATE_V7_TO_V8_SQL)
+                .await
+                .map_err(|e| crate::error::AqueductError::Catalog(e.to_string()))?;
+        }
     }
 
     Ok(())
@@ -815,4 +887,34 @@ SELECT step_index, step_type, status, started_at, finished_at, error_message
 FROM aqueduct.migration_steps
 WHERE migration_id = $1
 ORDER BY step_index
+"#;
+
+/// SQL to mark a migration as 'interrupted' due to HA failover (DOC-2 / v0.17).
+pub const MARK_MIGRATION_INTERRUPTED_SQL: &str = r#"
+UPDATE aqueduct.migrations
+SET finished_at = now(), status = 'interrupted'
+WHERE id = $1
+"#;
+
+/// SQL for `aqueduct audit`: list recent migrations for a project (v0.17).
+///
+/// Parameters: $1 = project, $2 = limit.
+pub const LIST_MIGRATIONS_FOR_AUDIT_SQL: &str = r#"
+SELECT
+    m.id          AS migration_id,
+    m.project,
+    m.status,
+    m.started_at,
+    m.finished_at,
+    m.to_version,
+    m.cli_version,
+    COUNT(ms.id)              AS step_count,
+    SUM(CASE WHEN ms.status = 'failed' THEN 1 ELSE 0 END) AS failed_steps,
+    MAX(ms.error_message)     AS last_error
+FROM aqueduct.migrations m
+LEFT JOIN aqueduct.migration_steps ms ON ms.migration_id = m.id
+WHERE m.project = $1
+GROUP BY m.id, m.project, m.status, m.started_at, m.finished_at, m.to_version, m.cli_version
+ORDER BY m.started_at DESC
+LIMIT $2
 "#;

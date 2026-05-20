@@ -761,33 +761,38 @@ mod tests {
     }
 
     /// SEC-02: AWS Secrets Manager HTTP client — mock server test.
-    /// Uses httpmock to intercept the HTTP call and return a fake secret.
+    /// Uses wiremock to intercept the HTTP call and return a fake secret.
     #[tokio::test]
     async fn test_aws_sm_http_client_mock() {
-        use httpmock::prelude::*;
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let server = MockServer::start();
-        let mock = server.mock(|when, then| {
-            when.method(POST)
-                .path("/")
-                .header("X-Amz-Target", "secretsmanager.GetSecretValue")
-                .header("Content-Type", "application/x-amz-json-1.1");
-            then.status(200)
-                .header("Content-Type", "application/x-amz-json-1.1")
-                .body(r#"{"SecretString":"test_secret_value","Name":"my-db-password"}"#);
-        });
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(header("X-Amz-Target", "secretsmanager.GetSecretValue"))
+            .and(header("Content-Type", "application/x-amz-json-1.1"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "application/x-amz-json-1.1")
+                    .set_body_string(
+                        r#"{"SecretString":"test_secret_value","Name":"my-db-password"}"#,
+                    ),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
 
         // Serialize env-var mutation across parallel tests.
         let _lock = ENV_VAR_LOCK.lock().await;
 
         // Point the AWS endpoint at the mock server.
-        std::env::set_var("AWS_ENDPOINT_URL_SECRETSMANAGER", server.base_url());
+        std::env::set_var("AWS_ENDPOINT_URL_SECRETSMANAGER", server.uri());
         // Clear any real AWS credentials to avoid accidentally hitting real AWS.
         std::env::remove_var("AWS_ACCESS_KEY_ID");
         std::env::remove_var("AWS_SECRET_ACCESS_KEY");
 
         let result = fetch_aws_secret("us-east-1", "my-db-password").await;
-        mock.assert();
         assert_eq!(result.unwrap(), "test_secret_value");
 
         std::env::remove_var("AWS_ENDPOINT_URL_SECRETSMANAGER");
@@ -796,19 +801,22 @@ mod tests {
     /// SEC-02: AWS Secrets Manager — error response propagates correctly.
     #[tokio::test]
     async fn test_aws_sm_error_response() {
-        use httpmock::prelude::*;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let server = MockServer::start();
-        server.mock(|when, then| {
-            when.method(POST).path("/");
-            then.status(400)
-                .body(r#"{"__type":"ResourceNotFoundException","message":"Secrets Manager can't find the specified secret."}"#);
-        });
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(400).set_body_string(
+                r#"{"__type":"ResourceNotFoundException","message":"Secrets Manager can't find the specified secret."}"#,
+            ))
+            .mount(&server)
+            .await;
 
         // Serialize env-var mutation across parallel tests.
         let _lock = ENV_VAR_LOCK.lock().await;
 
-        std::env::set_var("AWS_ENDPOINT_URL_SECRETSMANAGER", server.base_url());
+        std::env::set_var("AWS_ENDPOINT_URL_SECRETSMANAGER", server.uri());
         std::env::remove_var("AWS_ACCESS_KEY_ID");
         std::env::remove_var("AWS_SECRET_ACCESS_KEY");
 
@@ -822,26 +830,30 @@ mod tests {
     /// SEC-02: GCP Secret Manager HTTP client — mock server test.
     #[tokio::test]
     async fn test_gcp_sm_http_client_mock() {
-        use httpmock::prelude::*;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let server = MockServer::start();
+        let server = MockServer::start().await;
         let secret_name = "projects/my-project/secrets/my-secret/versions/latest";
-        let server_mock = server.mock(|when, then| {
-            when.method(GET).path(format!("/v1/{}:access", secret_name));
-            then.status(200)
-                .header("Content-Type", "application/json")
-                // "aGVsbG93b3JsZA==" is base64("helloworld")
-                .body(r#"{"payload":{"data":"aGVsbG93b3JsZA=="}}"#);
-        });
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/{}:access", secret_name)))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "application/json")
+                    // "aGVsbG93b3JsZA==" is base64("helloworld")
+                    .set_body_string(r#"{"payload":{"data":"aGVsbG93b3JsZA=="}}"#),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
 
         // Serialize env-var mutation across parallel tests.
         let _lock = ENV_VAR_LOCK.lock().await;
 
-        std::env::set_var("GCP_SECRET_MANAGER_ENDPOINT_URL", server.base_url());
+        std::env::set_var("GCP_SECRET_MANAGER_ENDPOINT_URL", server.uri());
         std::env::set_var("GOOGLE_OAUTH_TOKEN", "fake-test-token");
 
         let result = fetch_gcp_secret(secret_name).await;
-        server_mock.assert();
         assert_eq!(result.unwrap(), "helloworld");
 
         std::env::remove_var("GCP_SECRET_MANAGER_ENDPOINT_URL");
@@ -851,19 +863,23 @@ mod tests {
     /// SEC-02: HashiCorp Vault HTTP client — mock server test.
     #[tokio::test]
     async fn test_vault_http_client_mock() {
-        use httpmock::prelude::*;
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let server = MockServer::start();
-        let server_mock = server.mock(|when, then| {
-            when.method(GET)
-                .path("/v1/secret/data/my-db-password")
-                .header("X-Vault-Token", "test-vault-token");
-            then.status(200)
-                .header("Content-Type", "application/json")
-                .body(r#"{"data":{"data":{"value":"vault_secret_value"}}}"#);
-        });
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/secret/data/my-db-password"))
+            .and(header("X-Vault-Token", "test-vault-token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "application/json")
+                    .set_body_string(r#"{"data":{"data":{"value":"vault_secret_value"}}}"#),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
 
-        let vault_addr = server.base_url();
+        let vault_addr = server.uri();
 
         // Serialize env-var mutation across parallel tests.
         let _lock = ENV_VAR_LOCK.lock().await;
@@ -871,7 +887,6 @@ mod tests {
         std::env::set_var("VAULT_TOKEN", "test-vault-token");
 
         let result = fetch_vault_secret(&vault_addr, "secret/my-db-password").await;
-        server_mock.assert();
         assert_eq!(result.unwrap(), "vault_secret_value");
 
         std::env::remove_var("VAULT_TOKEN");
@@ -880,19 +895,23 @@ mod tests {
     /// SEC-02: Vault error response propagates correctly.
     #[tokio::test]
     async fn test_vault_error_response() {
-        use httpmock::prelude::*;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let server = MockServer::start();
-        server.mock(|when, then| {
-            when.method(GET);
-            then.status(403).body(r#"{"errors":["permission denied"]}"#);
-        });
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .set_body_string(r#"{"errors":["permission denied"]}"#),
+            )
+            .mount(&server)
+            .await;
 
         // Serialize env-var mutation across parallel tests.
         let _lock = ENV_VAR_LOCK.lock().await;
 
         std::env::set_var("VAULT_TOKEN", "bad-token");
-        let result = fetch_vault_secret(&server.base_url(), "secret/my-secret").await;
+        let result = fetch_vault_secret(&server.uri(), "secret/my-secret").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("403"));
 

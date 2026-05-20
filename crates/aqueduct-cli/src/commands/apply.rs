@@ -72,6 +72,17 @@ pub struct ApplyArgs {
     /// Allow DSN with embedded plaintext password (not recommended outside CI/dev).
     #[arg(long)]
     pub allow_plaintext_password: bool,
+
+    /// Patroni REST endpoint for HA failover detection (e.g. http://localhost:8008).
+    /// When set, aqueduct checks the /master endpoint after each migration step
+    /// and aborts with `interrupted` status on failover (DOC-2 / v0.17).
+    #[arg(long)]
+    pub patroni_endpoint: Option<String>,
+
+    /// Expose a Prometheus scrape endpoint on this address while `apply` runs
+    /// (e.g. `0.0.0.0:9090`). Only available when compiled with `--features metrics`.
+    #[arg(long)]
+    pub metrics_addr: Option<String>,
 }
 
 pub async fn run(args: ApplyArgs) -> anyhow::Result<()> {
@@ -254,7 +265,22 @@ pub async fn run(args: ApplyArgs) -> anyhow::Result<()> {
         .with_force_retry(args.force_retry)
         .with_force_skip(args.force_skip)
         .with_connection_string(dsn.clone())
-        .with_desired_state(desired);
+        .with_desired_state(desired)
+        .with_patroni_endpoint(args.patroni_endpoint.clone());
+
+    // v0.17 / metrics feature: Start Prometheus scrape endpoint if requested.
+    #[cfg(feature = "metrics")]
+    let _metrics_server = if let Some(ref addr) = args.metrics_addr {
+        Some(crate::metrics::start_metrics_server(addr).await?)
+    } else {
+        None
+    };
+    #[cfg(not(feature = "metrics"))]
+    if args.metrics_addr.is_some() {
+        eprintln!(
+            "warning: --metrics-addr ignored; binary was not compiled with --features metrics"
+        );
+    }
     let result = executor.execute(&plan).await?;
 
     // U-05: Emit a structured JSON event for CI parsers. Separates migration_id

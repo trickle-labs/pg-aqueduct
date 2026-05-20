@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 description = "The aqueduct CLI binary"
+publish = false
 
 [[bin]]
 name = "aqueduct"
@@ -26,6 +27,15 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 regex = { workspace = true }
 sha2 = { workspace = true }
+
+[features]
+# Optional Prometheus metrics endpoint (aqueduct apply --metrics-addr).
+# Enable with: cargo build --features metrics
+metrics = ["dep:prometheus"]
+
+[dependencies.prometheus]
+version = "0.13"
+optional = true
 
 [dev-dependencies]
 aqueduct-testkit = { workspace = true }

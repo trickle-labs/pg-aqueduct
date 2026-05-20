@@ -114,6 +114,48 @@
         "pgtrickle_version": { "type": ["string", "null"] },
         "polled_at": { "type": "string", "format": "date-time" }
       }
+    },
+    {
+      "title": "step_start",
+      "description": "Emitted to stderr when a migration step begins execution (v0.17 / B).",
+      "required": ["schema_version", "event", "step_index", "step_type", "migration_id", "project"],
+      "properties": {
+        "schema_version": { "type": "integer", "const": 1 },
+        "event": { "type": "string", "const": "step_start" },
+        "step_index": { "type": "integer" },
+        "step_type": { "type": "string" },
+        "migration_id": { "type": ["integer", "null"] },
+        "project": { "type": "string" }
+      }
+    },
+    {
+      "title": "step_complete",
+      "description": "Emitted to stderr when a migration step completes successfully (v0.17 / B).",
+      "required": ["schema_version", "event", "step_index", "step_type", "migration_id", "project", "duration_ms"],
+      "properties": {
+        "schema_version": { "type": "integer", "const": 1 },
+        "event": { "type": "string", "const": "step_complete" },
+        "step_index": { "type": "integer" },
+        "step_type": { "type": "string" },
+        "migration_id": { "type": ["integer", "null"] },
+        "project": { "type": "string" },
+        "duration_ms": { "type": "integer" }
+      }
+    },
+    {
+      "title": "step_failed",
+      "description": "Emitted to stderr when a migration step fails (v0.17 / B).",
+      "required": ["schema_version", "event", "step_index", "step_type", "migration_id", "project", "duration_ms", "error"],
+      "properties": {
+        "schema_version": { "type": "integer", "const": 1 },
+        "event": { "type": "string", "const": "step_failed" },
+        "step_index": { "type": "integer" },
+        "step_type": { "type": "string" },
+        "migration_id": { "type": ["integer", "null"] },
+        "project": { "type": "string" },
+        "duration_ms": { "type": "integer" },
+        "error": { "type": "string" }
+      }
     }
   ]
 }

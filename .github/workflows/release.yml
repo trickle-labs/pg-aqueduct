@@ -224,3 +224,83 @@ jobs:
             cd ..
             gh release upload "${TAG}" release-files/* --clobber
           fi
+
+  # ── 4. SLSA build provenance (v0.17) ─────────────────────────────────────────
+  # Generates GitHub-native SLSA build attestations for each release archive.
+  # Attestations are verifiable with: gh attestation verify <archive> --repo <repo>
+  provenance:
+    name: Attest Build Provenance
+    runs-on: ubuntu-latest
+    needs: [release]
+    permissions:
+      id-token: write
+      attestations: write
+      contents: read
+
+    steps:
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download linux-amd64 archive for attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          gh release download "${GITHUB_REF_NAME}" \
+            --repo "${{ github.repository }}" \
+            --pattern "aqueduct-${VERSION}-linux-amd64.tar.gz"
+
+      - name: Attest release archive
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "aqueduct-${{ steps.version.outputs.version }}-linux-amd64.tar.gz"
+
+  # ── 5. Release verification ──────────────────────────────────────────────────
+  release-verify:
+    name: Verify Release Binary
+    runs-on: ubuntu-latest
+    needs: [release]
+    steps:
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download linux-amd64 archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ARCHIVE="aqueduct-${VERSION}-linux-amd64.tar.gz"
+          gh release download "${GITHUB_REF_NAME}" \
+            --repo "${{ github.repository }}" \
+            --pattern "${ARCHIVE}" \
+            --output "${ARCHIVE}"
+
+      - name: Verify SHA256 checksum
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ARCHIVE="aqueduct-${VERSION}-linux-amd64.tar.gz"
+          gh release download "${GITHUB_REF_NAME}" \
+            --repo "${{ github.repository }}" \
+            --pattern SHA256SUMS.txt \
+            --output SHA256SUMS.txt
+          grep "${ARCHIVE}" SHA256SUMS.txt | sha256sum --check
+
+      - name: Extract binary and verify version
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ARCHIVE="aqueduct-${VERSION}-linux-amd64.tar.gz"
+          tar xzf "${ARCHIVE}"
+          BINARY=$(find . -name "aqueduct" -type f | head -1)
+          chmod +x "${BINARY}"
+          REPORTED_VERSION=$("${BINARY}" --version | awk '{print $2}')
+          echo "Binary reports version: ${REPORTED_VERSION}"
+          if [ "${REPORTED_VERSION}" != "${VERSION}" ]; then
+            echo "ERROR: version mismatch — tag says ${VERSION}, binary says ${REPORTED_VERSION}"
+            exit 1
+          fi
+          echo "Version verified: ${REPORTED_VERSION}"
+

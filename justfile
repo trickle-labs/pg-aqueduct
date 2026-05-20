@@ -59,6 +59,14 @@ coverage:
 clean:
     cargo clean
 
+# ── Publish ───────────────────────────────────────────────────────────────────
+
+# Dry-run publish for aqueduct-core and aqueduct-testkit to verify crates.io metadata.
+# Requires a valid CARGO_REGISTRY_TOKEN or logged-in `cargo login` session.
+publish-dry-run:
+    cargo publish --dry-run --package aqueduct-core
+    cargo publish --dry-run --package aqueduct-testkit
+
 # ── Docs ─────────────────────────────────────────────────────────────────────
 
 # Build the mdBook documentation site.

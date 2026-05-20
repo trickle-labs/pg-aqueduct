@@ -4,10 +4,11 @@ use tokio_postgres::NoTls;
 
 use crate::catalog::{
     ACQUIRE_LOCK_SQL, DELETE_CONSUMER_VIEW_SQL, DEREGISTER_OWNERSHIP_SQL,
-    FINISH_MIGRATION_RECOVERABLE_SQL, FINISH_MIGRATION_SQL, FINISH_MIGRATION_STEP_SQL,
-    GET_RUNNING_OR_RECOVERABLE_MIGRATION_SQL, HEARTBEAT_LOCK_SQL, INSERT_COMPENSATING_STEP_SQL,
-    INSERT_DAG_VERSION_SQL, REGISTER_OWNERSHIP_SQL, RELEASE_LOCK_SQL, RETIRE_BLUE_GREEN_SQL,
-    START_BLUE_GREEN_SQL, START_MIGRATION_SQL, START_MIGRATION_STEP_SQL, SWAP_BLUE_GREEN_SQL,
+    FAIL_MIGRATION_STEP_SQL, FINISH_MIGRATION_RECOVERABLE_SQL, FINISH_MIGRATION_SQL,
+    FINISH_MIGRATION_STEP_SQL, GET_RUNNING_OR_RECOVERABLE_MIGRATION_SQL, HEARTBEAT_LOCK_SQL,
+    INSERT_COMPENSATING_STEP_SQL, INSERT_DAG_VERSION_SQL, MARK_MIGRATION_INTERRUPTED_SQL,
+    REGISTER_OWNERSHIP_SQL, RELEASE_LOCK_SQL, RETIRE_BLUE_GREEN_SQL, START_BLUE_GREEN_SQL,
+    START_MIGRATION_SQL, START_MIGRATION_STEP_SQL, SWAP_BLUE_GREEN_SQL,
     UPDATE_MIGRATION_PROGRESS_SQL,
 };
 use crate::dag::DagState;
@@ -214,6 +215,8 @@ pub struct PlanExecutor<'a> {
     force_retry_step: Option<usize>,
     /// CORR-2 / v0.15: Force-skip a specific step index (marks it complete, skips execution).
     force_skip_step: Option<usize>,
+    /// DOC-2 / v0.17: Optional Patroni endpoint for between-step primary checks.
+    patroni_endpoint: Option<String>,
 }
 
 impl<'a> PlanExecutor<'a> {
@@ -233,6 +236,7 @@ impl<'a> PlanExecutor<'a> {
             desired_state: None,
             force_retry_step: None,
             force_skip_step: None,
+            patroni_endpoint: None,
         }
     }
 
@@ -251,6 +255,12 @@ impl<'a> PlanExecutor<'a> {
     /// Set the step index to force-skip (CORR-2 / v0.15).
     pub fn with_force_skip(mut self, step: Option<usize>) -> Self {
         self.force_skip_step = step;
+        self
+    }
+
+    /// Set the Patroni endpoint URL for between-step HA primary checks (DOC-2 / v0.17).
+    pub fn with_patroni_endpoint(mut self, endpoint: Option<String>) -> Self {
+        self.patroni_endpoint = endpoint;
         self
     }
 
@@ -380,6 +390,7 @@ impl<'a> PlanExecutor<'a> {
         // On failure, write `recoverable_failure` WITHOUT resetting progress so that
         // `--resume` can re-use the completed_steps checkpoint (CORR-1 / v0.14).
         // On success, write `committed` and clear progress.
+        // DOC-2 / v0.17: HA failover errors mark the migration as 'interrupted'.
         match &result {
             Ok(v) => {
                 if let Err(e) = self
@@ -405,18 +416,36 @@ impl<'a> PlanExecutor<'a> {
                     );
                 }
             }
-            Err(_) => {
-                // Preserve progress — do NOT clear it (CORR-1 / v0.14).
-                if let Err(e) = self
-                    .client
-                    .execute(FINISH_MIGRATION_RECOVERABLE_SQL, &[&migration_id])
-                    .await
-                {
-                    tracing::error!(
-                        migration_id = migration_id,
-                        "Failed to mark migration as recoverable_failure: {}",
-                        e
-                    );
+            Err(e) => {
+                // DOC-2 / v0.17: If the failure is an HA failover (pg_is_in_recovery or
+                // Patroni check), mark as 'interrupted' so operators know to resume on
+                // the new primary.  All other failures use 'recoverable_failure'.
+                let is_ha_failover = is_ha_failover_error(e);
+                if is_ha_failover {
+                    if let Err(mark_err) = self
+                        .client
+                        .execute(MARK_MIGRATION_INTERRUPTED_SQL, &[&migration_id])
+                        .await
+                    {
+                        tracing::error!(
+                            migration_id = migration_id,
+                            "Failed to mark migration as interrupted: {}",
+                            mark_err
+                        );
+                    }
+                } else {
+                    // Preserve progress — do NOT clear it (CORR-1 / v0.14).
+                    if let Err(mark_err) = self
+                        .client
+                        .execute(FINISH_MIGRATION_RECOVERABLE_SQL, &[&migration_id])
+                        .await
+                    {
+                        tracing::error!(
+                            migration_id = migration_id,
+                            "Failed to mark migration as recoverable_failure: {}",
+                            mark_err
+                        );
+                    }
                 }
             }
         }
@@ -546,7 +575,20 @@ impl<'a> PlanExecutor<'a> {
                     )
                     .await;
 
-                match step {
+                // v0.17: Emit per-step JSON event to stderr (structured observability).
+                let step_start_ts = std::time::Instant::now();
+                let step_start_event = serde_json::json!({
+                    "schema_version": 1,
+                    "event": "step_start",
+                    "step_index": step_idx,
+                    "step_type": step_type,
+                    "migration_id": migration_id,
+                    "project": self.project,
+                });
+                eprintln!("{}", serde_json::to_string(&step_start_event).unwrap_or_default());
+
+                let step_result: Result<()> = async {
+                    match step {
                     PlanStep::LockDag { project, ttl } => {
                         self.acquire_lock(project, &lock_holder, ttl).await?;
                         locked = true;
@@ -1308,17 +1350,67 @@ impl<'a> PlanExecutor<'a> {
                         self.client.execute(statement.as_str(), &[]).await?;
                     }
                 }
+                Ok(())
+                }.await;
+
+                // Compute duration and extract error message before consuming step_result.
+                let duration_ms = step_start_ts.elapsed().as_millis() as u64;
+                let step_err_msg: Option<String> =
+                    step_result.as_ref().err().map(|e| e.to_string());
+
+                // v0.17: Emit step_complete / step_failed event to stderr, update DB.
+                if let Some(ref err_str) = step_err_msg {
+                    let step_failed_event = serde_json::json!({
+                        "schema_version": 1,
+                        "event": "step_failed",
+                        "step_index": step_idx,
+                        "step_type": step_type,
+                        "migration_id": migration_id,
+                        "project": self.project,
+                        "duration_ms": duration_ms,
+                        "error": err_str,
+                    });
+                    eprintln!(
+                        "{}",
+                        serde_json::to_string(&step_failed_event).unwrap_or_default()
+                    );
+                    // M-08: Mark step as failed with error message (best-effort).
+                    let _ = self
+                        .client
+                        .execute(
+                            FAIL_MIGRATION_STEP_SQL,
+                            &[&migration_id, &(step_idx as i32), err_str],
+                        )
+                        .await;
+                } else {
+                    let step_done_event = serde_json::json!({
+                        "schema_version": 1,
+                        "event": "step_complete",
+                        "step_index": step_idx,
+                        "step_type": step_type,
+                        "migration_id": migration_id,
+                        "project": self.project,
+                        "duration_ms": duration_ms,
+                    });
+                    eprintln!(
+                        "{}",
+                        serde_json::to_string(&step_done_event).unwrap_or_default()
+                    );
+                    // M-08: Mark step completed (best-effort).
+                    let _ = self
+                        .client
+                        .execute(
+                            FINISH_MIGRATION_STEP_SQL,
+                            &[&migration_id, &(step_idx as i32)],
+                        )
+                        .await;
+                }
+
+                // Propagate error (consumes step_result, no Clone needed).
+                step_result?;
 
                 // S-06: Checkpoint writes are fatal — a failed progress record
                 // means we cannot safely resume.
-                // M-08: Mark step completed (best-effort).
-                let _ = self
-                    .client
-                    .execute(
-                        FINISH_MIGRATION_STEP_SQL,
-                        &[&migration_id, &(step_idx as i32)],
-                    )
-                    .await;
                 self.client
                     .execute(
                         UPDATE_MIGRATION_PROGRESS_SQL,
@@ -1332,6 +1424,13 @@ impl<'a> PlanExecutor<'a> {
                 // CORR-3: Check lock-loss again after the step completes.
                 if *lock_lost_rx.borrow() {
                     return Err(AqueductError::LockLost);
+                }
+
+                // DOC-2 / v0.17: Between-step primary re-check via pg_is_in_recovery()
+                // and optional Patroni endpoint check.
+                crate::ha::check_still_primary(self.client).await?;
+                if let Some(ref endpoint) = self.patroni_endpoint {
+                    crate::ha::check_patroni_primary(endpoint).await?;
                 }
             }
 
@@ -1555,6 +1654,21 @@ async fn capture_rls_policies(
     }
 
     stmts
+}
+
+/// Determine whether an error represents an HA failover (DOC-2 / v0.17).
+///
+/// Returns `true` when the error message indicates that the connected host
+/// is no longer the primary — either via `pg_is_in_recovery()` returning true
+/// (NotPrimary / check_still_primary) or a failed Patroni `/master` HTTP check.
+fn is_ha_failover_error(e: &AqueductError) -> bool {
+    match e {
+        AqueductError::NotPrimary => true,
+        AqueductError::Other(msg) => {
+            msg.contains("pg_is_in_recovery") || msg.contains("failover")
+        }
+        _ => false,
+    }
 }
 
 /// Return a short string tag for a plan step (used in migration_steps tracking).

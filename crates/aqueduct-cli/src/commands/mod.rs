@@ -1,4 +1,5 @@
 pub mod apply;
+pub mod audit;
 pub mod destroy;
 pub mod diff;
 pub mod fmt;

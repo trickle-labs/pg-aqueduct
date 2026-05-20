@@ -3,10 +3,12 @@ use tracing_subscriber::EnvFilter;
 
 mod commands;
 mod output;
+#[cfg(feature = "metrics")]
+mod metrics;
 
 use commands::{
-    apply, destroy, diff, fmt, import, ingest, init, lint, plan, preview, promote, rollback,
-    status, unlock, validate,
+    apply, audit, destroy, diff, fmt, import, ingest, init, lint, plan, preview, promote,
+    rollback, status, unlock, validate,
 };
 use output::{OutputEmitter, OutputMode};
 
@@ -85,6 +87,9 @@ enum Commands {
 
     /// Show per-table diff between desired (migration files) and actual (live) state.
     Diff(diff::DiffArgs),
+
+    /// Show migration history and step audit log for a project.
+    Audit(audit::AuditArgs),
 }
 
 #[tokio::main]
@@ -154,6 +159,7 @@ async fn main() {
         Commands::Promote(args) => promote::run(args).await,
         Commands::Destroy(args) => destroy::run(args).await,
         Commands::Diff(args) => diff::run(args).await,
+        Commands::Audit(args) => audit::run(args).await,
     };
 
     if let Err(e) = result {
