@@ -83,10 +83,6 @@ jobs:
             artifact_suffix: macos-arm64
             archive_ext: tar.gz
             binary: aqueduct
-          - os: macos-13
-            artifact_suffix: macos-amd64
-            archive_ext: tar.gz
-            binary: aqueduct
           - os: windows-2022
             artifact_suffix: windows-amd64
             archive_ext: zip
