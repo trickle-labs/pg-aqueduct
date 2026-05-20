@@ -903,18 +903,6 @@ pub fn build_plan_with_options(
                         deadline_secs: 60,
                     });
 
-                    // RecreatePolicy: collect existing policies (step-registry enforcement / v0.13).
-                    // In production, the executor queries pg_policies; here we emit a placeholder
-                    // so the step type is exercised end-to-end. The executor will handle the real
-                    // policy SQL at runtime.
-                    steps.push(PlanStep::RecreatePolicy {
-                        name: delta.qualified_name.clone(),
-                        policy_sql: format!(
-                            "-- RLS policies for {} will be restored by executor",
-                            delta.qualified_name
-                        ),
-                    });
-
                     // Must drop + recreate to establish delta-tracking state.
                     if !desired.query.is_empty() {
                         steps.push(PlanStep::ValidateQuery {
@@ -928,6 +916,16 @@ pub fn build_plan_with_options(
                     });
                     steps.push(PlanStep::CreateStreamTable {
                         spec: desired.clone(),
+                    });
+                    // RecreatePolicy: placed after CreateStreamTable so the executor
+                    // can capture policies from the old table during DropStreamTable
+                    // (into rls_policy_cache) and then restore them here (CORR-6).
+                    steps.push(PlanStep::RecreatePolicy {
+                        name: delta.qualified_name.clone(),
+                        policy_sql: format!(
+                            "-- RLS policies for {} will be restored by executor",
+                            delta.qualified_name
+                        ),
                     });
                     steps.push(PlanStep::Backfill {
                         name: delta.qualified_name.clone(),
@@ -1041,21 +1039,21 @@ pub fn build_plan_with_options(
                             deadline_secs: 60,
                         });
 
-                        // RecreatePolicy step (step-registry enforcement / v0.13).
-                        steps.push(PlanStep::RecreatePolicy {
-                            name: delta.qualified_name.clone(),
-                            policy_sql: format!(
-                                "-- RLS policies for {} will be restored by executor",
-                                delta.qualified_name
-                            ),
-                        });
-
                         steps.push(PlanStep::DropStreamTable {
                             name: delta.qualified_name.clone(),
                             cascade: false,
                         });
                         steps.push(PlanStep::CreateStreamTable {
                             spec: desired.clone(),
+                        });
+                        // RecreatePolicy: placed after CreateStreamTable so the executor
+                        // can capture policies during DropStreamTable and restore them here (CORR-6).
+                        steps.push(PlanStep::RecreatePolicy {
+                            name: delta.qualified_name.clone(),
+                            policy_sql: format!(
+                                "-- RLS policies for {} will be restored by executor",
+                                delta.qualified_name
+                            ),
                         });
                         steps.push(PlanStep::Backfill {
                             name: delta.qualified_name.clone(),
