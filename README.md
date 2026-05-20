@@ -55,7 +55,7 @@ A typical plan output looks like this:
 $ aqueduct plan --to prod
 
 Project  checkout-analytics  v18 → v19
-Target   prod (pg_trickle 0.62, pg 16.3)
+Target   prod (pg_trickle 0.62, pg 18+)
 
 Changes  3 nodes affected
 

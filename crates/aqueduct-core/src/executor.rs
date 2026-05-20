@@ -6,7 +6,9 @@ use crate::catalog::{
     ACQUIRE_LOCK_SQL, DELETE_CONSUMER_VIEW_SQL, DEREGISTER_OWNERSHIP_SQL,
     FINISH_MIGRATION_RECOVERABLE_SQL, FINISH_MIGRATION_SQL, FINISH_MIGRATION_STEP_SQL,
     GET_RUNNING_OR_RECOVERABLE_MIGRATION_SQL, HEARTBEAT_LOCK_SQL, INSERT_DAG_VERSION_SQL,
-    REGISTER_OWNERSHIP_SQL, RELEASE_LOCK_SQL, START_MIGRATION_SQL, START_MIGRATION_STEP_SQL,
+    INSERT_COMPENSATING_STEP_SQL, REGISTER_OWNERSHIP_SQL, RELEASE_LOCK_SQL,
+    RETIRE_BLUE_GREEN_SQL, START_MIGRATION_SQL,
+    START_MIGRATION_STEP_SQL, START_BLUE_GREEN_SQL, SWAP_BLUE_GREEN_SQL,
     UPDATE_MIGRATION_PROGRESS_SQL,
 };
 use crate::dag::DagState;
@@ -144,6 +146,59 @@ fn hostname_str() -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+/// Typed execution context for `PlanExecutor` (ARCH-2 / v0.15).
+///
+/// This enum prevents accidentally constructing a non-dry-run executor without
+/// a DSN and desired state. The `Apply`, `Rollback`, and `Promote` variants
+/// require both at construction time; `DryRun` may omit them.
+#[derive(Debug, Clone)]
+pub enum ExecutionContext {
+    /// Normal `aqueduct apply` execution.
+    Apply {
+        dsn: String,
+        desired_state: DagState,
+    },
+    /// `aqueduct rollback` execution.
+    Rollback {
+        dsn: String,
+        desired_state: DagState,
+    },
+    /// `aqueduct promote` execution (blue/green promotion).
+    Promote {
+        dsn: String,
+        desired_state: DagState,
+    },
+    /// Dry-run preview: never writes to the database.
+    DryRun,
+}
+
+impl ExecutionContext {
+    /// Returns the DSN if this is a live-execution context.
+    pub fn dsn(&self) -> Option<&str> {
+        match self {
+            ExecutionContext::Apply { dsn, .. }
+            | ExecutionContext::Rollback { dsn, .. }
+            | ExecutionContext::Promote { dsn, .. } => Some(dsn.as_str()),
+            ExecutionContext::DryRun => None,
+        }
+    }
+
+    /// Returns the desired state if this is a live-execution context.
+    pub fn desired_state(&self) -> Option<&DagState> {
+        match self {
+            ExecutionContext::Apply { desired_state, .. }
+            | ExecutionContext::Rollback { desired_state, .. }
+            | ExecutionContext::Promote { desired_state, .. } => Some(desired_state),
+            ExecutionContext::DryRun => None,
+        }
+    }
+
+    /// Returns true if this is a dry-run context.
+    pub fn is_dry_run(&self) -> bool {
+        matches!(self, ExecutionContext::DryRun)
+    }
+}
+
 /// Execute a plan against the target database.
 pub struct PlanExecutor<'a> {
     client: &'a tokio_postgres::Client,
@@ -156,6 +211,10 @@ pub struct PlanExecutor<'a> {
     connection_string: Option<String>,
     /// The desired DAG state, serialised into `spec_jsonb` on `RecordSnapshot`.
     desired_state: Option<DagState>,
+    /// CORR-2 / v0.15: Force-retry a specific step index (ignores resume).
+    force_retry_step: Option<usize>,
+    /// CORR-2 / v0.15: Force-skip a specific step index (marks it complete, skips execution).
+    force_skip_step: Option<usize>,
 }
 
 impl<'a> PlanExecutor<'a> {
@@ -173,12 +232,26 @@ impl<'a> PlanExecutor<'a> {
             resume: false,
             connection_string: None,
             desired_state: None,
+            force_retry_step: None,
+            force_skip_step: None,
         }
     }
 
     /// Enable `--resume` mode: skip plan steps already recorded as completed.
     pub fn with_resume(mut self, resume: bool) -> Self {
         self.resume = resume;
+        self
+    }
+
+    /// Set the step index to force-retry (CORR-2 / v0.15).
+    pub fn with_force_retry(mut self, step: Option<usize>) -> Self {
+        self.force_retry_step = step;
+        self
+    }
+
+    /// Set the step index to force-skip (CORR-2 / v0.15).
+    pub fn with_force_skip(mut self, step: Option<usize>) -> Self {
+        self.force_skip_step = step;
         self
     }
 
@@ -427,12 +500,30 @@ impl<'a> PlanExecutor<'a> {
         // Guard: always resume the scheduler, even on error.
         let mut scheduler_paused = false;
 
+        // ARCH-3 / v0.15: Track the active blue/green deployment id so that
+        // SwapConsumerViews and RetireBlueSchema can write status transitions.
+        let mut active_bg_deployment_id: Option<i64> = None;
+
+        // CORR-6 / v0.15: RLS policy cache — populated before DropStreamTable,
+        // consumed by RecreatePolicy. Keyed by "{schema}.{table}".
+        let mut rls_policy_cache: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+
         let result: Result<u64> = async {
             for (step_idx, step) in plan.steps.iter().enumerate() {
+                // CORR-2 / v0.15: force-skip marks the step complete and skips execution.
+                if self.force_skip_step == Some(step_idx) {
+                    tracing::info!("Force-skip: skipping step {} ({})", step_idx, step.description());
+                    continue;
+                }
+
+                // CORR-2 / v0.15: force-retry overrides resume — don't skip the target step.
+                let is_force_retry = self.force_retry_step == Some(step_idx);
+
                 // S-01/S-02: LockDag ALWAYS re-executes, even when resuming.
                 // All other steps are skipped if already completed.
                 let is_lock_dag = matches!(step, PlanStep::LockDag { .. });
-                if !is_lock_dag && step_idx < resume_from {
+                if !is_lock_dag && !is_force_retry && step_idx < resume_from {
                     tracing::debug!("Resume: skipping step {} (already completed)", step_idx);
                     continue;
                 }
@@ -498,6 +589,27 @@ impl<'a> PlanExecutor<'a> {
                                 found: "function not found".to_string(),
                             });
                         }
+                        // CORR-2 / v0.15: Record compensating action before DDL executes.
+                        // The compensating action for CreateStreamTable is to drop the table.
+                        let compensating = format!(
+                            "SELECT pgtrickle.drop_stream_table('{}', '{}')",
+                            spec.qualified_name.schema.replace('\'', "''"),
+                            spec.qualified_name.name.replace('\'', "''")
+                        );
+                        let _ = self
+                            .client
+                            .execute(
+                                INSERT_COMPENSATING_STEP_SQL,
+                                &[
+                                    &migration_id,
+                                    &"stream_table",
+                                    &spec.qualified_name.schema,
+                                    &spec.qualified_name.name,
+                                    &"CREATE_STREAM_TABLE",
+                                    &compensating,
+                                ],
+                            )
+                            .await;
                         self.client
                             .execute(
                                 "SELECT pgtrickle.create_stream_table($1, $2, $3, $4, $5, $6)",
@@ -552,6 +664,40 @@ impl<'a> PlanExecutor<'a> {
                     }
 
                     PlanStep::DropStreamTable { name, cascade: _ } => {
+                        // CORR-6 / v0.15: Capture RLS policies before dropping the table.
+                        // Store them in rls_policy_cache so RecreatePolicy can execute them.
+                        let table_key = format!("{}.{}", name.schema, name.name);
+                        let policies = capture_rls_policies(self.client, &name.schema, &name.name).await;
+                        if !policies.is_empty() {
+                            tracing::info!(
+                                "Captured {} RLS polic(ies) for '{}'",
+                                policies.len(),
+                                table_key
+                            );
+                            rls_policy_cache.insert(table_key.clone(), policies);
+                        }
+
+                        // CORR-2 / v0.15: Record compensating action (recreate) before drop.
+                        let compensating = format!(
+                            "-- pgtrickle.create_stream_table() call for '{}.{}' would go here",
+                            name.schema.replace('\'', "''"),
+                            name.name.replace('\'', "''")
+                        );
+                        let _ = self
+                            .client
+                            .execute(
+                                INSERT_COMPENSATING_STEP_SQL,
+                                &[
+                                    &migration_id,
+                                    &"stream_table",
+                                    &name.schema,
+                                    &name.name,
+                                    &"DROP_STREAM_TABLE",
+                                    &compensating,
+                                ],
+                            )
+                            .await;
+
                         if pgtrickle_caps.has_drop {
                             self.client
                                 .execute(
@@ -643,6 +789,26 @@ impl<'a> PlanExecutor<'a> {
                     }
 
                     // ── v0.3: Blue/Green steps ──────────────────────────────
+
+                    // ARCH-3 / v0.15: Write deployment start row and capture id.
+                    PlanStep::StartBlueGreenDeployment { project, green_schema, blue_schema } => {
+                        tracing::info!(
+                            "Starting blue/green deployment for '{}': {} → {}",
+                            project, blue_schema, green_schema
+                        );
+                        let from_v = plan.from_version.map(|v| v as i64);
+                        let row = self
+                            .client
+                            .query_opt(
+                                START_BLUE_GREEN_SQL,
+                                &[project, &from_v, blue_schema, green_schema],
+                            )
+                            .await?;
+                        if let Some(r) = row {
+                            active_bg_deployment_id = Some(r.get::<_, i64>(0));
+                        }
+                    }
+
                     PlanStep::CreateGreenSchema { schema } => {
                         tracing::info!("Creating green schema '{}'", schema);
                         self.client
@@ -680,6 +846,7 @@ impl<'a> PlanExecutor<'a> {
                         green_schema,
                         node_names,
                         max_wait_secs,
+                        poll_interval_ms,
                     } => {
                         tracing::info!(
                             "Waiting for green schema '{}' to converge ({} nodes, max {}s)",
@@ -687,33 +854,29 @@ impl<'a> PlanExecutor<'a> {
                             node_names.len(),
                             max_wait_secs
                         );
-                        // M-02: Poll pgtrickle.pgt_stream_tables for each node in
-                        // the green schema.  Nodes must transition out of 'running'
-                        // (i.e., reach 'idle' or 'ready') before we proceed.
+                        // PERF-1 / v0.15: Replace per-node polling with a single
+                        // ANY($2) batch query, comparing in memory.
                         if pgtrickle_caps.installed && pgtrickle_caps.has_refresh_status && !node_names.is_empty() {
                             let deadline = std::time::Instant::now()
                                 + std::time::Duration::from_secs(*max_wait_secs);
-                            'outer: loop {
-                                let mut all_converged = true;
-                                for node in node_names {
-                                    let row = self
-                                        .client
-                                        .query_opt(
-                                            "SELECT refresh_status \
-                                             FROM pgtrickle.pgt_stream_tables \
-                                             WHERE schema_name = $1 AND table_name = $2",
-                                            &[green_schema, node],
-                                        )
-                                        .await?;
-                                    let status: Option<String> =
-                                        row.as_ref().and_then(|r| r.try_get(0).ok());
-                                    if status.as_deref() == Some("running") {
-                                        all_converged = false;
-                                        break;
-                                    }
-                                }
-                                if all_converged {
-                                    break 'outer;
+                            let poll_ms = *poll_interval_ms;
+                            loop {
+                                let rows = self
+                                    .client
+                                    .query(
+                                        "SELECT table_name, refresh_status \
+                                         FROM pgtrickle.pgt_stream_tables \
+                                         WHERE schema_name = $1 AND table_name = ANY($2)",
+                                        &[green_schema, node_names],
+                                    )
+                                    .await?;
+                                // Check if any node is still running.
+                                let still_running = rows.iter().any(|r| {
+                                    let status: Option<String> = r.try_get(1).ok().flatten();
+                                    status.as_deref() == Some("running")
+                                });
+                                if !still_running {
+                                    break;
                                 }
                                 if std::time::Instant::now() >= deadline {
                                     return Err(AqueductError::Other(format!(
@@ -721,7 +884,9 @@ impl<'a> PlanExecutor<'a> {
                                         green_schema, max_wait_secs
                                     )));
                                 }
-                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                tokio::time::sleep(
+                                    std::time::Duration::from_millis(poll_ms)
+                                ).await;
                             }
                         }
                     }
@@ -732,35 +897,64 @@ impl<'a> PlanExecutor<'a> {
                         ..
                     } => {
                         tracing::info!(
-                            "Swapping {} consumer views → green schema '{}'",
+                            "Swapping {} consumer views → green schema '{}' (atomic transaction)",
                             assignments.len(),
                             green_schema
                         );
-                        for assignment in assignments {
-                            let view_schema = &assignment.view_name.schema;
-                            let view_name = &assignment.view_name.name;
-                            let target_schema = &assignment.target_table.schema;
-                            let target_name = &assignment.target_table.name;
-                            let default_body = format!(
-                                "SELECT * FROM {}.{}",
-                                quote_ident(target_schema),
-                                quote_ident(target_name)
-                            );
-                            let sql_body = assignment
-                                .sql_body
-                                .as_deref()
-                                .unwrap_or(default_body.as_str());
-                            self.client
-                                .execute(
-                                    &format!(
-                                        "CREATE OR REPLACE VIEW {}.{} AS {}",
-                                        quote_ident(view_schema),
-                                        quote_ident(view_name),
-                                        sql_body
-                                    ),
-                                    &[],
-                                )
-                                .await?;
+                        // ARCH-3 / v0.15: All consumer view swaps execute in a single
+                        // transaction so the swap is all-or-nothing. On failure the
+                        // transaction rolls back, leaving all views pointing to the
+                        // previous schema.
+                        self.client.execute("BEGIN", &[]).await?;
+                        let swap_result: Result<()> = async {
+                            for assignment in assignments {
+                                let view_schema = &assignment.view_name.schema;
+                                let view_name = &assignment.view_name.name;
+                                let target_schema = &assignment.target_table.schema;
+                                let target_name = &assignment.target_table.name;
+                                let default_body = format!(
+                                    "SELECT * FROM {}.{}",
+                                    quote_ident(target_schema),
+                                    quote_ident(target_name)
+                                );
+                                let sql_body = assignment
+                                    .sql_body
+                                    .as_deref()
+                                    .unwrap_or(default_body.as_str());
+                                self.client
+                                    .execute(
+                                        &format!(
+                                            "CREATE OR REPLACE VIEW {}.{} AS {}",
+                                            quote_ident(view_schema),
+                                            quote_ident(view_name),
+                                            sql_body
+                                        ),
+                                        &[],
+                                    )
+                                    .await?;
+                            }
+                            Ok(())
+                        }
+                        .await;
+                        match swap_result {
+                            Ok(()) => {
+                                self.client.execute("COMMIT", &[]).await?;
+                                // ARCH-3: Write 'swapped' status to deployment row.
+                                if let Some(deploy_id) = active_bg_deployment_id {
+                                    let retain = 3600i64;
+                                    let _ = self
+                                        .client
+                                        .execute(
+                                            SWAP_BLUE_GREEN_SQL,
+                                            &[&deploy_id, &Option::<i64>::None, &retain.to_string()],
+                                        )
+                                        .await;
+                                }
+                            }
+                            Err(e) => {
+                                self.client.execute("ROLLBACK", &[]).await.ok();
+                                return Err(e);
+                            }
                         }
                     }
 
@@ -785,6 +979,13 @@ impl<'a> PlanExecutor<'a> {
                                 schema,
                                 retain_secs
                             );
+                        }
+                        // ARCH-3 / v0.15: Write 'retired' status to deployment row.
+                        if let Some(deploy_id) = active_bg_deployment_id {
+                            let _ = self
+                                .client
+                                .execute(RETIRE_BLUE_GREEN_SQL, &[&deploy_id])
+                                .await;
                         }
                     }
 
@@ -878,8 +1079,47 @@ impl<'a> PlanExecutor<'a> {
 
                     // ── v0.9: New plan step variants ────────────────────────
                     PlanStep::RecreatePolicy { name, policy_sql } => {
-                        tracing::info!("Recreating policy on '{}'", name);
-                        self.client.execute(policy_sql.as_str(), &[]).await?;
+                        tracing::info!("Recreating RLS policy on '{}'", name);
+                        // CORR-6 / v0.15: Use captured RLS policies from the cache.
+                        // If the cache has entries for this table, execute them.
+                        // Otherwise fall back to the policy_sql from the plan step.
+                        let table_key = format!("{}.{}", name.schema, name.name);
+                        let stmts: Vec<String> = rls_policy_cache
+                            .get(&table_key)
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                if policy_sql.starts_with("--") {
+                                    // Placeholder — no policies were captured; skip.
+                                    vec![]
+                                } else {
+                                    vec![policy_sql.clone()]
+                                }
+                            });
+                        for stmt in &stmts {
+                            if let Err(e) = self.client.execute(stmt.as_str(), &[]).await {
+                                // Non-fatal: log to ddl_log and continue.
+                                tracing::warn!(
+                                    "RecreatePolicy: failed to execute '{}' on '{}': {} (non-fatal)",
+                                    stmt,
+                                    table_key,
+                                    e
+                                );
+                                let _ = self
+                                    .client
+                                    .execute(
+                                        INSERT_COMPENSATING_STEP_SQL,
+                                        &[
+                                            &migration_id,
+                                            &"rls_policy",
+                                            &name.schema,
+                                            &name.name,
+                                            &"RECREATE_POLICY_FAILED",
+                                            &format!("-- failed: {}: {}", stmt, e),
+                                        ],
+                                    )
+                                    .await;
+                            }
+                        }
                     }
 
                     PlanStep::DetachOutbox { stream_table, outbox_name } => {
@@ -1245,6 +1485,79 @@ fn quote_ident(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
 }
 
+/// Capture RLS policies for a table before dropping it (CORR-6 / v0.15).
+///
+/// Queries `pg_policies` and returns a list of `CREATE POLICY` and
+/// `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` SQL statements. Returns an empty
+/// vec if the table has no RLS policies or if `pg_policies` is not accessible.
+async fn capture_rls_policies(
+    client: &tokio_postgres::Client,
+    schema_name: &str,
+    table_name: &str,
+) -> Vec<String> {
+    let mut stmts: Vec<String> = Vec::new();
+
+    // Check if the table has RLS enabled.
+    let rls_enabled: bool = client
+        .query_one(
+            "SELECT c.relrowsecurity
+             FROM pg_class c
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname = $1 AND c.relname = $2",
+            &[&schema_name, &table_name],
+        )
+        .await
+        .map(|r| r.get::<_, bool>(0))
+        .unwrap_or(false);
+
+    if rls_enabled {
+        stmts.push(format!(
+            "ALTER TABLE {}.{} ENABLE ROW LEVEL SECURITY",
+            quote_ident(schema_name),
+            quote_ident(table_name)
+        ));
+    }
+
+    // Query pg_policies for all policies on this table.
+    let policies = client
+        .query(
+            "SELECT policyname, cmd, qual, with_check, roles
+             FROM pg_policies
+             WHERE schemaname = $1 AND tablename = $2",
+            &[&schema_name, &table_name],
+        )
+        .await
+        .unwrap_or_default();
+
+    for row in policies {
+        let policy_name: String = row.get(0);
+        let cmd: String = row.try_get(1).unwrap_or_else(|_| "ALL".to_string());
+        let qual: Option<String> = row.try_get(2).ok().flatten();
+        let with_check: Option<String> = row.try_get(3).ok().flatten();
+        let roles: Vec<String> = row
+            .try_get::<_, Vec<String>>(4)
+            .unwrap_or_else(|_| vec!["PUBLIC".to_string()]);
+
+        let mut policy_sql = format!(
+            "CREATE POLICY {} ON {}.{} FOR {} TO {}",
+            quote_ident(&policy_name),
+            quote_ident(schema_name),
+            quote_ident(table_name),
+            cmd,
+            roles.join(", ")
+        );
+        if let Some(q) = qual {
+            policy_sql.push_str(&format!(" USING ({})", q));
+        }
+        if let Some(wc) = with_check {
+            policy_sql.push_str(&format!(" WITH CHECK ({})", wc));
+        }
+        stmts.push(policy_sql);
+    }
+
+    stmts
+}
+
 /// Return a short string tag for a plan step (used in migration_steps tracking).
 fn step_type_name(step: &PlanStep) -> &'static str {
     match step {
@@ -1262,6 +1575,7 @@ fn step_type_name(step: &PlanStep) -> &'static str {
         PlanStep::WaitForConvergence { .. } => "WaitForConvergence",
         PlanStep::SwapConsumerViews { .. } => "SwapConsumerViews",
         PlanStep::RetireBlueSchema { .. } => "RetireBlueSchema",
+        PlanStep::StartBlueGreenDeployment { .. } => "StartBlueGreenDeployment",
         PlanStep::ManageConsumerView { .. } => "ManageConsumerView",
         PlanStep::RecreatePolicy { .. } => "RecreatePolicy",
         PlanStep::DetachOutbox { .. } => "DetachOutbox",

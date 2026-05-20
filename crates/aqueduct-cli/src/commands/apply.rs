@@ -53,6 +53,14 @@ pub struct ApplyArgs {
     #[arg(long)]
     pub resume: bool,
 
+    /// Force-retry the step at the given index (CORR-2 / v0.15). Requires --yes.
+    #[arg(long)]
+    pub force_retry: Option<usize>,
+
+    /// Force-skip the step at the given index (CORR-2 / v0.15). Requires --yes.
+    #[arg(long)]
+    pub force_skip: Option<usize>,
+
     /// Print the plan before applying.
     #[arg(long, default_value = "true")]
     pub print_plan: bool,
@@ -147,6 +155,7 @@ pub async fn run(args: ApplyArgs) -> anyhow::Result<()> {
             pre_hook,
             post_hook,
             no_immediate_downgrade: args.no_immediate_downgrade,
+            ..BuildPlanOptions::default()
         };
         let mut p = build_plan_with_options(
             &project_name,
@@ -163,6 +172,15 @@ pub async fn run(args: ApplyArgs) -> anyhow::Result<()> {
     if plan.summary.is_empty() {
         println!("No changes to apply. Project is up to date.");
         return Ok(());
+    }
+
+    // CORR-2 / v0.15: force-retry and force-skip require --yes.
+    if (args.force_retry.is_some() || args.force_skip.is_some()) && !args.yes {
+        anyhow::bail!(
+            "--force-retry and --force-skip require --yes confirmation. \
+             These flags bypass normal step ordering and should only be used \
+             by operators who understand the risk."
+        );
     }
 
     if args.print_plan || !args.yes {
@@ -233,6 +251,8 @@ pub async fn run(args: ApplyArgs) -> anyhow::Result<()> {
 
     let executor = PlanExecutor::new(&client, &project_name, env!("CARGO_PKG_VERSION"), false)
         .with_resume(args.resume)
+        .with_force_retry(args.force_retry)
+        .with_force_skip(args.force_skip)
         .with_connection_string(dsn.clone())
         .with_desired_state(desired);
     let result = executor.execute(&plan).await?;

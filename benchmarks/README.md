@@ -9,7 +9,7 @@ Benchmarks measure the wall-clock time to apply a migration plan under two strat
 | **pg_aqueduct (targeted)** | Apply only the changed nodes using the planner's cost classification. |
 | **Drop/recreate baseline** | Drop all stream tables and recreate from scratch. |
 
-All runs use Testcontainers PostgreSQL 16 on an Apple M2 with 16 GB RAM.
+All runs use Testcontainers PostgreSQL 18 on an Apple M2 with 16 GB RAM.
 For realistic data volumes, each base table is pre-populated with 1 million rows.
 `pg_trickle` is the mock implementation from `aqueduct-testkit` (network-free, in-process).
 

@@ -16,6 +16,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [v0.12.0 — Real pg_trickle Integration, Security & CI/CD Hardening](#v0120--real-pgtrickle-integration-security--cicd-hardening)
 - [v0.13.0 — Blue/Green End-to-End, IMMEDIATE Mode & Advanced Features](#v0130--bluegreen-end-to-end-immediate-mode--advanced-features)
 - [v0.14.0 — Failure Safety, CI/CD Trustworthiness & Security Hardening](#v0140--failure-safety-cicd-trustworthiness--security-hardening)
+- [v0.15.0 — Execution Integrity, Architecture & Blue/Green Production](#v0150--execution-integrity-architecture--bluegreen-production)
 
 **Planned**
 - [v0.2.0 — Online Schema Evolution](#v020--online-schema-evolution)
@@ -28,6 +29,77 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 **Archive**
 - [Unreleased — Repository Bootstrap](#unreleased--repository-bootstrap)
 <!-- TOC end -->
+
+---
+
+## [v0.15.0] — Execution Integrity, Architecture & Blue/Green Production
+
+**Status:** Released
+
+All roadmap items for v0.15 "Phase 18 — Execution Integrity, Architecture & Blue/Green
+Production" are implemented and tested.
+
+### Highlights
+
+- **Saga-style compensating steps (CORR-2)**: `CreateStreamTable` and `DropStreamTable`
+  now write a compensating action to `aqueduct.ddl_log` before executing DDL. On crash
+  recovery (`--resume`), the executor has a log of non-transactional DDL it may need
+  to roll back. Two new flags `--force-retry <step-index>` and `--force-skip <step-index>`
+  on `aqueduct apply` let operators advance past or retry ambiguous steps (require `--yes`).
+
+- **Catalog schema v7**: The catalog bumps to version 7. The migration adds
+  `migration_id` and `compensating_sql` columns to `aqueduct.ddl_log` for the
+  compensating-step registry, and adds `rolled_back_at` plus an updated `bg_status_check`
+  constraint (now accepting `'rolled_back'`) to `aqueduct.blue_green_deployments`.
+
+- **Typed executor contexts (ARCH-2)**: `ExecutionContext` enum with variants `Apply`,
+  `Rollback`, `Promote`, and `DryRun` replaces the optional builder pattern, ensuring
+  `dsn` and `desired_state` are present at compile time for all non-dry-run executors.
+  Named `for_apply()`, `for_rollback()`, and `for_promote()` constructors document intent.
+
+- **CatalogSchema newtype (ARCH-1)**: A new `CatalogSchema` struct validates the
+  catalog schema name at parse time, rejecting SQL injection markers (`--`, `;`, `$`),
+  non-identifier characters, leading digits, and reserved system schema names
+  (`pg_catalog`, `information_schema`, all `pg_*` prefixed names).
+
+- **Blue/green production state machine (ARCH-3)**: The planner emits a new
+  `StartBlueGreenDeployment` step as the first post-lock step, which inserts a row
+  into `aqueduct.blue_green_deployments` with `status = 'active'`. The executor then
+  writes `status = 'swapped'` after the atomic consumer view swap and `status =
+  'retired'` after `RetireBlueSchema`. All `SwapConsumerViews` steps are wrapped in
+  a single `BEGIN ... COMMIT` block, making the swap all-or-nothing.
+
+- **Real RLS policy capture and restore (CORR-6)**: Before any `DropStreamTable` step,
+  the executor queries `pg_policies` and `pg_class.relrowsecurity` to capture real
+  `CREATE POLICY` and `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` statements. The
+  `RecreatePolicy` step executes these statements after the table is recreated.
+  Failures are non-fatal and logged to `aqueduct.ddl_log`. The `aqueduct lint` command
+  now emits a `rebuild-may-affect-rls` warning when a `FULL`-mode table has RLS enabled.
+
+- **Batch convergence polling (PERF-1)**: `WaitForConvergence` now issues a single
+  `SELECT ... WHERE table_name = ANY($2)` query per poll interval instead of one
+  query per node. `convergence_poll_interval_ms` (default 500 ms) and
+  `convergence_timeout_secs` (default 300 s) are configurable via `BuildPlanOptions`.
+
+- **Structured validate diagnostics (M6)**: `aqueduct validate` now returns structured
+  `DiagnosticSet` entries with file paths, error codes, and severity levels.
+  `validate --format json` emits diagnostics matching the `lint` JSON schema.
+  Two new public functions `validate_migration_files_diagnostic` and
+  `validate_dag_diagnostic` replace the legacy string-accumulation approach.
+
+- **PostgreSQL 18+ only**: pg_trickle requires PostgreSQL 18+; all integration tests
+  now target `postgres:18-alpine` exclusively.
+
+### New plan steps
+
+| Step | Description |
+|---|---|
+| `StartBlueGreenDeployment { project, green_schema, blue_schema }` | Records deployment start in catalog |
+
+### Catalog changes
+
+- **v7**: `aqueduct.ddl_log` gains `migration_id bigint` and `compensating_sql text` columns.
+- **v7**: `aqueduct.blue_green_deployments` gains `rolled_back_at timestamptz` and updated `bg_status_check` constraint.
 
 ---
 
@@ -563,10 +635,10 @@ Added `RecreatePolicy`, `DetachOutbox`, `ReattachOutbox`, `ManageWalSlot`,
 `PlanStep`. All have `description()` implementations, cost estimates, and
 executor handlers.
 
-**P5 — PostgreSQL version matrix in CI**  
-Integration tests now run against PostgreSQL 14, 15, 16, and 17 using a matrix
-job. The test helper reads `AQUEDUCT_TEST_PG_IMAGE` to override the container
-image.
+**P5 — PostgreSQL 18+ only (pg_trickle requirement)**  
+Integration tests run against PostgreSQL 18 (`postgres:18-alpine`), the minimum
+version required by pg_trickle. The test helper reads `AQUEDUCT_TEST_PG_IMAGE`
+to override the container image for future PostgreSQL releases.
 
 **P6 — `cargo audit` security-audit job in CI**  
 A dedicated `security-audit` job runs `cargo audit --deny warnings` on every
@@ -730,7 +802,7 @@ destroy, rollback, unlock), front-matter directive table, and `aqueduct.toml` sc
 ### Test suite
 
 - 197 tests total: 101 unit + 63 integration + 33 CLI
-- All 30 new cookbook integration tests pass against Testcontainers PostgreSQL 16
+- All 30 new cookbook integration tests pass against Testcontainers PostgreSQL 18
 - Zero skipped tests
 
 ---

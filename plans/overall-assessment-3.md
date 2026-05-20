@@ -493,7 +493,7 @@ Key gaps identified:
 
 Recommended remediation steps:
 1. Fix artifact naming and action-smoke.
-2. Add PG 14-18 matrix, at least for a focused integration subset.
+2. Add a PG 18+ matrix targeting the minimum supported version required by pg_trickle.
 3. Make docs tests blocking.
 4. Add release dry-run install verification.
 5. Decide whether crates.io publishing is in scope and automate it if yes.
@@ -690,7 +690,7 @@ Recommended remediation steps:
       ```
 
 18. **postgres_version_matrix_min_supported**
-    - Verifies: focused integration tests pass on PG 14, 15, 16, 17, 18.
+    - Verifies: focused integration tests pass on PG 18 (minimum supported by pg_trickle).
     - Why it matters: supported managed PostgreSQL range.
     - Skeleton:
       ```yaml
@@ -731,7 +731,7 @@ Recommended remediation steps:
 | 8 | Catalog schema abstraction | High | L | Required for documented schema override/multi-tenant use. |
 | 9 | Generated CLI reference docs | High | S | Stops recurring docs drift. |
 | 10 | Output emitter for quiet/porcelain/json | Medium | M | Makes CLI scriptable and consistent. |
-| 11 | PG 14-18 CI matrix | Medium | S | Increases confidence on supported platforms. |
+| 11 | PG 18+ CI matrix | Medium | S | Increases confidence on supported platforms. |
 | 12 | YAML serialization via serde | Medium | S | Fixes machine-readable output correctness. |
 | 13 | Mock scheduler state | Medium | S | Enables realistic drain/pause tests. |
 | 14 | Status drift area counts | Medium | XS | Makes drift monitoring complete. |
@@ -782,6 +782,6 @@ Recommended remediation steps:
 ### 3. Do later — important but lower urgency (v1.0 horizon)
 - Build a catalog schema abstraction for non-`aqueduct` schemas.
 - Turn blue/green into a durable deployment state machine.
-- Add PG 14-18 matrix coverage and real pg_trickle compatibility tests.
+- Add PG 18+ matrix coverage and real pg_trickle compatibility tests.
 - Publish crates/binaries with a single release manifest consumed by install docs and actions.
 - Add observability integrations and a documented repair/diagnose workflow.

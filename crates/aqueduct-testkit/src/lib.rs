@@ -8,8 +8,8 @@ use testcontainers_modules::postgres::Postgres;
 use tokio_postgres::NoTls;
 
 /// Default pinned PostgreSQL image version used by Testcontainers.
-/// Override with `AQUEDUCT_TEST_PG_IMAGE` environment variable to test
-/// against a different PostgreSQL version (e.g., `postgres:14-alpine`).
+/// pg_trickle requires PostgreSQL 18+; override with `AQUEDUCT_TEST_PG_IMAGE`
+/// only to test against a newer release (e.g., `postgres:19-alpine`).
 const DEFAULT_PG_IMAGE: &str = "postgres:18-alpine";
 
 /// A running PostgreSQL test container with a connected client.
@@ -23,8 +23,9 @@ pub struct TestDb {
 impl TestDb {
     /// Start a fresh PostgreSQL container.
     ///
-    /// The PostgreSQL image defaults to `postgres:16-alpine` but can be
-    /// overridden by setting `AQUEDUCT_TEST_PG_IMAGE` (e.g., `postgres:17-alpine`).
+    /// The PostgreSQL image defaults to `postgres:18-alpine` (the minimum
+    /// supported by pg_trickle) but can be overridden by setting
+    /// `AQUEDUCT_TEST_PG_IMAGE` (e.g., `postgres:19-alpine`).
     pub async fn new() -> anyhow::Result<Self> {
         let image_tag = std::env::var("AQUEDUCT_TEST_PG_IMAGE")
             .unwrap_or_else(|_| DEFAULT_PG_IMAGE.to_string());

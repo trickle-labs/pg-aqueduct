@@ -274,6 +274,30 @@ pub fn validate_migration_files(files: &[MigrationFile]) -> ValidationResult {
 }
 
 /// Run full DAG validation: cycle detection, dependency resolution, IVM checks.
+/// Returns a `DiagnosticSet` with structured, location-aware diagnostics (M6 / v0.15).
+pub fn validate_dag_diagnostic(state: &DagState) -> DiagnosticSet {
+    let mut set = DiagnosticSet::new();
+
+    // Check for cycles.
+    if let Err(e) = crate::dag::topological_sort(state) {
+        set.push(Diagnostic::error("E201", format!("Dependency cycle detected: {}", e)));
+    }
+
+    // Validate each stream table's query.
+    for table in &state.stream_tables {
+        if !table.query.is_empty() {
+            if let Err(e) = validate_sql_syntax(&table.query, &table.qualified_name.to_string()) {
+                set.push(
+                    Diagnostic::error("E202", format!("{}: {}", table.qualified_name, e))
+                );
+            }
+        }
+    }
+
+    set
+}
+
+/// Run full DAG validation: cycle detection, dependency resolution, IVM checks.
 pub fn validate_dag(state: &DagState) -> ValidationResult {
     let mut result = ValidationResult::default();
 
