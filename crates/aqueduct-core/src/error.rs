@@ -81,6 +81,13 @@ pub enum AqueductError {
     )]
     OwnershipRequired { table: String },
 
+    /// Returned when the probed pg_trickle API does not match the expected
+    /// function signatures (M-07 / v0.12).
+    #[error(
+        "pg_trickle API mismatch: expected function '{expected}' but it was not found or has a different signature"
+    )]
+    PgtrickleApiMismatch { expected: String, found: String },
+
     #[error("{0}")]
     Other(String),
 }
@@ -120,6 +127,7 @@ impl AqueductError {
             AqueductError::Resume(_) => 1302,
             AqueductError::DataLossRequired => 1303,
             AqueductError::OwnershipRequired { .. } => 1304,
+            AqueductError::PgtrickleApiMismatch { .. } => 1005,
             AqueductError::Catalog(_) => 1400,
             AqueductError::Io(_) => 1500,
             AqueductError::Json(_) => 1501,

@@ -97,18 +97,22 @@ runs:
           VERSION="$(curl -fsSL https://api.github.com/repos/trickle-labs/pg-aqueduct/releases/latest | grep '"tag_name"' | sed 's/.*"v\([^"]*\)".*/\1/')"
         fi
 
-        BINARY_NAME="aqueduct-${OS}-${ARCH}"
-        DOWNLOAD_URL="https://github.com/trickle-labs/pg-aqueduct/releases/download/v${VERSION}/${BINARY_NAME}"
+        BINARY_NAME="aqueduct-${VERSION}-${OS}-${ARCH}"
+        DOWNLOAD_URL="https://github.com/trickle-labs/pg-aqueduct/releases/download/v${VERSION}/${BINARY_NAME}.tar.gz"
         INSTALL_DIR="${RUNNER_TOOL_CACHE:-$HOME/.local/bin}"
         mkdir -p "$INSTALL_DIR"
 
         echo "Downloading aqueduct v${VERSION} for ${OS}/${ARCH}..."
-        curl -fsSL -o "${INSTALL_DIR}/aqueduct" "$DOWNLOAD_URL"
-        chmod +x "${INSTALL_DIR}/aqueduct"
+        TMP_DIR="$(mktemp -d)"
+        curl -fsSL -o "${TMP_DIR}/${BINARY_NAME}.tar.gz" "$DOWNLOAD_URL"
 
         if [ -n "${{ inputs.checksum }}" ]; then
-          echo "${{ inputs.checksum }}  ${INSTALL_DIR}/aqueduct" | sha256sum --check
+          echo "${{ inputs.checksum }}  ${TMP_DIR}/${BINARY_NAME}.tar.gz" | sha256sum --check
         fi
+
+        tar -xzf "${TMP_DIR}/${BINARY_NAME}.tar.gz" -C "${TMP_DIR}"
+        cp "${TMP_DIR}/${BINARY_NAME}/aqueduct" "${INSTALL_DIR}/aqueduct"
+        chmod +x "${INSTALL_DIR}/aqueduct"
 
         echo "${INSTALL_DIR}" >> "$GITHUB_PATH"
 

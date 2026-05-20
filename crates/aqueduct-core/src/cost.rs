@@ -11,6 +11,28 @@ use serde::{Deserialize, Serialize};
 use crate::error::Result;
 use crate::plan::{Plan, PlanStep};
 
+/// Errors that can occur during cost estimation (P-08 / v0.12).
+///
+/// Distinguishes SQL execution errors from structural limitations so callers
+/// can decide whether to surface a warning or silently fall back to the "—"
+/// placeholder.
+#[derive(Debug, Clone)]
+pub enum CostError {
+    /// EXPLAIN failed with a database or SQL error.
+    SqlError(String),
+    /// The query type cannot be explained (e.g., empty query, non-SELECT).
+    Unsupported,
+}
+
+impl std::fmt::Display for CostError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CostError::SqlError(msg) => write!(f, "SQL error during EXPLAIN: {}", msg),
+            CostError::Unsupported => write!(f, "query type cannot be estimated"),
+        }
+    }
+}
+
 /// Per-step cost estimate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepCost {
@@ -78,7 +100,18 @@ pub async fn estimate_plan_cost(
                 let query = find_query_for_table(plan, name);
 
                 let estimated_rows = if let Some(q) = &query {
-                    estimate_rows(client, q).await.unwrap_or(None)
+                    match estimate_rows(client, q).await {
+                        Ok(rows) => rows,
+                        Err(CostError::SqlError(ref e)) => {
+                            tracing::warn!(
+                                "EXPLAIN failed for '{}': {} (cost estimate unavailable)",
+                                name,
+                                e
+                            );
+                            None
+                        }
+                        Err(CostError::Unsupported) => None,
+                    }
                 } else {
                     None
                 };
@@ -184,9 +217,15 @@ fn find_query_for_table(plan: &Plan, name: &crate::dag::QualifiedName) -> Option
 }
 
 /// Run `EXPLAIN (FORMAT JSON)` and extract the top-level estimated row count.
-async fn estimate_rows(client: &tokio_postgres::Client, query: &str) -> Result<Option<i64>> {
+///
+/// Returns a `CostError` to distinguish SQL failures from unsupported queries (P-08 / v0.12).
+/// Callers should surface `SqlError` as a plan warning; `Unsupported` is silently ignored.
+async fn estimate_rows(
+    client: &tokio_postgres::Client,
+    query: &str,
+) -> std::result::Result<Option<i64>, CostError> {
     if query.is_empty() {
-        return Ok(None);
+        return Err(CostError::Unsupported);
     }
 
     let explain_sql = format!("EXPLAIN (FORMAT JSON) {}", query);
@@ -195,7 +234,6 @@ async fn estimate_rows(client: &tokio_postgres::Client, query: &str) -> Result<O
     match row {
         Ok(Some(r)) => {
             let json: serde_json::Value = r.get(0);
-            // EXPLAIN JSON is an array with a single object containing "Plan".
             let rows = json
                 .get(0)
                 .and_then(|p| p.get("Plan"))
@@ -204,7 +242,7 @@ async fn estimate_rows(client: &tokio_postgres::Client, query: &str) -> Result<O
             Ok(rows)
         }
         Ok(None) => Ok(None),
-        Err(_) => Ok(None), // Silently ignore EXPLAIN failures (query may reference non-existent tables).
+        Err(e) => Err(CostError::SqlError(e.to_string())),
     }
 }
 
@@ -267,5 +305,16 @@ mod tests {
     #[test]
     fn test_format_duration_none() {
         assert_eq!(format_duration(None, 200, 50_000_000, "FULL"), "—");
+    }
+
+    /// P-08: CostError variants are displayable.
+    #[test]
+    fn test_cost_error_display() {
+        let sql_err = CostError::SqlError("relation does not exist".to_string());
+        assert!(sql_err.to_string().contains("SQL error"));
+        assert!(sql_err.to_string().contains("relation does not exist"));
+
+        let unsupported = CostError::Unsupported;
+        assert!(unsupported.to_string().contains("cannot be estimated"));
     }
 }

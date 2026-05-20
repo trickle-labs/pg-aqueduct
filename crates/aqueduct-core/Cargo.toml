@@ -24,8 +24,11 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 regex = { workspace = true }
 indexmap = { workspace = true }
+reqwest = { workspace = true }
 
 [dev-dependencies]
 aqueduct-testkit = { workspace = true }
 tokio = { workspace = true }
 tempfile = { workspace = true }
+proptest = { workspace = true }
+httpmock = { workspace = true }

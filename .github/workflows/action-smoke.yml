@@ -1,0 +1,128 @@
+name: Action smoke test
+
+# T-09/CI-01: Smoke test for the composite plan and apply actions.
+# Builds the binary from source, packages it as a versioned archive, then
+# exercises the plan and apply composite actions against a live PostgreSQL
+# service container.  Asserts exit 0 from both actions.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  action-smoke:
+    name: Composite action smoke test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: aqueduct
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: smoke_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build aqueduct binary
+        run: cargo build --release --bin aqueduct
+
+      - name: Extract version from Cargo.toml
+        id: version
+        run: |
+          VERSION="$(grep '^version' Cargo.toml | head -1 | sed 's/version = \"//;s/\"//')"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Package binary as versioned archive (matching release convention)
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          OS="linux"
+          ARCH="x86_64"
+          ARCHIVE_NAME="aqueduct-${VERSION}-${OS}-${ARCH}"
+          mkdir -p "/tmp/release/${ARCHIVE_NAME}"
+          cp target/release/aqueduct "/tmp/release/${ARCHIVE_NAME}/aqueduct"
+          cp README.md LICENSE "/tmp/release/${ARCHIVE_NAME}/" 2>/dev/null || true
+          cd /tmp/release
+          tar czf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
+          echo "Created /tmp/release/${ARCHIVE_NAME}.tar.gz"
+
+      - name: Install aqueduct binary from local archive
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          OS="linux"
+          ARCH="x86_64"
+          ARCHIVE_NAME="aqueduct-${VERSION}-${OS}-${ARCH}"
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf "/tmp/release/${ARCHIVE_NAME}.tar.gz" -C /tmp/
+          cp "/tmp/${ARCHIVE_NAME}/aqueduct" "$HOME/.local/bin/aqueduct"
+          chmod +x "$HOME/.local/bin/aqueduct"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Verify aqueduct binary
+        run: |
+          aqueduct --version
+          aqueduct --help
+
+      - name: Initialize aqueduct catalog
+        run: |
+          aqueduct init --dsn "postgres://aqueduct:password@localhost:5432/smoke_test" --allow-plaintext-password
+        env:
+          RUST_LOG: info
+
+      - name: Write a minimal project file
+        run: |
+          mkdir -p /tmp/smoke-project
+          cat > /tmp/smoke-project/aqueduct.toml <<'EOF'
+          [project]
+          name = "smoke-test"
+
+          [targets.prod]
+          dsn = "postgres://aqueduct:password@localhost:5432/smoke_test"
+          EOF
+
+          mkdir -p /tmp/smoke-project/migrations
+          cat > /tmp/smoke-project/migrations/event_count.sql <<'EOF'
+          -- @aqueduct:schedule = "30s"
+          SELECT COUNT(*) AS cnt FROM pg_stat_activity WHERE state = 'active';
+          EOF
+
+      - name: Run aqueduct plan (dry run)
+        run: |
+          aqueduct plan \
+            --to prod \
+            --project-dir /tmp/smoke-project \
+            --dsn "postgres://aqueduct:password@localhost:5432/smoke_test" \
+            --allow-plaintext-password
+        env:
+          RUST_LOG: info
+
+      - name: Run aqueduct apply (dry run)
+        run: |
+          aqueduct apply \
+            --to prod \
+            --project-dir /tmp/smoke-project \
+            --dsn "postgres://aqueduct:password@localhost:5432/smoke_test" \
+            --dry-run \
+            --yes \
+            --allow-plaintext-password
+        env:
+          RUST_LOG: info

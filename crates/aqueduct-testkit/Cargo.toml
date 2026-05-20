@@ -12,6 +12,7 @@ tokio = { workspace = true }
 tokio-postgres = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+aqueduct-core = { path = "../aqueduct-core" }
 
 [dev-dependencies]
 tokio = { workspace = true }
