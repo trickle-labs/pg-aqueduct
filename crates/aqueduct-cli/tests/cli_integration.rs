@@ -1341,7 +1341,12 @@ fn quiet_suppresses_decorative_output() {
 
     let output = Command::cargo_bin("aqueduct")
         .unwrap()
-        .args(["--quiet", "validate", "--project-dir", tmp.path().to_str().unwrap()])
+        .args([
+            "--quiet",
+            "validate",
+            "--project-dir",
+            tmp.path().to_str().unwrap(),
+        ])
         .output()
         .unwrap();
 
@@ -1517,11 +1522,7 @@ fn plan_missing_dsn_exits_2() {
 
     let output = Command::cargo_bin("aqueduct")
         .unwrap()
-        .args([
-            "plan",
-            "--project-dir",
-            tmp.path().to_str().unwrap(),
-        ])
+        .args(["plan", "--project-dir", tmp.path().to_str().unwrap()])
         .output()
         .unwrap();
 
@@ -1549,11 +1550,7 @@ fn validate_exits_0_on_valid_files() {
 
     Command::cargo_bin("aqueduct")
         .unwrap()
-        .args([
-            "validate",
-            "--project-dir",
-            tmp.path().to_str().unwrap(),
-        ])
+        .args(["validate", "--project-dir", tmp.path().to_str().unwrap()])
         .assert()
         .success();
 }
@@ -1577,11 +1574,7 @@ fn validate_differential_ivm_unsupportable_fails() {
 
     let output = Command::cargo_bin("aqueduct")
         .unwrap()
-        .args([
-            "validate",
-            "--project-dir",
-            tmp.path().to_str().unwrap(),
-        ])
+        .args(["validate", "--project-dir", tmp.path().to_str().unwrap()])
         .output()
         .unwrap();
 
@@ -1619,7 +1612,10 @@ fn validate_format_json_produces_valid_json() {
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "validate --format json should exit 0");
+    assert!(
+        output.status.success(),
+        "validate --format json should exit 0"
+    );
     let json: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("stdout must be valid JSON");
     assert!(

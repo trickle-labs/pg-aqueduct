@@ -246,8 +246,10 @@ pub async fn run(args: StatusArgs) -> anyhow::Result<()> {
     // PERF-2: cache the desired state by spec hash so migration files are
     // not re-read when their mtimes haven't changed.
     let mut last_spec_hash: Option<String> = None;
-    let mut last_migration_mtimes: std::collections::HashMap<std::path::PathBuf, std::time::SystemTime> =
-        std::collections::HashMap::new();
+    let mut last_migration_mtimes: std::collections::HashMap<
+        std::path::PathBuf,
+        std::time::SystemTime,
+    > = std::collections::HashMap::new();
 
     loop {
         // Check whether any migration file mtimes have changed.
@@ -261,10 +263,8 @@ pub async fn run(args: StatusArgs) -> anyhow::Result<()> {
                     use sha2::{Digest, Sha256};
                     match aqueduct_core::dag::build_dag_state(&files, true) {
                         Ok(desired) => {
-                            let spec_json =
-                                serde_json::to_string(&desired).unwrap_or_default();
-                            let hash =
-                                format!("{:x}", Sha256::digest(spec_json.as_bytes()));
+                            let spec_json = serde_json::to_string(&desired).unwrap_or_default();
+                            let hash = format!("{:x}", Sha256::digest(spec_json.as_bytes()));
                             last_migration_mtimes = current_mtimes;
                             last_spec_hash = Some(hash.clone());
                             hash
