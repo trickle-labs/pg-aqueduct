@@ -162,6 +162,7 @@ pub async fn estimate_plan_cost(
             | PlanStep::WaitForConvergence { .. }
             | PlanStep::SwapConsumerViews { .. }
             | PlanStep::RetireBlueSchema { .. }
+            | PlanStep::StartBlueGreenDeployment { .. }
             | PlanStep::ManageConsumerView { .. } => StepCost {
                 step: step.description(),
                 class: "blue-green".to_string(),

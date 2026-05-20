@@ -194,6 +194,24 @@ fn lint_stream_file(file: &MigrationFile, _state: &DagState, result: &mut LintRe
                     file: Some(file.path.clone()),
                 });
             }
+
+            // Rule: FULL refresh (Rebuild-class) on a table may have RLS policies that
+            // need restoration. Warn to prompt operators to verify (CORR-6 / v0.15).
+            // Since we cannot check pg_class.relrowsecurity offline, this is a static
+            // advisory warning for all FULL-refresh tables.
+            result.push(LintDiagnostic {
+                rule: "rebuild-may-affect-rls",
+                level: LintLevel::Warning,
+                message: format!(
+                    "'{}': FULL/Rebuild-class migration will drop and recreate the stream \
+                     table. If this table has Row Level Security policies, they will be \
+                     captured and restored automatically by aqueduct apply. Verify policy \
+                     definitions in pg_policies before migration. See: \
+                     https://docs.aqueduct.trickle.io/rls-safe-migration",
+                    file.name
+                ),
+                file: Some(file.path.clone()),
+            });
         }
     }
 

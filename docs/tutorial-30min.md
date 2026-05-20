@@ -274,7 +274,7 @@ entirely without a database connection — ideal for a CI pre-check step.
 $ aqueduct plan --to dev
 
 Project  checkout-analytics  (initial)
-Target   dev (pg_trickle 0.62, pg 16.3)
+Target   dev (pg_trickle 0.62, pg 18+)
 
 Changes  3 nodes affected
 

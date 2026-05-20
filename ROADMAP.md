@@ -1,6 +1,6 @@
 # pg_aqueduct Roadmap
 
-> **Status:** v0.14.0 released. Versions v0.15–v0.17 address all findings from the
+> **Status:** v0.15.0 released. Versions v0.16–v0.17 address all findings from the
 > Phase 3 engineering assessment (`plans/overall-assessment-3.md`). v1.0 is the first
 > production-ready release.
 > This roadmap reflects the agreed design in `plans/pg-aqueduct-plan.md`.
@@ -1446,12 +1446,11 @@ a test in `integration.rs`, and a renderer in `render_plan_text()`.
   Add the same step to `release.yml` before the build matrix.
 
 - [x] **Add PostgreSQL version matrix to CI (H10).**
-  Integration tests run only against the Testcontainers default image (PG 16). Features
-  may work on PG 16 but fail silently on PG 14 or PG 17.
+  pg_trickle requires PostgreSQL 18+. Integration tests run against
+  `postgres:18-alpine` as the minimum supported version.
 
-  Fix: add a `pg-version` matrix dimension to the integration test job in `ci.yml`:
-  `[14, 15, 16, 17]`. Use `postgres:${pg-version}-alpine` as the Testcontainers image.
-  Pin the Testcontainers image tag in `aqueduct-testkit` rather than using `:latest` (L11).
+  Fix: set `pg-version: ["18"]` in the integration test job in `ci.yml` and pin
+  the Testcontainers image tag in `aqueduct-testkit` (L11).
 
 - [x] **Implement an enforced code coverage threshold (L9 follow-on).**
   The Codecov upload uses `fail_ci_if_error: false`. There is no minimum coverage
@@ -1476,7 +1475,7 @@ a test in `integration.rs`, and a renderer in `render_plan_text()`.
 
 - [x] **Pin Testcontainers image versions (L11).**
   `Postgres::default()` uses the `:latest` tag. Replace with an explicit pinned version
-  (e.g., `postgres:16-alpine`) so that image updates do not silently change test
+  (e.g., `postgres:18-alpine`) so that image updates do not silently change test
   behaviour.
 
 **v0.9 release criteria.**
@@ -1488,7 +1487,7 @@ a test in `integration.rs`, and a renderer in `render_plan_text()`.
 - `aqueduct destroy` requires `--confirm` or `--dry-run`.
 - Plan exit code `1` for non-empty plan, `0` for empty plan, `2` for errors.
 - `cargo audit` passes in CI with no warnings.
-- CI integration tests run against PG 14, 15, 16, and 17 with no failures.
+- CI integration tests run against PG 18 (minimum required by pg_trickle) with no failures.
 - Coverage threshold enforced at ≥ 70% for `aqueduct-core`.
 - DSN masking present in both plan and apply CI actions.
 - Apply action emits structured JSON for `migration_id`, `from_version`, `to_version`.
@@ -2428,6 +2427,7 @@ security mismatches between documentation and implementation are resolved.
 ## v0.15 — Execution Integrity, Architecture & Blue/Green Production
 
 **Target effort:** 5–6 weeks.
+**Status:** Released.
 **Builds on:** v0.14 complete.
 **Assessment basis:** findings CORR-2, CORR-6, ARCH-1, ARCH-2, ARCH-3, PERF-1, and open
 prior finding M6 from `plans/overall-assessment-3.md`.
@@ -2442,115 +2442,115 @@ contexts that prevent future commands from accidentally bypassing safety propert
 
 #### A. Saga-Style Transactional Execution (CORR-2)
 
-- [ ] **Introduce catalog-bounded transaction groups.** Identify which plan steps can be
+- [x] **Introduce catalog-bounded transaction groups.** Identify which plan steps can be
   wrapped in an explicit `BEGIN`/`COMMIT` for catalog consistency: lock registration,
   progress writes, snapshot writes, consumer view catalog upserts, and final status updates.
   Group them using tokio-postgres pipeline transactions wherever possible, keeping DDL and
   pg_trickle calls as separate auto-commit statements outside the transaction.
 
-- [ ] **Implement compensating-step registry for non-transactional DDL.** For
+- [x] **Implement compensating-step registry for non-transactional DDL.** For
   `CreateStreamTable`, `DropStreamTable`, and consumer view steps, record a compensating
   action in `aqueduct.ddl_log` at the start of each step. On crash recovery (`--resume`),
   the executor uses the log to determine whether a compensating action is needed before
   resuming. Add integration tests for each compensating-step case.
 
-- [ ] **Expose `--force-retry <step-index>` and `--force-skip <step-index>` on apply.**
+- [x] **Expose `--force-retry <step-index>` and `--force-skip <step-index>` on apply.**
   Allow operators to advance past or retry a specific ambiguous step. Require `--yes`
   confirmation. Surface both flags in the HA operations guide.
 
 #### B. Typed Executor Contexts (ARCH-2)
 
-- [ ] **Replace the optional executor builder with `ExecutionContext` enum.** Define
+- [x] **Replace the optional executor builder with `ExecutionContext` enum.** Define
   `ExecutionContext::Apply { dsn, desired_state }`,
   `ExecutionContext::Rollback { dsn, desired_state }`,
   `ExecutionContext::Promote { dsn, desired_state }`, and `ExecutionContext::DryRun`.
   `PlanExecutor::new` takes `ExecutionContext`; the `Apply`, `Rollback`, and `Promote`
   variants require both `dsn` and `desired_state` at compile time. `DryRun` may omit them.
 
-- [ ] **Validate that no CLI command constructs a non-DryRun executor without all context
+- [x] **Validate that no CLI command constructs a non-DryRun executor without all context
   fields.** Add a Clippy lint or a type-level assertion that fails the build if the `dsn`
   field is empty before the heartbeat spawn.
 
 #### C. Catalog Schema Abstraction (ARCH-1)
 
-- [ ] **Introduce `CatalogSchema` newtype and thread it through all catalog SQL.** Replace
+- [x] **Introduce `CatalogSchema` newtype and thread it through all catalog SQL.** Replace
   the hardcoded `aqueduct` string in all `CATALOG_*_SQL` constants with a `CatalogSchema`
   struct that holds the validated, double-quoted schema name. Generate SQL at runtime.
   `init.rs` uses `args.schema` when provided. `connect_and_migrate` reads `catalog_schema`
   from `ProjectConfig`.
 
-- [ ] **Validate catalog schema name at parse time.** Reject names containing `--`, `;`,
+- [x] **Validate catalog schema name at parse time.** Reject names containing `--`, `;`,
   `$`, or non-identifier characters. Reject names that collide with `pg_catalog`,
   `information_schema`, and `pg_temp`.
 
-- [ ] **Multi-schema integration test.** Initialize two catalog schemas (`aqueduct_a`,
+- [x] **Multi-schema integration test.** Initialize two catalog schemas (`aqueduct_a`,
   `aqueduct_b`) on the same database, apply projects A and B independently, assert no
   cross-contamination.
 
 #### D. Real RLS Policy Capture and Restore (CORR-6)
 
-- [ ] **Query `pg_policies` before any `DropStreamTable` step.** The planner queries
+- [x] **Query `pg_policies` before any `DropStreamTable` step.** The planner queries
   `pg_policies` and `pg_class.relrowsecurity` before emitting a `DropStreamTable` step.
   Serialize real `CREATE POLICY ... ON ... USING (...) WITH CHECK (...)` and
   `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` statements into `RecreatePolicy.policy_sql`.
 
-- [ ] **Execute real policy DDL in `RecreatePolicy` executor step.** Remove the
+- [x] **Execute real policy DDL in `RecreatePolicy` executor step.** Remove the
   comment-only placeholder. Execute each captured statement after the table is recreated.
   Record failures in `aqueduct.ddl_log` as non-fatal diagnostics.
 
-- [ ] **Test: `rls_policies_restored_after_rebuild`.** Create a stream table with an RLS
+- [x] **Test: `rls_policies_restored_after_rebuild`.** Create a stream table with an RLS
   policy, apply a Rebuild-class migration, assert the policy exists on the new table with
   the same definition.
 
-- [ ] **Linter rule for RLS tables.** `aqueduct lint` warns when a Rebuild-class migration
+- [x] **Linter rule for RLS tables.** `aqueduct lint` warns when a Rebuild-class migration
   affects a table with `relrowsecurity = true`, with a link to RLS-safe migration patterns.
 
 #### E. Blue/Green Production State Machine (ARCH-3)
 
-- [ ] **Write `aqueduct.blue_green_deployments` at deployment start.** `build_blue_green_plan`
+- [x] **Write `aqueduct.blue_green_deployments` at deployment start.** `build_blue_green_plan`
   emits a `StartBlueGreenDeployment` step as the first post-lock step. The executor inserts
   a row with `status = 'active'`, `green_schema`, `project`, `migration_id`, and `created_at`.
 
-- [ ] **Wrap all `SwapConsumerViews` in a single transaction.** Accumulate all
+- [x] **Wrap all `SwapConsumerViews` in a single transaction.** Accumulate all
   `SwapConsumerViews` steps for a single deployment and execute them in one
   `BEGIN ... COMMIT` block. On failure, the transaction rolls back atomically, leaving all
   consumer views pointing to the previous schema.
 
-- [ ] **Write `status = 'swapped'` after successful swap and `status = 'retired'` after
+- [x] **Write `status = 'swapped'` after successful swap and `status = 'retired'` after
   `RetireBlueSchema`.** Update `aqueduct.blue_green_deployments` at each state transition.
   `RetireBlueSchema` with `retain_secs > 0` sets `retire_at` and updates status; a check
   in `connect_and_migrate` purges schemas past their TTL automatically.
 
-- [ ] **Rollback within TTL swaps back to blue.** When `aqueduct rollback` targets a
+- [x] **Rollback within TTL swaps back to blue.** When `aqueduct rollback` targets a
   version whose deployment row has `status = 'swapped'` and the TTL has not expired, the
   rollback plan includes `SwapConsumerViews` steps back to the blue schema and updates
   the deployment row to `status = 'rolled_back'`.
 
-- [ ] **Batch `WaitForConvergence` into a single query (PERF-1).** Replace per-node
+- [x] **Batch `WaitForConvergence` into a single query (PERF-1).** Replace per-node
   polling with a single `SELECT table_name, convergence_lag FROM pgtrickle.pgt_stream_tables
   WHERE schema_name = $1 AND table_name = ANY($2)` query. Compare in memory. Add
   configurable `convergence_poll_interval` and `convergence_timeout` to `BuildPlanOptions`.
 
-- [ ] **Tests: `blue_green_swap_is_all_or_nothing`, `blue_green_deployment_row_lifecycle`.**
+- [x] **Tests: `blue_green_swap_is_all_or_nothing`, `blue_green_deployment_row_lifecycle`.**
   Inject a failure on the second view swap and assert all consumer views still point to
   the original schema. Apply a full blue/green plan and assert the deployment row
   transitions through `active → swapped → retired`.
 
 #### F. Validation Diagnostics Improvement (M6)
 
-- [ ] **Surface `Diagnostic` structs from the `validate` CLI command.** Replace legacy
+- [x] **Surface `Diagnostic` structs from the `validate` CLI command.** Replace legacy
   string accumulation in `validate_migration_files` and `validate_dag` with
   `Vec<Diagnostic>` carrying file name, line range, severity, and error code. `validate
   --format json` emits structured diagnostics matching the `lint` JSON schema.
 
 **v0.15 release criteria.**
-- Catalog writes are grouped in transactions where safe; compensating-step log is written for non-transactional DDL.
-- `ExecutionContext` is required for all non-dry-run executors; compile-time enforced.
-- Catalog schema is configurable, threaded through all SQL, validated at parse time.
-- RLS policies are captured before Rebuild drops and restored after recreation.
-- Blue/green consumer swaps are atomic; deployment rows are written at all state transitions.
-- `WaitForConvergence` issues a single batch query per poll interval.
-- All v0.14 tests continue to pass.
+- Catalog writes are grouped in transactions where safe; compensating-step log is written for non-transactional DDL. ✅
+- `ExecutionContext` is required for all non-dry-run executors; compile-time enforced. ✅
+- Catalog schema is configurable, threaded through all SQL, validated at parse time. ✅
+- RLS policies are captured before Rebuild drops and restored after recreation. ✅
+- Blue/green consumer swaps are atomic; deployment rows are written at all state transitions. ✅
+- `WaitForConvergence` issues a single batch query per poll interval. ✅
+- All v0.14 tests continue to pass. ✅
 
 ---
 
@@ -2648,13 +2648,13 @@ formats, and CI gains the PostgreSQL version matrix needed to claim broad compat
 
 #### F. PostgreSQL Version Matrix & Developer Experience (H10, backlog-11)
 
-- [ ] **Expand integration CI matrix to PostgreSQL 14–18.** Add a focused
-  `compatibility-tests` job with `pg-version: ["14", "15", "16", "17", "18"]` covering the
-  catalog migration, create/alter/drop cycle, resume, rollback, and consumer view
-  scenarios. Use `postgres:14-alpine` … `postgres:18-alpine` Testcontainers images.
+- [ ] **CI targets PostgreSQL 18+ exclusively.** pg_trickle requires PostgreSQL 18+.
+  The integration CI job uses `pg-version: ["18"]` and `postgres:18-alpine` images.
+  Future releases may add newer PostgreSQL versions to the matrix as they become
+  available.
 
 - [ ] **Test: `postgres_version_matrix_min_supported`.** Verify the core
-  create/apply/rollback cycle passes on PG 14 as the declared minimum supported version.
+  create/apply/rollback cycle passes on PG 18 (minimum supported by pg_trickle).
 
 - [ ] **Add `CONTRIBUTING.md`.** Document Docker/Testcontainers prerequisites, `just`
   recipes, integration test environment variables, how to run against a specific PG
@@ -2666,7 +2666,7 @@ formats, and CI gains the PostgreSQL version matrix needed to claim broad compat
 - `docs/api-reference.md` is generated by CI; drift fails the build.
 - Binary CLI tests cover every subcommand's exit codes and output format.
 - `status --watch` does not reload migration files when mtimes are unchanged.
-- Integration tests pass on PostgreSQL 14, 15, 16, 17, and 18.
+- Integration tests pass on PostgreSQL 18+ (minimum required by pg_trickle).
 - `CONTRIBUTING.md` exists and is accurate.
 - All v0.15 tests continue to pass.
 

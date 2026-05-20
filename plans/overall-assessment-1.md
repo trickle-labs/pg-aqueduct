@@ -337,9 +337,9 @@ This returns `Removal` (classified as `InPlace`) for removing column 2 from a 3-
 
 **File:** `.github/workflows/ci.yml`, `.github/workflows/release.yml`
 
-**Problem:** The CI integration test matrix runs only on the default Testcontainers PostgreSQL image (16 at time of writing). `release.yml` hardcodes `postgres:16`. There is no PG 14 / PG 15 / PG 17 test path.
+**Problem:** The CI integration test matrix runs only on the default Testcontainers PostgreSQL image. pg_trickle requires PostgreSQL 18+, so pg-aqueduct targets PostgreSQL 18+ exclusively.
 
-**Impact:** Syntax differences (`pg_stat_activity` column additions, `current_setting()` behaviour, `information_schema` views) may work on PG 16 but fail on PG 14, which is still under active support. The `app.cnpg.cluster_name` GUC detection in `live_state.rs::detect_ha_backend()` uses a custom parameter that behaves differently across versions.
+**Impact:** The minimum supported version is PostgreSQL 18 (required by pg_trickle). Tests and CI should use `postgres:18-alpine` as the baseline. Older PostgreSQL versions are not supported.
 
 ---
 
@@ -865,7 +865,7 @@ These issues must be resolved before the tool can be trusted in production.
 14. **Implement `--allow-plaintext-password` guard** in `config.rs` (M8)
 15. **Add `--fail-on-drift` flag to `aqueduct plan`** (M14 / H4)
 16. **Write tests for** maintenance window, allow_full_refresh, drift detection, column-removal classifier, AlterStreamTable query update, lock heartbeat expiry, resume behaviour
-17. **Add PostgreSQL version matrix** to CI (PG 14, 15, 16, 17) (H10)
+17. **Add PostgreSQL version matrix** to CI (PG 18+, matching pg_trickle minimum) (H10)
 
 ### Milestone C — Feature Gaps and Ergonomics (2–4 weeks)
 

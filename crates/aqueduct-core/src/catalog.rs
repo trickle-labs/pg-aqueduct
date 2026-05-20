@@ -1,7 +1,91 @@
+/// A validated, injection-safe catalog schema name (ARCH-1 / v0.15).
+///
+/// Wraps the schema name string and enforces at construction time:
+/// - Only valid PostgreSQL identifier characters (letters, digits, `_`).
+/// - Does not start with a digit.
+/// - Does not collide with system schemas (`pg_catalog`, `information_schema`,
+///   `pg_temp`, `public`).
+/// - Does not contain SQL-injection markers (`--`, `;`, `$`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogSchema(String);
+
+impl CatalogSchema {
+    /// Validate and construct a `CatalogSchema`.
+    ///
+    /// Returns `Err` with a human-readable message if the name is invalid.
+    pub fn new(name: &str) -> crate::error::Result<Self> {
+        if name.is_empty() {
+            return Err(crate::error::AqueductError::Other(
+                "catalog schema name must not be empty".to_string(),
+            ));
+        }
+        // Check for SQL injection markers.
+        if name.contains("--") || name.contains(';') || name.contains('$') {
+            return Err(crate::error::AqueductError::Other(format!(
+                "catalog schema name '{}' contains forbidden characters ('--', ';', '$')",
+                name
+            )));
+        }
+        // Only allow valid PostgreSQL identifier characters.
+        if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return Err(crate::error::AqueductError::Other(format!(
+                "catalog schema name '{}' contains non-identifier characters \
+                 (only letters, digits, and '_' are allowed)",
+                name
+            )));
+        }
+        // Must not start with a digit.
+        if name
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(false)
+        {
+            return Err(crate::error::AqueductError::Other(format!(
+                "catalog schema name '{}' must not start with a digit",
+                name
+            )));
+        }
+        // Reject system schema names.
+        let reserved = ["pg_catalog", "information_schema", "pg_temp", "pg_toast"];
+        let lower = name.to_lowercase();
+        if reserved.contains(&lower.as_str()) || lower.starts_with("pg_") {
+            return Err(crate::error::AqueductError::Other(format!(
+                "catalog schema name '{}' collides with a reserved PostgreSQL schema name",
+                name
+            )));
+        }
+        Ok(Self(name.to_string()))
+    }
+
+    /// Returns the double-quoted, SQL-safe schema identifier.
+    pub fn quoted(&self) -> String {
+        format!("\"{}\"", self.0.replace('"', "\"\""))
+    }
+
+    /// Returns the unquoted schema name (validated).
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for CatalogSchema {
+    fn default() -> Self {
+        // The default schema name is always valid — no need to validate.
+        Self("aqueduct".to_string())
+    }
+}
+
+impl std::fmt::Display for CatalogSchema {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// SQL statements for bootstrapping the aqueduct catalog schema.
 /// These are embedded directly in the binary via include_str!() in a real deployment;
 /// for v0.1 we keep them as a constant in this module.
-pub const CATALOG_SCHEMA_VERSION: u32 = 6;
+pub const CATALOG_SCHEMA_VERSION: u32 = 7;
 
 /// The SQL to create the aqueduct catalog schema (v1, baseline).
 pub const CATALOG_INIT_SQL: &str = r#"
@@ -356,6 +440,36 @@ SET value_jsonb = '6'::jsonb, measured_at = now()
 WHERE key = 'catalog_schema_version';
 "#;
 
+/// Catalog migration from v6 to v7 (CORR-2 / ARCH-1 / v0.15):
+/// - Adds `migration_id` and `compensating_sql` columns to `aqueduct.ddl_log` to
+///   support the saga-style compensating-step registry (CORR-2).
+/// - Adds `rollback_status` column to `aqueduct.blue_green_deployments` to support
+///   the TTL rollback path (ARCH-3).
+pub const CATALOG_MIGRATE_V6_TO_V7_SQL: &str = r#"
+-- Add compensating-step support to ddl_log (CORR-2 / v0.15).
+ALTER TABLE aqueduct.ddl_log
+    ADD COLUMN IF NOT EXISTS migration_id bigint REFERENCES aqueduct.migrations(id),
+    ADD COLUMN IF NOT EXISTS compensating_sql text;
+
+CREATE INDEX IF NOT EXISTS aqueduct_ddl_log_migration
+    ON aqueduct.ddl_log (migration_id)
+    WHERE migration_id IS NOT NULL;
+
+-- Add rollback_status to blue_green_deployments to track TTL rollbacks (ARCH-3 / v0.15).
+ALTER TABLE aqueduct.blue_green_deployments
+    ADD COLUMN IF NOT EXISTS rolled_back_at timestamptz;
+
+ALTER TABLE aqueduct.blue_green_deployments DROP CONSTRAINT IF EXISTS bg_status_check;
+ALTER TABLE aqueduct.blue_green_deployments
+    ADD CONSTRAINT bg_status_check
+    CHECK (status IN ('active', 'swapped', 'retired', 'failed', 'rolled_back'));
+
+-- Bump catalog version to 7.
+UPDATE aqueduct.cluster_profile
+SET value_jsonb = '7'::jsonb, measured_at = now()
+WHERE key = 'catalog_schema_version';
+"#;
+
 /// SQL to check whether the aqueduct catalog already exists.
 pub const CATALOG_EXISTS_SQL: &str = r#"
 SELECT EXISTS (
@@ -585,6 +699,13 @@ pub async fn ensure_catalog_current(client: &tokio_postgres::Client) -> crate::e
                 .await
                 .map_err(|e| crate::error::AqueductError::Catalog(e.to_string()))?;
         }
+        // Apply the v6→v7 migration if needed (CORR-2 / ARCH-1 / v0.15).
+        if current_version < 7 {
+            client
+                .batch_execute(CATALOG_MIGRATE_V6_TO_V7_SQL)
+                .await
+                .map_err(|e| crate::error::AqueductError::Catalog(e.to_string()))?;
+        }
     }
 
     Ok(())
@@ -626,6 +747,43 @@ pub const RETIRE_BLUE_GREEN_SQL: &str = r#"
 UPDATE aqueduct.blue_green_deployments
 SET status = 'retired', retired_at = now()
 WHERE id = $1
+"#;
+
+/// SQL to roll back a blue/green deployment within the TTL (ARCH-3 / v0.15).
+pub const ROLLBACK_BLUE_GREEN_SQL: &str = r#"
+UPDATE aqueduct.blue_green_deployments
+SET status = 'rolled_back', rolled_back_at = now()
+WHERE id = $1
+"#;
+
+/// SQL to find an active or swapped blue/green deployment for a project (ARCH-3 / v0.15).
+pub const GET_ACTIVE_BLUE_GREEN_SQL: &str = r#"
+SELECT id, green_schema, blue_schema, status, retire_at
+FROM aqueduct.blue_green_deployments
+WHERE project = $1 AND status IN ('active', 'swapped')
+ORDER BY started_at DESC
+LIMIT 1
+"#;
+
+/// SQL to write a compensating-step entry to ddl_log (CORR-2 / v0.15).
+///
+/// Parameters: $1=migration_id, $2=object_type, $3=schema_name, $4=object_name,
+///             $5=command_tag, $6=compensating_sql.
+pub const INSERT_COMPENSATING_STEP_SQL: &str = r#"
+INSERT INTO aqueduct.ddl_log
+    (migration_id, object_type, schema_name, object_name, command_tag, compensating_sql, pg_role)
+VALUES ($1, $2, $3, $4, $5, $6, current_role)
+"#;
+
+/// SQL to retrieve the compensating SQL for a step from ddl_log (CORR-2 / v0.15).
+///
+/// Used during `--resume` to determine if a DDL step needs to be compensated.
+pub const GET_COMPENSATING_STEP_SQL: &str = r#"
+SELECT compensating_sql, command_tag
+FROM aqueduct.ddl_log
+WHERE migration_id = $1 AND object_name = $2
+ORDER BY id DESC
+LIMIT 1
 "#;
 
 /// SQL to start a migration step row (M-08 / v0.13).

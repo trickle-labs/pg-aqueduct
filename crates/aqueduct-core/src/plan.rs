@@ -6,6 +6,11 @@ use crate::dag::{ConsumerSpec, MigrationStrategy, QualifiedName, RefreshMode, St
 use crate::diff::{ConsumerDeltaKind, DagDiff, DeltaKind, NodeDelta, SourceDeltaKind};
 use crate::error::{AqueductError, Result};
 
+/// Default poll interval for WaitForConvergence (PERF-1 / v0.15).
+fn default_poll_interval_ms() -> u64 {
+    500
+}
+
 /// Typed action for `ManageWalSlot` plan step (Q-03).
 ///
 /// Replaces the previous `action: String` field, eliminating the `Unknown` arm
@@ -98,6 +103,9 @@ pub enum PlanStep {
         node_names: Vec<String>,
         /// Maximum seconds to wait before failing.
         max_wait_secs: u64,
+        /// Poll interval in milliseconds (PERF-1 / v0.15). Default 500ms.
+        #[serde(default = "default_poll_interval_ms")]
+        poll_interval_ms: u64,
     },
     /// Atomically swap all consumer views from blue to green schema.
     SwapConsumerViews {
@@ -110,6 +118,17 @@ pub enum PlanStep {
         schema: String,
         /// Seconds to retain the blue schema before dropping.
         retain_secs: u64,
+    },
+
+    /// Record a blue/green deployment start in aqueduct.blue_green_deployments (ARCH-3 / v0.15).
+    ///
+    /// This step is emitted as the first post-lock step in a blue/green plan.
+    /// The executor inserts a row with status='active' and stores the deployment id
+    /// for subsequent SwapConsumerViews and RetireBlueSchema steps.
+    StartBlueGreenDeployment {
+        project: String,
+        green_schema: String,
+        blue_schema: String,
     },
 
     // ── v0.3: Consumer view steps ──────────────────────────────────────────────
@@ -218,6 +237,16 @@ impl PlanStep {
                 retain_secs,
             } => {
                 format!("Retire blue schema '{}' (after {}s)", schema, retain_secs)
+            }
+            PlanStep::StartBlueGreenDeployment {
+                project,
+                green_schema,
+                ..
+            } => {
+                format!(
+                    "Start blue/green deployment for '{}' → '{}'",
+                    project, green_schema
+                )
             }
             PlanStep::ManageConsumerView { spec, action } => {
                 format!(
@@ -531,7 +560,8 @@ pub fn plan_stats(steps: &[PlanStep]) -> PlanSummary {
             | PlanStep::CreateStreamTableInGreen { .. }
             | PlanStep::WaitForConvergence { .. }
             | PlanStep::SwapConsumerViews { .. }
-            | PlanStep::RetireBlueSchema { .. } => {
+            | PlanStep::RetireBlueSchema { .. }
+            | PlanStep::StartBlueGreenDeployment { .. } => {
                 summary.blue_green_count += 1;
             }
             _ => {} // LockDag, UnlockDag, RecordSnapshot, ValidateQuery, etc. — no summary impact.
@@ -542,7 +572,7 @@ pub fn plan_stats(steps: &[PlanStep]) -> PlanSummary {
 }
 
 /// Options for building a plan (M-01 / v0.13).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct BuildPlanOptions {
     /// Migration strategy (Default or BlueGreen).
     pub strategy: MigrationStrategy,
@@ -553,6 +583,25 @@ pub struct BuildPlanOptions {
     /// When true, reject any plan that would temporarily downgrade an IMMEDIATE
     /// table to DIFFERENTIAL (`--no-immediate-downgrade`).
     pub no_immediate_downgrade: bool,
+    /// Poll interval for WaitForConvergence in milliseconds (PERF-1 / v0.15).
+    /// Defaults to 500ms.
+    pub convergence_poll_interval_ms: u64,
+    /// Timeout for WaitForConvergence in seconds (PERF-1 / v0.15).
+    /// Defaults to 300s.
+    pub convergence_timeout_secs: u64,
+}
+
+impl Default for BuildPlanOptions {
+    fn default() -> Self {
+        Self {
+            strategy: MigrationStrategy::Default,
+            pre_hook: None,
+            post_hook: None,
+            no_immediate_downgrade: false,
+            convergence_poll_interval_ms: 500,
+            convergence_timeout_secs: 300,
+        }
+    }
 }
 
 /// Build a Plan from a DagDiff.
@@ -854,18 +903,6 @@ pub fn build_plan_with_options(
                         deadline_secs: 60,
                     });
 
-                    // RecreatePolicy: collect existing policies (step-registry enforcement / v0.13).
-                    // In production, the executor queries pg_policies; here we emit a placeholder
-                    // so the step type is exercised end-to-end. The executor will handle the real
-                    // policy SQL at runtime.
-                    steps.push(PlanStep::RecreatePolicy {
-                        name: delta.qualified_name.clone(),
-                        policy_sql: format!(
-                            "-- RLS policies for {} will be restored by executor",
-                            delta.qualified_name
-                        ),
-                    });
-
                     // Must drop + recreate to establish delta-tracking state.
                     if !desired.query.is_empty() {
                         steps.push(PlanStep::ValidateQuery {
@@ -879,6 +916,16 @@ pub fn build_plan_with_options(
                     });
                     steps.push(PlanStep::CreateStreamTable {
                         spec: desired.clone(),
+                    });
+                    // RecreatePolicy: placed after CreateStreamTable so the executor
+                    // can capture policies from the old table during DropStreamTable
+                    // (into rls_policy_cache) and then restore them here (CORR-6).
+                    steps.push(PlanStep::RecreatePolicy {
+                        name: delta.qualified_name.clone(),
+                        policy_sql: format!(
+                            "-- RLS policies for {} will be restored by executor",
+                            delta.qualified_name
+                        ),
                     });
                     steps.push(PlanStep::Backfill {
                         name: delta.qualified_name.clone(),
@@ -992,21 +1039,21 @@ pub fn build_plan_with_options(
                             deadline_secs: 60,
                         });
 
-                        // RecreatePolicy step (step-registry enforcement / v0.13).
-                        steps.push(PlanStep::RecreatePolicy {
-                            name: delta.qualified_name.clone(),
-                            policy_sql: format!(
-                                "-- RLS policies for {} will be restored by executor",
-                                delta.qualified_name
-                            ),
-                        });
-
                         steps.push(PlanStep::DropStreamTable {
                             name: delta.qualified_name.clone(),
                             cascade: false,
                         });
                         steps.push(PlanStep::CreateStreamTable {
                             spec: desired.clone(),
+                        });
+                        // RecreatePolicy: placed after CreateStreamTable so the executor
+                        // can capture policies during DropStreamTable and restore them here (CORR-6).
+                        steps.push(PlanStep::RecreatePolicy {
+                            name: delta.qualified_name.clone(),
+                            policy_sql: format!(
+                                "-- RLS policies for {} will be restored by executor",
+                                delta.qualified_name
+                            ),
                         });
                         steps.push(PlanStep::Backfill {
                             name: delta.qualified_name.clone(),
@@ -1155,7 +1202,18 @@ fn build_blue_green_plan(
         from_version.unwrap_or(0)
     );
 
-    // Step 1: Create the green schema.
+    // Step 1a: Record deployment start (ARCH-3 / v0.15).
+    // This step must come immediately after LockDag so the catalog row is written
+    // before any DDL executes. The executor will store the deployment id for
+    // subsequent SwapConsumerViews and RetireBlueSchema transitions.
+    steps.push(PlanStep::StartBlueGreenDeployment {
+        project: project.to_string(),
+        green_schema: green_schema.clone(),
+        blue_schema: blue_schema.clone(),
+    });
+    summary.blue_green_count += 1;
+
+    // Step 1b: Create the green schema.
     steps.push(PlanStep::CreateGreenSchema {
         schema: green_schema.clone(),
     });
@@ -1212,13 +1270,12 @@ fn build_blue_green_plan(
         });
     }
 
-    // Step 3: Wait for convergence.
-    let convergence_lag_secs = 30u64;
-    let max_wait_secs = 300u64;
+    // Step 3: Wait for convergence (PERF-1 / v0.15: configurable poll interval and timeout).
     steps.push(PlanStep::WaitForConvergence {
         green_schema: green_schema.clone(),
         node_names: node_names.clone(),
-        max_wait_secs,
+        max_wait_secs: options.convergence_timeout_secs,
+        poll_interval_ms: options.convergence_poll_interval_ms,
     });
     summary.blue_green_count += 1;
 
@@ -1267,9 +1324,6 @@ fn build_blue_green_plan(
         version: next_version,
     });
     steps.push(PlanStep::UnlockDag { force: false });
-
-    // Suppress unused variable warning.
-    let _ = convergence_lag_secs;
 
     Ok(Plan {
         project: project.to_string(),
@@ -1529,6 +1583,7 @@ mod tests {
                 green_schema: "public_green".to_string(),
                 node_names: vec![],
                 max_wait_secs: 300,
+                poll_interval_ms: 500,
             },
             PlanStep::SwapConsumerViews {
                 assignments: vec![],
@@ -1538,6 +1593,11 @@ mod tests {
             PlanStep::RetireBlueSchema {
                 schema: "public".to_string(),
                 retain_secs: 3600,
+            },
+            PlanStep::StartBlueGreenDeployment {
+                project: "test-project".to_string(),
+                green_schema: "public_green".to_string(),
+                blue_schema: "public".to_string(),
             },
             PlanStep::ManageConsumerView {
                 spec: dummy_consumer,
