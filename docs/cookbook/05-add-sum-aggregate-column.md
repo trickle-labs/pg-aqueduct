@@ -24,7 +24,7 @@ GROUP BY id;
 
 ## Plan output
 
-```
+```text
 Project  analytics  v11 → v12
 Target   prod
 

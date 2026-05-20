@@ -28,7 +28,7 @@ This means rollback uses the same planner, executor, and safety checks as a norm
 
 ## Example (v1 → v2 → rollback to v1)
 
-```
+```text
 v1: c29_base only
 v2: c29_base + c29_extra (added)
 rollback to v1: DROP c29_extra

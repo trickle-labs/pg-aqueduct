@@ -8,7 +8,7 @@ Adjust the refresh cadence of a set of related stream tables in one `aqueduct ap
 
 ## Migration files (updated schedules)
 
-```
+```text
 c27_a.sql:  -- @aqueduct:schedule = "10s"   (was 1m)
 c27_b.sql:  -- @aqueduct:schedule = "10s"   (was 1m)
 c27_c.sql:  -- @aqueduct:schedule = "10s"   (was 1m)
@@ -16,7 +16,7 @@ c27_c.sql:  -- @aqueduct:schedule = "10s"   (was 1m)
 
 ## Plan output
 
-```
+```text
   ~ c27_a    [free]   schedule: 1m → 10s
   ~ c27_b    [free]   schedule: 1m → 10s
   ~ c27_c    [free]   schedule: 1m → 10s

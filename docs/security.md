@@ -49,7 +49,7 @@ dsn = "${AQUEDUCT_PROD_DSN}"
 
 The CLI refuses plaintext passwords in config files:
 
-```
+```text
 Error: DSN contains a plaintext password. Use ${ENV_VAR} or a secret backend.
        Pass --allow-plaintext-password to override (not recommended in CI).
 ```

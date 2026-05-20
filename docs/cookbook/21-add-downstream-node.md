@@ -17,7 +17,7 @@ SELECT COUNT(*) AS n FROM public.c21_totals;
 
 ## Plan output
 
-```
+```text
   = c21_totals     [unchanged]
   + c21_summary    [create]    new downstream node
 ```

@@ -1,7 +1,7 @@
 /// SQL statements for bootstrapping the aqueduct catalog schema.
 /// These are embedded directly in the binary via include_str!() in a real deployment;
 /// for v0.1 we keep them as a constant in this module.
-pub const CATALOG_SCHEMA_VERSION: u32 = 5;
+pub const CATALOG_SCHEMA_VERSION: u32 = 6;
 
 /// The SQL to create the aqueduct catalog schema (v1, baseline).
 pub const CATALOG_INIT_SQL: &str = r#"
@@ -334,6 +334,28 @@ VALUES ('catalog_schema_version', '5'::jsonb, now())
 ON CONFLICT (key) DO NOTHING;
 "#;
 
+/// Catalog migration from v5 to v6 (CORR-1 / TEST-3 / v0.14):
+/// - Adds pgtrickle_mock.scheduler_state table for mock-based scheduler pause/resume
+///   assertion tests (TEST-3).
+/// - Enforces progress IS NOT NULL for recoverable_failure rows (CORR-1).
+pub const CATALOG_MIGRATE_V5_TO_V6_SQL: &str = r#"
+-- Scheduler state table for mock pg_trickle integration tests (TEST-3 / v0.14).
+-- In production pgtrickle this is a no-op; in the mock schema this table is
+-- populated by pause_scheduler and cleared by resume_scheduler so tests can
+-- assert the scheduler was correctly paused and resumed.
+CREATE SCHEMA IF NOT EXISTS pgtrickle_mock;
+
+CREATE TABLE IF NOT EXISTS pgtrickle_mock.scheduler_state (
+    node_name   text PRIMARY KEY,
+    paused_at   timestamptz NOT NULL DEFAULT now()
+);
+
+-- Bump catalog version to 6.
+UPDATE aqueduct.cluster_profile
+SET value_jsonb = '6'::jsonb, measured_at = now()
+WHERE key = 'catalog_schema_version';
+"#;
+
 /// SQL to check whether the aqueduct catalog already exists.
 pub const CATALOG_EXISTS_SQL: &str = r#"
 SELECT EXISTS (
@@ -395,10 +417,19 @@ VALUES ($1, $2, now(), 'running', $3, $4, 1)
 RETURNING id
 "#;
 
-/// SQL to finish a migration record.
+/// SQL to finish a migration record (committed or rolled_back — clears progress).
 pub const FINISH_MIGRATION_SQL: &str = r#"
 UPDATE aqueduct.migrations
 SET finished_at = now(), status = $2, to_version = $3, progress = $4
+WHERE id = $1
+"#;
+
+/// SQL to mark a migration as recoverable_failure WITHOUT resetting progress (CORR-1 / v0.14).
+/// Progress must only be cleared on a committed or rolled_back outcome so that --resume
+/// can re-use it to skip already-completed steps.
+pub const FINISH_MIGRATION_RECOVERABLE_SQL: &str = r#"
+UPDATE aqueduct.migrations
+SET finished_at = now(), status = 'recoverable_failure'
 WHERE id = $1
 "#;
 
@@ -544,6 +575,13 @@ pub async fn ensure_catalog_current(client: &tokio_postgres::Client) -> crate::e
         if current_version < 5 {
             client
                 .batch_execute(CATALOG_MIGRATE_V4_TO_V5_SQL)
+                .await
+                .map_err(|e| crate::error::AqueductError::Catalog(e.to_string()))?;
+        }
+        // Apply the v5→v6 migration if needed (CORR-1 / TEST-3 / v0.14).
+        if current_version < 6 {
+            client
+                .batch_execute(CATALOG_MIGRATE_V5_TO_V6_SQL)
                 .await
                 .map_err(|e| crate::error::AqueductError::Catalog(e.to_string()))?;
         }

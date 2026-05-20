@@ -6,7 +6,7 @@
 
 Compute and display the migration plan without executing any DDL.
 
-```
+```text
 USAGE:
     aqueduct plan [OPTIONS] --to <TARGET>
 
@@ -30,7 +30,7 @@ OPTIONS:
 
 Execute the migration plan.
 
-```
+```text
 USAGE:
     aqueduct apply [OPTIONS] --to <TARGET>
 
@@ -52,7 +52,7 @@ OPTIONS:
 
 Validate all migration files without connecting to a database.
 
-```
+```text
 USAGE:
     aqueduct validate [OPTIONS]
 
@@ -67,7 +67,7 @@ OPTIONS:
 
 Lint migration files for common mistakes and anti-patterns.
 
-```
+```text
 USAGE:
     aqueduct lint [OPTIONS]
 
@@ -93,7 +93,7 @@ Lint checks include:
 
 Show the live state of all managed stream tables.
 
-```
+```text
 USAGE:
     aqueduct status [OPTIONS] --to <TARGET>
 
@@ -110,7 +110,7 @@ OPTIONS:
 Compute and display the semantic diff between desired state (migration files) and
 live database state, without producing a full migration plan.
 
-```
+```text
 USAGE:
     aqueduct diff [OPTIONS] --to <TARGET>
 
@@ -142,7 +142,7 @@ Each delta is labelled with a kind indicator:
 
 Generate migration files from a live `pg_trickle` deployment.
 
-```
+```text
 USAGE:
     aqueduct import [OPTIONS] --from <TARGET>
 
@@ -159,7 +159,7 @@ OPTIONS:
 
 Remove all project resources from a target database.
 
-```
+```text
 USAGE:
     aqueduct destroy [OPTIONS] --project <NAME> --to <TARGET>
 
@@ -176,7 +176,7 @@ OPTIONS:
 
 Roll back to a previous DAG version.
 
-```
+```text
 USAGE:
     aqueduct rollback [OPTIONS] --to <TARGET>
 
@@ -193,7 +193,7 @@ OPTIONS:
 
 Release a stale project lock.
 
-```
+```text
 USAGE:
     aqueduct unlock --project <NAME> --to <TARGET>
 ```

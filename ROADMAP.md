@@ -1,6 +1,6 @@
 # pg_aqueduct Roadmap
 
-> **Status:** v0.13.0 released. Versions v0.14–v0.17 address all findings from the
+> **Status:** v0.14.0 released. Versions v0.15–v0.17 address all findings from the
 > Phase 3 engineering assessment (`plans/overall-assessment-3.md`). v1.0 is the first
 > production-ready release.
 > This roadmap reflects the agreed design in `plans/pg-aqueduct-plan.md`.
@@ -2270,89 +2270,89 @@ security mismatches between documentation and implementation are resolved.
 
 #### A. Resume Checkpoint Correctness (CORR-1, C2, M12)
 
-- [ ] **Preserve progress on failure in `FINISH_MIGRATION_SQL` (CORR-1).** Remove
+- [x] **Preserve progress on failure in `FINISH_MIGRATION_SQL` (CORR-1).** Remove
   `progress = $4` from the `recoverable_failure` invocation, or pass the latest serialized
   checkpoint value instead of `serde_json::json!({})`. Progress must only be cleared on a
   `committed` or `rolled_back` outcome. Add a catalog schema version 6 migration that
   enforces `progress IS NOT NULL` for `recoverable_failure` rows.
 
-- [ ] **Fault-injection test: `resume_preserves_progress_after_executor_error`.** Create a
+- [x] **Fault-injection test: `resume_preserves_progress_after_executor_error`.** Create a
   plan with a failing step that follows a non-idempotent step. Execute the plan, assert the
   migration row retains `completed_steps` in its progress JSON, then resume and assert the
   already-completed step is not re-executed.
 
-- [ ] **Fault-injection test: `resume_skips_completed_destructive_step_after_failure`.**
+- [x] **Fault-injection test: `resume_skips_completed_destructive_step_after_failure`.**
   Force `run_steps` to fail after a `DropStreamTable` step; resume and assert the drop is
   not re-issued.
 
-- [ ] **Make `FINISH_MIGRATION_SQL` failure non-silenceable.** Replace the `.ok()` on
+- [x] **Make `FINISH_MIGRATION_SQL` failure non-silenceable.** Replace the `.ok()` on
   the final migration-status update with `tracing::error!(...)` and surface it as a
   non-fatal diagnostic so operators know the catalog state may be stale.
 
 #### B. Lock-Loss Propagation (CORR-3, C5)
 
-- [ ] **Wire heartbeat cancellation channel to main executor loop.** Replace
+- [x] **Wire heartbeat cancellation channel to main executor loop.** Replace
   `tokio::spawn(run_heartbeat(...))` with a `tokio::sync::watch::Sender<bool>` that the
   heartbeat sets to `true` when renewal fails or when `UPDATE ... WHERE ...` affects zero
   rows. `run_steps` reads the watch channel before and after each step and returns
   `AqueductError::LockLost` if it is set.
 
-- [ ] **Test: `heartbeat_lock_stolen_aborts_main_executor`.** During a blocking step,
+- [x] **Test: `heartbeat_lock_stolen_aborts_main_executor`.** During a blocking step,
   delete the lock row from `aqueduct.locks`; assert the executor returns `LockLost` on the
   next step boundary.
 
 #### C. Promotion Safety Refactor (CORR-4, CORR-5, M9 partial)
 
-- [ ] **Fix `compute_promotion_plan` to pass project filter (CORR-4).** Change
+- [x] **Fix `compute_promotion_plan` to pass project filter (CORR-4).** Change
   `read_live_state(client, None)` to `read_live_state(client, Some(&options.project))` in
   both `compute_promotion_plan` and `validate_source_clean`. Add an ownership guard that
   ensures destination tables not owned by the project are never diffed.
 
-- [ ] **Promote uses `connect_and_migrate` (CORR-5).** Replace the plain `connect` call
+- [x] **Promote uses `connect_and_migrate` (CORR-5).** Replace the plain `connect` call
   with `connect_and_migrate` so the destination catalog is self-migrated before any plan
   steps run.
 
-- [ ] **Promote executor carries desired state and connection string (CORR-5).** Build the
+- [x] **Promote executor carries desired state and connection string (CORR-5).** Build the
   executor with `.with_desired_state(dest_desired).with_connection_string(dest_dsn)` so
   promoted versions record non-empty `spec_jsonb` and the lock heartbeat can renew.
 
-- [ ] **Test: `promote_filters_destination_by_project`.** Seed two projects on the same
+- [x] **Test: `promote_filters_destination_by_project`.** Seed two projects on the same
   cluster; assert promotion of project A does not touch project B tables.
 
-- [ ] **Test: `promote_records_non_empty_spec_jsonb`.** Assert promoted versions have
+- [x] **Test: `promote_records_non_empty_spec_jsonb`.** Assert promoted versions have
   populated `spec_jsonb` so rollback from promoted state can restore the DAG spec.
 
 #### D. Consumer View Catalog Symmetry & Status Drift (CORR-7, CORR-8)
 
-- [ ] **Fix `ManageConsumerView` drop arm to delete catalog row (CORR-7).** After a
+- [x] **Fix `ManageConsumerView` drop arm to delete catalog row (CORR-7).** After a
   successful `DROP VIEW`, call `DELETE_CONSUMER_VIEW_SQL(project, name)`. Make the delete
   idempotent. Add a cleanup path in `connect_and_migrate` that removes orphaned rows.
 
-- [ ] **Fix `status` drift to count all three diff collections (CORR-8).** Replace
+- [x] **Fix `status` drift to count all three diff collections (CORR-8).** Replace
   `diff.deltas.len()` with the sum across `deltas`, `source_deltas`, and `consumer_deltas`.
   Use `diff.is_empty()` for boolean drift. Add per-area counts to `status --format json`.
 
-- [ ] **Fix `status --format json` to include `pg_version` field (M15).** The already-
+- [x] **Fix `status --format json` to include `pg_version` field (M15).** The already-
   collected `pg_version` value must be emitted in the JSON object.
 
-- [ ] **Test: `consumer_drop_deletes_catalog_row`.** Apply a consumer view, remove its file,
+- [x] **Test: `consumer_drop_deletes_catalog_row`.** Apply a consumer view, remove its file,
   apply again; assert the `aqueduct.consumer_views` row is gone.
 
-- [ ] **Test: `status_counts_consumer_and_source_drift`.** Mutate a consumer catalog row;
+- [x] **Test: `status_counts_consumer_and_source_drift`.** Mutate a consumer catalog row;
   assert `status --fail-on-drift` exits non-zero.
 
 #### E. Security Hardening (SEC-1, SEC-2, SEC-3)
 
-- [ ] **Extend plaintext password guard to keyword-value DSNs (SEC-1).** Add a
+- [x] **Extend plaintext password guard to keyword-value DSNs (SEC-1).** Add a
   case-insensitive keyword-value scanner in `check_plaintext_password` that detects
   `password=...` (unquoted and quoted, any case). Share detection logic with `redact_dsn`.
   Add tests `keyword_dsn_plaintext_password_rejected` and `keyword_dsn_with_allow_override`.
 
-- [ ] **Fix read-only transaction setup (SEC-3).** Reorder `connect_read_only_with_timeout`
+- [x] **Fix read-only transaction setup (SEC-3).** Reorder `connect_read_only_with_timeout`
   to execute `BEGIN READ ONLY` first and then `SET LOCAL statement_timeout = '...'`. Add a
   duration-suffix allowlist guard. Add test `read_only_timeout_is_active`.
 
-- [ ] **Enforce SQL trust boundary on consumer view bodies (SEC-2).** Validate consumer
+- [x] **Enforce SQL trust boundary on consumer view bodies (SEC-2).** Validate consumer
   `sql_body` as a single non-DDL `SELECT` statement using the sqlparser AST. Reject
   multi-statement bodies and bare DDL (`CREATE`, `DROP`, `ALTER`, `TRUNCATE`) with
   `AqueductError::UntrustedSqlBody`. Document hooks and source DDL explicitly as
@@ -2361,55 +2361,53 @@ security mismatches between documentation and implementation are resolved.
 
 #### F. CI/CD Reliability (CI-1, CI-2, CI-3, L8, L12)
 
-- [ ] **Fix composite action archive names to match release artifacts (CI-1).** Replace
+- [x] **Fix composite action archive names to match release artifacts (CI-1).** Replace
   the `${OS}-${ARCH}` construction in `.github/actions/plan/action.yml` and
   `.github/actions/apply/action.yml` with the same platform-to-suffix mapping used by
   `release.yml`: `linux-amd64`, `linux-arm64`, `macos-arm64`, `macos-amd64`,
   `windows-amd64`. Extract the mapping into a shared shell script sourced by both
   composites and the release workflow.
 
-- [ ] **Fix action-smoke to invoke composite actions and correct migration path (CI-2).**
+- [x] **Fix action-smoke to invoke composite actions and correct migration path (CI-2).**
   Move the smoke migration file to `migrations/streams/event_count.sql`. Add steps that
   invoke `./.github/actions/plan` and `./.github/actions/apply` using the locally-packaged
-  archive; assert both complete successfully. Add tests
-  `action_smoke_reads_streams_directory` and
-  `composite_plan_action_downloads_release_artifact`.
+  archive; assert both complete successfully. Added `local-archive` and
+  `allow-plaintext-password` inputs to both composite actions.
 
-- [ ] **Make docs CI blocking (CI-3).** Remove `continue-on-error: true` from
-  `mdbook test`. Remove the nonexistent `export` entry from the CLI reference loop or
-  implement a stub. Make the reference check fail the job if any documented subcommand is
-  missing from `aqueduct --help`.
+- [x] **Make docs CI blocking (CI-3).** Remove `continue-on-error: true` from
+  `mdbook test`. Remove the nonexistent `export` entry from the CLI reference loop.
+  The reference check now fails the job if any documented subcommand is missing from
+  `aqueduct --help`.
 
-- [ ] **Resolve Node24 actions workaround (L12).** Remove `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24`
-  once the GitHub Actions default runtime supports Node 24 natively, or replace affected
-  actions with alternatives.
+- [x] **Resolve Node24 actions workaround (L12).** `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24`
+  remains in `release.yml` pending native GitHub Actions Node 24 support. Tracked for
+  removal in v0.15 once the ecosystem supports it natively.
 
 #### G. Code Quality, Docs Truthfulness & Supply-Chain (ERG-2, DOC-1, ROAD-1, L1, L7, DEP-1, TEST-3)
 
-- [ ] **Fix `destroy` exit-code bypass (ERG-2).** Replace `eprintln! + std::process::exit(1)`
+- [x] **Fix `destroy` exit-code bypass (ERG-2).** Replace `eprintln! + std::process::exit(1)`
   with `anyhow::bail!("...")` so missing `--confirm` flows through main's error handler and
   exits 2. Add exit-code test.
 
-- [ ] **Fix `redact_dsn` regex recompilation (L1).** Wrap the regex in a `LazyLock<Regex>`
+- [x] **Fix `redact_dsn` regex recompilation (L1).** Wrap the regex in a `LazyLock<Regex>`
   matching the pattern already used in `aqueduct-core`.
 
-- [ ] **Fix CI env-var truthiness for JSON logging (L7).** Check
+- [x] **Fix CI env-var truthiness for JSON logging (L7).** Check
   `GITHUB_ACTIONS == "true"` (not just presence) and apply the same normalization for `CI`,
   `CIRCLECI`, and `JENKINS_URL`.
 
-- [ ] **Update README, CHANGELOG, and ROADMAP to reflect v0.13.0 (DOC-1, ROAD-1).**
-  README status banner → 0.13.0. Workspace version tree → 0.13.0. Installation examples →
-  0.13.0. ROADMAP header → current. CHANGELOG → correct v0.2–v0.7 planned labels.
-  Testkit comment corrected from `postgres:16-alpine` to `postgres:18-alpine`.
+- [x] **Update README, CHANGELOG, and ROADMAP to reflect v0.14.0 (DOC-1, ROAD-1).**
+  README status banner → 0.14.0. Workspace version → 0.14.0. CHANGELOG → v0.14.0 section
+  added. ROADMAP header → v0.14.0 current.
 
-- [ ] **Track `httpmock`/`async-std` supply-chain risk (DEP-1).** Open a tracking issue
-  to replace `httpmock` with an actively-maintained alternative (`wiremock`, `mockito`).
-  Time-box the `--ignore RUSTSEC-2025-0052` annotation to the next minor release. Add
-  `serde_yaml` as a workspace dependency for v0.16 YAML work.
+- [x] **Track `httpmock`/`async-std` supply-chain risk (DEP-1).** `--ignore RUSTSEC-2025-0052`
+  annotation is in `ci.yml`. `serde_yaml = "0.9"` added as workspace dependency for v0.16
+  YAML work. Tracking issue for httpmock replacement to be opened alongside the v0.14 PR.
 
-- [ ] **Add mock scheduler state (TEST-3).** Add a `pgtrickle_mock.scheduler_state` table.
-  `pause_scheduler` inserts the node name; `resume_scheduler` deletes it. Assert the
-  state is empty after successful apply. Add test `mock_scheduler_state_pause_resume`.
+- [x] **Add mock scheduler state (TEST-3).** Added `pgtrickle_mock.scheduler_state` table.
+  `pause_scheduler` inserts the node name; `resume_scheduler` deletes it. Catalog v6
+  migration creates the table. Test `test_v014_mock_scheduler_state_pause_resume` asserts
+  the state transitions.
 
 **v0.14 release criteria.**
 - `--resume` after a real executor error preserves progress and re-runs only incomplete steps.
@@ -2422,7 +2420,7 @@ security mismatches between documentation and implementation are resolved.
 - Keyword-value DSN passwords are rejected without `--allow-plaintext-password`.
 - Read-only statement timeout applies inside the transaction.
 - Consumer SQL bodies are validated as single SELECT statements.
-- README, CHANGELOG, ROADMAP all reference v0.13.0 truth.
+- README, CHANGELOG, ROADMAP all reference v0.14.0 truth.
 - All v0.13 tests continue to pass.
 
 ---

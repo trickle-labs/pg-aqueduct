@@ -52,7 +52,7 @@ a DAG. When you have `order_totals` feeding into `customer_tiers`, which feeds i
 `churn_risk_scores`, you have a three-node DAG. Each node has its own refresh
 schedule, its own SQL query, and potentially its own refresh mode.
 
-```
+```text
 raw.orders (base table)
       │
       ▼
@@ -174,7 +174,7 @@ aqueduct init --to dev
 
 `aqueduct init` creates the project skeleton:
 
-```
+```text
 checkout-analytics/
 ├── aqueduct.toml
 └── migrations/
@@ -270,7 +270,7 @@ entirely without a database connection — ideal for a CI pre-check step.
 
 ### Step 3 — Plan
 
-```
+```text
 $ aqueduct plan --to dev
 
 Project  checkout-analytics  (initial)
@@ -307,7 +307,7 @@ left off with `aqueduct apply --to dev --resume`.
 
 ### Step 4 — Verify
 
-```
+```text
 $ aqueduct status --to dev
 
 Project  checkout-analytics  v1
@@ -342,7 +342,7 @@ SELECT ...
 
 Plan it:
 
-```
+```text
 $ aqueduct plan --to dev
 
   ~ order_totals    [free]   schedule: 30s → 2m
@@ -375,7 +375,7 @@ GROUP BY customer_id;
 
 Plan it:
 
-```
+```text
 $ aqueduct plan --to dev
 
   ~ order_totals    [in-place]   add column discount_total (SUM)
@@ -415,7 +415,7 @@ GROUP BY customer_id, product_category;  -- changed
 
 Plan it:
 
-```
+```text
 $ aqueduct plan --to dev
 
   ! order_totals       [rebuild]   GROUP BY keys changed

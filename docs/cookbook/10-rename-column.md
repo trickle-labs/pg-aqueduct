@@ -23,7 +23,7 @@ GROUP BY id;
 
 ## Plan output
 
-```
+```text
   ! c10_agg    [rebuild]   column renamed: total → revenue → full rebuild required
 ```
 

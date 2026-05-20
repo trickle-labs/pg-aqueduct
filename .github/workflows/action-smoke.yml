@@ -11,6 +11,10 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: read
+  pull-requests: write
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -56,21 +60,22 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           OS="linux"
-          ARCH="x86_64"
-          ARCHIVE_NAME="aqueduct-${VERSION}-${OS}-${ARCH}"
+          PLATFORM="linux-amd64"
+          ARCHIVE_NAME="aqueduct-${VERSION}-${PLATFORM}"
           mkdir -p "/tmp/release/${ARCHIVE_NAME}"
           cp target/release/aqueduct "/tmp/release/${ARCHIVE_NAME}/aqueduct"
           cp README.md LICENSE "/tmp/release/${ARCHIVE_NAME}/" 2>/dev/null || true
           cd /tmp/release
           tar czf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
           echo "Created /tmp/release/${ARCHIVE_NAME}.tar.gz"
+          echo "archive_path=/tmp/release/${ARCHIVE_NAME}.tar.gz" >> "$GITHUB_OUTPUT"
+        id: package
 
       - name: Install aqueduct binary from local archive
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          OS="linux"
-          ARCH="x86_64"
-          ARCHIVE_NAME="aqueduct-${VERSION}-${OS}-${ARCH}"
+          PLATFORM="linux-amd64"
+          ARCHIVE_NAME="aqueduct-${VERSION}-${PLATFORM}"
           mkdir -p "$HOME/.local/bin"
           tar -xzf "/tmp/release/${ARCHIVE_NAME}.tar.gz" -C /tmp/
           cp "/tmp/${ARCHIVE_NAME}/aqueduct" "$HOME/.local/bin/aqueduct"
@@ -99,13 +104,43 @@ jobs:
           dsn = "postgres://aqueduct:password@localhost:5432/smoke_test"
           EOF
 
-          mkdir -p /tmp/smoke-project/migrations
-          cat > /tmp/smoke-project/migrations/event_count.sql <<'EOF'
+          # CI-2 (v0.14): migration file must be in migrations/streams/ (not migrations/).
+          mkdir -p /tmp/smoke-project/migrations/streams
+          cat > /tmp/smoke-project/migrations/streams/event_count.sql <<'EOF'
           -- @aqueduct:schedule = "30s"
           SELECT COUNT(*) AS cnt FROM pg_stat_activity WHERE state = 'active';
           EOF
 
-      - name: Run aqueduct plan (dry run)
+      - name: Run aqueduct plan via composite action
+        # CI-2 (v0.14): exercise the composite plan action end-to-end.
+        uses: ./.github/actions/plan
+        with:
+          version: ${{ steps.version.outputs.version }}
+          target: prod
+          project-dir: /tmp/smoke-project
+          dsn-secret: ''
+          local-archive: ${{ steps.package.outputs.archive_path }}
+          allow-plaintext-password: 'true'
+        env:
+          AQUEDUCT_DSN: "postgres://aqueduct:password@localhost:5432/smoke_test"
+          RUST_LOG: info
+
+      - name: Run aqueduct apply via composite action (dry-run)
+        # CI-2 (v0.14): exercise the composite apply action end-to-end.
+        uses: ./.github/actions/apply
+        with:
+          version: ${{ steps.version.outputs.version }}
+          target: prod
+          project-dir: /tmp/smoke-project
+          dry-run: 'true'
+          dsn-secret: ''
+          local-archive: ${{ steps.package.outputs.archive_path }}
+          allow-plaintext-password: 'true'
+        env:
+          AQUEDUCT_DSN: "postgres://aqueduct:password@localhost:5432/smoke_test"
+          RUST_LOG: info
+
+      - name: Run aqueduct plan (direct binary, integration check)
         run: |
           aqueduct plan \
             --to prod \
@@ -115,7 +150,7 @@ jobs:
         env:
           RUST_LOG: info
 
-      - name: Run aqueduct apply (dry run)
+      - name: Run aqueduct apply (direct binary, dry run)
         run: |
           aqueduct apply \
             --to prod \

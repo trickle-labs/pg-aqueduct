@@ -24,7 +24,7 @@ GROUP BY id;
 
 ## Plan output
 
-```
+```text
   ~ c06_stats    [in-place]   add column event_count (COUNT)
 ```
 

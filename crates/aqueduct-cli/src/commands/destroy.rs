@@ -50,11 +50,12 @@ pub async fn run(args: DestroyArgs) -> anyhow::Result<()> {
         .unwrap_or_else(|| "unknown".to_string());
 
     if !args.dry_run && !args.confirm {
-        eprintln!(
-            "error: `aqueduct destroy` is irreversible and destructive.\n\
+        // ERG-2 (v0.14): Use anyhow::bail! so the error flows through main's
+        // error handler and exits with code 2 (rather than eprintln + exit(1)).
+        anyhow::bail!(
+            "`aqueduct destroy` is irreversible and destructive.\n\
              Pass --confirm to execute, or --dry-run to preview what would be destroyed."
         );
-        std::process::exit(1);
     }
 
     let client = connect(&dsn).await?;

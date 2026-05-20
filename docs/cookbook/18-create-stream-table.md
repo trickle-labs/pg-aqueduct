@@ -19,7 +19,7 @@ GROUP BY id;
 
 ## Plan output
 
-```
+```text
   + c18_scores    [create]    new stream table (FULL, schedule 1m)
 ```
 

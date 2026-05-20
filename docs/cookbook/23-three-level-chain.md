@@ -30,7 +30,7 @@ SELECT COUNT(DISTINCT region) AS num_regions FROM public.c23_lvl2;
 
 ## Plan output
 
-```
+```text
   + c23_lvl1    [create]   level 0
   + c23_lvl2    [create]   level 1
   + c23_lvl3    [create]   level 2

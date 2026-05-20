@@ -1,12 +1,13 @@
 use aqueduct_core::{
     config::AqueductConfig,
+    dag::build_dag_state,
     executor::PlanExecutor,
     promote::{compute_promotion_plan, validate_source_clean, PromoteOptions},
     renderer::render_plan_text,
 };
 use clap::Args;
 
-use super::connect;
+use super::{connect, connect_and_migrate};
 
 #[derive(Debug, Args)]
 pub struct PromoteArgs {
@@ -46,6 +47,8 @@ pub async fn run(args: PromoteArgs) -> anyhow::Result<()> {
 
     // Load migration files with destination variables.
     let files = aqueduct_core::parser::load_migrations(&args.project_dir, &dest_vars)?;
+    // Build desired state to pass to the executor for spec_jsonb recording (CORR-5).
+    let desired_state = build_dag_state(&files, true).ok();
 
     let promote_opts = PromoteOptions {
         from_env: args.from.clone(),
@@ -62,8 +65,9 @@ pub async fn run(args: PromoteArgs) -> anyhow::Result<()> {
         println!("✓ Source environment '{}' is clean.", args.from);
     }
 
-    // Connect to destination and compute the plan.
-    let dest_client = connect(&dest_dsn).await?;
+    // Connect to destination using connect_and_migrate so the catalog is
+    // self-migrated before any plan steps run (CORR-5 / v0.14).
+    let dest_client = connect_and_migrate(&dest_dsn).await?;
     let plan = compute_promotion_plan(&dest_client, &files, &promote_opts).await?;
 
     if plan.summary.is_empty() {
@@ -97,12 +101,18 @@ pub async fn run(args: PromoteArgs) -> anyhow::Result<()> {
     }
 
     // Apply the plan.
-    let executor = PlanExecutor::new(
+    // CORR-5: pass desired_state and connection_string so spec_jsonb is
+    // populated and the heartbeat can renew the lock.
+    let mut executor = PlanExecutor::new(
         &dest_client,
         &project_name,
         env!("CARGO_PKG_VERSION"),
         false,
-    );
+    )
+    .with_connection_string(dest_dsn.clone());
+    if let Some(state) = desired_state {
+        executor = executor.with_desired_state(state);
+    }
     let result = executor.execute(&plan).await?;
 
     println!(

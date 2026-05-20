@@ -25,7 +25,7 @@ GROUP BY id;
 
 ## Plan output
 
-```
+```text
   ~ c09_counts    [in-place]   add column avg_amount (AVG)
 ```
 

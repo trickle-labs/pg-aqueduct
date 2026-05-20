@@ -14,7 +14,7 @@ Remove a stream table that is no longer needed by deleting its migration file.
 
 ## Plan output
 
-```
+```text
   - c19_orphan    [drop]    stream table removed from migrations directory
 ```
 

@@ -15,6 +15,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [v0.11.0 — Diagnostic Quality, CLI Surface & Documentation Correctness](#v0110--diagnostic-quality-cli-surface--documentation-correctness)
 - [v0.12.0 — Real pg_trickle Integration, Security & CI/CD Hardening](#v0120--real-pgtrickle-integration-security--cicd-hardening)
 - [v0.13.0 — Blue/Green End-to-End, IMMEDIATE Mode & Advanced Features](#v0130--bluegreen-end-to-end-immediate-mode--advanced-features)
+- [v0.14.0 — Failure Safety, CI/CD Trustworthiness & Security Hardening](#v0140--failure-safety-cicd-trustworthiness--security-hardening)
 
 **Planned**
 - [v0.2.0 — Online Schema Evolution](#v020--online-schema-evolution)
@@ -27,6 +28,80 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 **Archive**
 - [Unreleased — Repository Bootstrap](#unreleased--repository-bootstrap)
 <!-- TOC end -->
+
+---
+
+## [v0.14.0] — Failure Safety, CI/CD Trustworthiness & Security Hardening
+
+**Status:** Released
+
+All roadmap items for v0.14 "Phase 17 — Failure Safety, CI/CD Trustworthiness &
+Security Hardening" are implemented and tested.
+
+### Highlights
+
+- **Correctness fixes (CORR-1 through CORR-8)**: Seven correctness bugs were found
+  and fixed. Progress is now preserved on recoverable failures (CORR-1); the heartbeat
+  correctly signals the main executor loop via a `tokio::sync::watch` channel when the
+  advisory lock is lost (CORR-3); promotion filters the destination state by project
+  (CORR-4); the promote command migrates the catalog before use and records spec_jsonb
+  (CORR-5); consumer view drops now delete the catalog row so drift counts stay
+  accurate (CORR-7); and status drift counting now sums stream, source, and consumer
+  deltas (CORR-8).
+
+- **Catalog v6**: The catalog schema is bumped to version 6. The new migration adds
+  the `pgtrickle_mock.scheduler_state` table used by integration tests to assert that
+  `pause_scheduler` / `resume_scheduler` calls are routed correctly (TEST-3).
+
+- **Security hardening (SEC-1 – SEC-3)**:
+  - **SEC-1**: Keyword-value DSNs (e.g. `host=... password=secret`) are now also
+    checked for plaintext passwords; previously only URI-style DSNs were validated.
+  - **SEC-2**: Consumer SQL bodies are validated to be a single `SELECT` statement
+    before the view is created, preventing DDL injection via migration files.
+  - **SEC-3**: The read-only helper now issues `BEGIN READ ONLY` *before* setting
+    `SET LOCAL statement_timeout`, so the timeout is correctly scoped to the
+    transaction. The `sanitize_statement_timeout` allowlist prevents injection via
+    the timeout argument.
+
+- **Ergonomics (ERG-2)**: `aqueduct destroy` now exits with code 2 on error (via
+  `anyhow::bail!`) instead of calling `std::process::exit(1)` directly, ensuring the
+  error message is routed through the standard error handler.
+
+- **Lint fixes (L1, L7)**:
+  - **L1**: The DSN-redaction regex in the CLI is now compiled once via `LazyLock`
+    instead of being recompiled on every call.
+  - **L7**: CI environment variables (`GITHUB_ACTIONS`, `CI`, `GITLAB_CI`,
+    `CIRCLECI`) are now checked for the string value `"true"` rather than merely being
+    set, preventing false positive CI detection.
+
+- **CI/CD fixes (CI-1 – CI-3)**:
+  - **CI-1**: The composite `plan` and `apply` GitHub Actions now map the runner
+    OS/architecture to the correct release archive suffix (`linux-amd64`,
+    `linux-arm64`, `macos-arm64`, `macos-amd64`, `windows-amd64`).
+  - **CI-2**: The action-smoke workflow now invokes the composite actions end-to-end
+    using a locally-packaged archive (via the new `local-archive` input). The
+    migration file path was corrected to `migrations/streams/event_count.sql`.
+  - **CI-3**: `mdbook test` is now a blocking step (removed `continue-on-error: true`).
+    The docs-lint job no longer checks for a non-existent `export` subcommand, and
+    the subcommand reference check now fails the job if any documented subcommand is
+    missing from the binary.
+
+- **Test infrastructure (TEST-3)**: The `pgtrickle_mock` schema now includes a
+  `scheduler_state` table. The mock `pause_scheduler` / `resume_scheduler` functions
+  insert and delete rows in this table, enabling integration tests to assert scheduler
+  state transitions. Nine new integration tests cover all CORR, SEC, and TEST items.
+
+- **`pg_version` in JSON output (M15)**: `aqueduct status --format json` now includes
+  a `"pg_version"` field.
+
+### Migration notes
+
+- **Catalog**: Run `aqueduct init` (or `aqueduct apply`) to apply the v5→v6 catalog
+  migration. The migration is fully backward-compatible.
+
+- **Consumer SQL validation**: If you have consumer migration files whose SQL body is
+  not a pure `SELECT` statement, `aqueduct apply` will now reject them with error
+  code 1307. Update those files to use a single `SELECT`.
 
 ---
 

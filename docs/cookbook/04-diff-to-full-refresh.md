@@ -21,7 +21,7 @@ SELECT id, SUM(amount) AS total FROM raw_orders GROUP BY id;
 
 ## Plan output
 
-```
+```text
 Project  analytics  v9 → v10
 Target   prod
 

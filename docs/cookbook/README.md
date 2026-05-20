@@ -73,7 +73,7 @@ Every example is verified end-to-end against a Testcontainers PostgreSQL cluster
 
 ## Classification Quick Reference
 
-```
+```text
 Change type                             Migration class   Cost
 ──────────────────────────────────────────────────────────────
 Schedule change                         Free              < 1s

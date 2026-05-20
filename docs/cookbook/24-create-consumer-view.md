@@ -18,7 +18,7 @@ SELECT customer_id, total FROM public.c24_orders WHERE total > 0;
 
 ## Plan output
 
-```
+```text
   + api.orders    [consumer create]   exposes public.c24_orders
 ```
 

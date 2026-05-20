@@ -20,7 +20,7 @@ SELECT user_id, SUM(score) AS total_score FROM events GROUP BY user_id;
 
 ## Plan output
 
-```
+```text
 Project  analytics  v5 → v6
 Target   prod
 

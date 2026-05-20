@@ -77,17 +77,30 @@ async fn poll_once(
         (None, None)
     };
 
-    // H8: compute real drift count by comparing desired state to live state.
-    // U-04: errors in drift computation are propagated as Result, not silently swallowed.
+    // CORR-8: count all three diff collections for accurate drift reporting.
+    // diff.deltas counts stream table changes; source_deltas and consumer_deltas
+    // cover source DDL changes and consumer view divergence respectively.
     let drift_count: usize = {
         let live = aqueduct_core::live_state::read_live_state(client, Some(project_name)).await?;
         let files = aqueduct_core::parser::load_migrations(project_dir, &Default::default())?;
         let desired = aqueduct_core::dag::build_dag_state(&files, true)?;
         let diff = aqueduct_core::diff::compute_diff(&desired, &live);
-        diff.deltas
+        let stream_drift = diff
+            .deltas
             .iter()
             .filter(|d| d.kind != aqueduct_core::diff::DeltaKind::Unchanged)
-            .count()
+            .count();
+        let source_drift = diff
+            .source_deltas
+            .iter()
+            .filter(|s| s.kind != aqueduct_core::diff::SourceDeltaKind::Unchanged)
+            .count();
+        let consumer_drift = diff
+            .consumer_deltas
+            .iter()
+            .filter(|c| c.kind != aqueduct_core::diff::ConsumerDeltaKind::Unchanged)
+            .count();
+        stream_drift + source_drift + consumer_drift
     };
 
     let status = StatusReport {
@@ -112,6 +125,8 @@ async fn poll_once(
                     "stream_tables": status.stream_table_count,
                     "drift": status.drift_count,
                     "pgtrickle_version": status.pgtrickle_version,
+                    // M15: include pg_version in JSON output (CORR-8 / v0.14)
+                    "pg_version": status.pg_version,
                     "polled_at": chrono::Utc::now().to_rfc3339(),
                 }))?
             );

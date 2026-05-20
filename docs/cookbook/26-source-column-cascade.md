@@ -30,7 +30,7 @@ GROUP BY id, region;
 
 ## Plan output
 
-```
+```text
   ALTER TABLE public.raw_c26 ADD COLUMN region text;    [base-table DDL]
   ! c26_agg    [rebuild]   base-table DDL change cascade
 ```
