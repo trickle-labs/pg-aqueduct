@@ -1,6 +1,8 @@
 # pg_aqueduct Roadmap
 
-> **Status:** v0.6 implementation complete. See checklist below.
+> **Status:** v0.13.0 released. Versions v0.14–v0.17 address all findings from the
+> Phase 3 engineering assessment (`plans/overall-assessment-3.md`). v1.0 is the first
+> production-ready release.
 > This roadmap reflects the agreed design in `plans/pg-aqueduct-plan.md`.
 > Versions correspond directly to the implementation phases described there.
 
@@ -39,7 +41,11 @@ versions build on earlier ones without breaking the established CLI surface.
 | [v0.11](#v011--documentation-truthfulness-cli-surface--code-quality) | Documentation truthfulness, CLI surface & code quality | 14 | 3–4 weeks |
 | [v0.12](#v012--real-pgtrickle-integration-security--cicd-hardening) | Real pg_trickle integration, security & CI/CD hardening | 15 | 4–5 weeks |
 | [v0.13](#v013--bluegreen-end-to-end-immediate-mode--advanced-features) | Blue/green end-to-end, IMMEDIATE mode & advanced features | 16 | 6–8 weeks |
-| [v1.0](#v10--release-engineering) | Release engineering | 17 | 2 weeks |
+| [v0.14](#v014--failure-safety-cicd-trustworthiness--security-hardening) | Failure safety, CI/CD trustworthiness & security hardening | 17 | 4–5 weeks |
+| [v0.15](#v015--execution-integrity-architecture--bluegreen-production) | Execution integrity, architecture & blue/green production | 18 | 5–6 weeks |
+| [v0.16](#v016--cli-quality-test-infrastructure--postgresql-compatibility) | CLI quality, test infrastructure & PostgreSQL compatibility | 19 | 4–5 weeks |
+| [v0.17](#v017--ha-operations-documentation-truthfulness--observability) | HA operations, documentation truthfulness & observability | 20 | 4–5 weeks |
+| [v1.0](#v10--release-engineering) | Release engineering | 21 | 2 weeks |
 | [v1.1](#v11--consumer-layer-management) | Consumer layer management | — | TBD |
 | [v2.0](#v20--multi-executor-support) | Multi-executor support | — | TBD |
 
@@ -2246,10 +2252,544 @@ described in the original pg-aqueduct-plan.
 
 ---
 
+## v0.14 — Failure Safety, CI/CD Trustworthiness & Security Hardening
+
+**Target effort:** 4–5 weeks.
+**Builds on:** v0.13 complete.
+**Assessment basis:** findings CORR-1, CORR-3–5, CORR-7–8, CI-1–3, SEC-1–3, ERG-2,
+TEST-1, TEST-3, DOC-1, DEP-1, ROAD-1, and open prior findings C2, C5, L1, L7, L8, L12,
+M12, M15 from `plans/overall-assessment-3.md`.
+
+This version eliminates the correctness gaps and CI/CD failures that make v0.13 unsafe or
+unusable in production. Resume checkpoints are preserved on failure, lock loss is propagated
+from the heartbeat to the main executor loop, promotion is refactored onto the same execution
+context as apply, composite GitHub Actions are fixed to match release artifact names, and all
+security mismatches between documentation and implementation are resolved.
+
+### Phase 17 — Failure Safety, CI/CD Trustworthiness & Security Hardening (4–5 weeks)
+
+#### A. Resume Checkpoint Correctness (CORR-1, C2, M12)
+
+- [ ] **Preserve progress on failure in `FINISH_MIGRATION_SQL` (CORR-1).** Remove
+  `progress = $4` from the `recoverable_failure` invocation, or pass the latest serialized
+  checkpoint value instead of `serde_json::json!({})`. Progress must only be cleared on a
+  `committed` or `rolled_back` outcome. Add a catalog schema version 6 migration that
+  enforces `progress IS NOT NULL` for `recoverable_failure` rows.
+
+- [ ] **Fault-injection test: `resume_preserves_progress_after_executor_error`.** Create a
+  plan with a failing step that follows a non-idempotent step. Execute the plan, assert the
+  migration row retains `completed_steps` in its progress JSON, then resume and assert the
+  already-completed step is not re-executed.
+
+- [ ] **Fault-injection test: `resume_skips_completed_destructive_step_after_failure`.**
+  Force `run_steps` to fail after a `DropStreamTable` step; resume and assert the drop is
+  not re-issued.
+
+- [ ] **Make `FINISH_MIGRATION_SQL` failure non-silenceable.** Replace the `.ok()` on
+  the final migration-status update with `tracing::error!(...)` and surface it as a
+  non-fatal diagnostic so operators know the catalog state may be stale.
+
+#### B. Lock-Loss Propagation (CORR-3, C5)
+
+- [ ] **Wire heartbeat cancellation channel to main executor loop.** Replace
+  `tokio::spawn(run_heartbeat(...))` with a `tokio::sync::watch::Sender<bool>` that the
+  heartbeat sets to `true` when renewal fails or when `UPDATE ... WHERE ...` affects zero
+  rows. `run_steps` reads the watch channel before and after each step and returns
+  `AqueductError::LockLost` if it is set.
+
+- [ ] **Test: `heartbeat_lock_stolen_aborts_main_executor`.** During a blocking step,
+  delete the lock row from `aqueduct.locks`; assert the executor returns `LockLost` on the
+  next step boundary.
+
+#### C. Promotion Safety Refactor (CORR-4, CORR-5, M9 partial)
+
+- [ ] **Fix `compute_promotion_plan` to pass project filter (CORR-4).** Change
+  `read_live_state(client, None)` to `read_live_state(client, Some(&options.project))` in
+  both `compute_promotion_plan` and `validate_source_clean`. Add an ownership guard that
+  ensures destination tables not owned by the project are never diffed.
+
+- [ ] **Promote uses `connect_and_migrate` (CORR-5).** Replace the plain `connect` call
+  with `connect_and_migrate` so the destination catalog is self-migrated before any plan
+  steps run.
+
+- [ ] **Promote executor carries desired state and connection string (CORR-5).** Build the
+  executor with `.with_desired_state(dest_desired).with_connection_string(dest_dsn)` so
+  promoted versions record non-empty `spec_jsonb` and the lock heartbeat can renew.
+
+- [ ] **Test: `promote_filters_destination_by_project`.** Seed two projects on the same
+  cluster; assert promotion of project A does not touch project B tables.
+
+- [ ] **Test: `promote_records_non_empty_spec_jsonb`.** Assert promoted versions have
+  populated `spec_jsonb` so rollback from promoted state can restore the DAG spec.
+
+#### D. Consumer View Catalog Symmetry & Status Drift (CORR-7, CORR-8)
+
+- [ ] **Fix `ManageConsumerView` drop arm to delete catalog row (CORR-7).** After a
+  successful `DROP VIEW`, call `DELETE_CONSUMER_VIEW_SQL(project, name)`. Make the delete
+  idempotent. Add a cleanup path in `connect_and_migrate` that removes orphaned rows.
+
+- [ ] **Fix `status` drift to count all three diff collections (CORR-8).** Replace
+  `diff.deltas.len()` with the sum across `deltas`, `source_deltas`, and `consumer_deltas`.
+  Use `diff.is_empty()` for boolean drift. Add per-area counts to `status --format json`.
+
+- [ ] **Fix `status --format json` to include `pg_version` field (M15).** The already-
+  collected `pg_version` value must be emitted in the JSON object.
+
+- [ ] **Test: `consumer_drop_deletes_catalog_row`.** Apply a consumer view, remove its file,
+  apply again; assert the `aqueduct.consumer_views` row is gone.
+
+- [ ] **Test: `status_counts_consumer_and_source_drift`.** Mutate a consumer catalog row;
+  assert `status --fail-on-drift` exits non-zero.
+
+#### E. Security Hardening (SEC-1, SEC-2, SEC-3)
+
+- [ ] **Extend plaintext password guard to keyword-value DSNs (SEC-1).** Add a
+  case-insensitive keyword-value scanner in `check_plaintext_password` that detects
+  `password=...` (unquoted and quoted, any case). Share detection logic with `redact_dsn`.
+  Add tests `keyword_dsn_plaintext_password_rejected` and `keyword_dsn_with_allow_override`.
+
+- [ ] **Fix read-only transaction setup (SEC-3).** Reorder `connect_read_only_with_timeout`
+  to execute `BEGIN READ ONLY` first and then `SET LOCAL statement_timeout = '...'`. Add a
+  duration-suffix allowlist guard. Add test `read_only_timeout_is_active`.
+
+- [ ] **Enforce SQL trust boundary on consumer view bodies (SEC-2).** Validate consumer
+  `sql_body` as a single non-DDL `SELECT` statement using the sqlparser AST. Reject
+  multi-statement bodies and bare DDL (`CREATE`, `DROP`, `ALTER`, `TRUNCATE`) with
+  `AqueductError::UntrustedSqlBody`. Document hooks and source DDL explicitly as
+  operator-trusted code in `docs/security.md` and `README.md`. Add
+  `validate_consumer_sql_is_single_select` unit test.
+
+#### F. CI/CD Reliability (CI-1, CI-2, CI-3, L8, L12)
+
+- [ ] **Fix composite action archive names to match release artifacts (CI-1).** Replace
+  the `${OS}-${ARCH}` construction in `.github/actions/plan/action.yml` and
+  `.github/actions/apply/action.yml` with the same platform-to-suffix mapping used by
+  `release.yml`: `linux-amd64`, `linux-arm64`, `macos-arm64`, `macos-amd64`,
+  `windows-amd64`. Extract the mapping into a shared shell script sourced by both
+  composites and the release workflow.
+
+- [ ] **Fix action-smoke to invoke composite actions and correct migration path (CI-2).**
+  Move the smoke migration file to `migrations/streams/event_count.sql`. Add steps that
+  invoke `./.github/actions/plan` and `./.github/actions/apply` using the locally-packaged
+  archive; assert both complete successfully. Add tests
+  `action_smoke_reads_streams_directory` and
+  `composite_plan_action_downloads_release_artifact`.
+
+- [ ] **Make docs CI blocking (CI-3).** Remove `continue-on-error: true` from
+  `mdbook test`. Remove the nonexistent `export` entry from the CLI reference loop or
+  implement a stub. Make the reference check fail the job if any documented subcommand is
+  missing from `aqueduct --help`.
+
+- [ ] **Resolve Node24 actions workaround (L12).** Remove `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24`
+  once the GitHub Actions default runtime supports Node 24 natively, or replace affected
+  actions with alternatives.
+
+#### G. Code Quality, Docs Truthfulness & Supply-Chain (ERG-2, DOC-1, ROAD-1, L1, L7, DEP-1, TEST-3)
+
+- [ ] **Fix `destroy` exit-code bypass (ERG-2).** Replace `eprintln! + std::process::exit(1)`
+  with `anyhow::bail!("...")` so missing `--confirm` flows through main's error handler and
+  exits 2. Add exit-code test.
+
+- [ ] **Fix `redact_dsn` regex recompilation (L1).** Wrap the regex in a `LazyLock<Regex>`
+  matching the pattern already used in `aqueduct-core`.
+
+- [ ] **Fix CI env-var truthiness for JSON logging (L7).** Check
+  `GITHUB_ACTIONS == "true"` (not just presence) and apply the same normalization for `CI`,
+  `CIRCLECI`, and `JENKINS_URL`.
+
+- [ ] **Update README, CHANGELOG, and ROADMAP to reflect v0.13.0 (DOC-1, ROAD-1).**
+  README status banner → 0.13.0. Workspace version tree → 0.13.0. Installation examples →
+  0.13.0. ROADMAP header → current. CHANGELOG → correct v0.2–v0.7 planned labels.
+  Testkit comment corrected from `postgres:16-alpine` to `postgres:18-alpine`.
+
+- [ ] **Track `httpmock`/`async-std` supply-chain risk (DEP-1).** Open a tracking issue
+  to replace `httpmock` with an actively-maintained alternative (`wiremock`, `mockito`).
+  Time-box the `--ignore RUSTSEC-2025-0052` annotation to the next minor release. Add
+  `serde_yaml` as a workspace dependency for v0.16 YAML work.
+
+- [ ] **Add mock scheduler state (TEST-3).** Add a `pgtrickle_mock.scheduler_state` table.
+  `pause_scheduler` inserts the node name; `resume_scheduler` deletes it. Assert the
+  state is empty after successful apply. Add test `mock_scheduler_state_pause_resume`.
+
+**v0.14 release criteria.**
+- `--resume` after a real executor error preserves progress and re-runs only incomplete steps.
+- `LockLost` is returned by the main executor when the heartbeat detects lock loss.
+- Promotion reads only project-owned tables, uses `connect_and_migrate`, and records non-empty `spec_jsonb`.
+- Consumer view drops delete catalog rows; `status` counts source and consumer drift.
+- Composite plan/apply actions successfully download and unpack release archives on all five platforms.
+- Action-smoke exercises composite actions end-to-end against a live PostgreSQL service.
+- `mdbook test` is blocking; docs-lint fails on unknown subcommands.
+- Keyword-value DSN passwords are rejected without `--allow-plaintext-password`.
+- Read-only statement timeout applies inside the transaction.
+- Consumer SQL bodies are validated as single SELECT statements.
+- README, CHANGELOG, ROADMAP all reference v0.13.0 truth.
+- All v0.13 tests continue to pass.
+
+---
+
+## v0.15 — Execution Integrity, Architecture & Blue/Green Production
+
+**Target effort:** 5–6 weeks.
+**Builds on:** v0.14 complete.
+**Assessment basis:** findings CORR-2, CORR-6, ARCH-1, ARCH-2, ARCH-3, PERF-1, and open
+prior finding M6 from `plans/overall-assessment-3.md`.
+
+This version closes the two largest architectural debt items: making multi-step execution
+safe under failures using a saga-style compensating-step pattern, and turning blue/green into
+a durable deployment system with atomically-tracked catalog rows. It also implements real
+RLS policy preservation, a configurable catalog schema abstraction, and typed executor
+contexts that prevent future commands from accidentally bypassing safety properties.
+
+### Phase 18 — Execution Integrity, Architecture & Blue/Green Production (5–6 weeks)
+
+#### A. Saga-Style Transactional Execution (CORR-2)
+
+- [ ] **Introduce catalog-bounded transaction groups.** Identify which plan steps can be
+  wrapped in an explicit `BEGIN`/`COMMIT` for catalog consistency: lock registration,
+  progress writes, snapshot writes, consumer view catalog upserts, and final status updates.
+  Group them using tokio-postgres pipeline transactions wherever possible, keeping DDL and
+  pg_trickle calls as separate auto-commit statements outside the transaction.
+
+- [ ] **Implement compensating-step registry for non-transactional DDL.** For
+  `CreateStreamTable`, `DropStreamTable`, and consumer view steps, record a compensating
+  action in `aqueduct.ddl_log` at the start of each step. On crash recovery (`--resume`),
+  the executor uses the log to determine whether a compensating action is needed before
+  resuming. Add integration tests for each compensating-step case.
+
+- [ ] **Expose `--force-retry <step-index>` and `--force-skip <step-index>` on apply.**
+  Allow operators to advance past or retry a specific ambiguous step. Require `--yes`
+  confirmation. Surface both flags in the HA operations guide.
+
+#### B. Typed Executor Contexts (ARCH-2)
+
+- [ ] **Replace the optional executor builder with `ExecutionContext` enum.** Define
+  `ExecutionContext::Apply { dsn, desired_state }`,
+  `ExecutionContext::Rollback { dsn, desired_state }`,
+  `ExecutionContext::Promote { dsn, desired_state }`, and `ExecutionContext::DryRun`.
+  `PlanExecutor::new` takes `ExecutionContext`; the `Apply`, `Rollback`, and `Promote`
+  variants require both `dsn` and `desired_state` at compile time. `DryRun` may omit them.
+
+- [ ] **Validate that no CLI command constructs a non-DryRun executor without all context
+  fields.** Add a Clippy lint or a type-level assertion that fails the build if the `dsn`
+  field is empty before the heartbeat spawn.
+
+#### C. Catalog Schema Abstraction (ARCH-1)
+
+- [ ] **Introduce `CatalogSchema` newtype and thread it through all catalog SQL.** Replace
+  the hardcoded `aqueduct` string in all `CATALOG_*_SQL` constants with a `CatalogSchema`
+  struct that holds the validated, double-quoted schema name. Generate SQL at runtime.
+  `init.rs` uses `args.schema` when provided. `connect_and_migrate` reads `catalog_schema`
+  from `ProjectConfig`.
+
+- [ ] **Validate catalog schema name at parse time.** Reject names containing `--`, `;`,
+  `$`, or non-identifier characters. Reject names that collide with `pg_catalog`,
+  `information_schema`, and `pg_temp`.
+
+- [ ] **Multi-schema integration test.** Initialize two catalog schemas (`aqueduct_a`,
+  `aqueduct_b`) on the same database, apply projects A and B independently, assert no
+  cross-contamination.
+
+#### D. Real RLS Policy Capture and Restore (CORR-6)
+
+- [ ] **Query `pg_policies` before any `DropStreamTable` step.** The planner queries
+  `pg_policies` and `pg_class.relrowsecurity` before emitting a `DropStreamTable` step.
+  Serialize real `CREATE POLICY ... ON ... USING (...) WITH CHECK (...)` and
+  `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` statements into `RecreatePolicy.policy_sql`.
+
+- [ ] **Execute real policy DDL in `RecreatePolicy` executor step.** Remove the
+  comment-only placeholder. Execute each captured statement after the table is recreated.
+  Record failures in `aqueduct.ddl_log` as non-fatal diagnostics.
+
+- [ ] **Test: `rls_policies_restored_after_rebuild`.** Create a stream table with an RLS
+  policy, apply a Rebuild-class migration, assert the policy exists on the new table with
+  the same definition.
+
+- [ ] **Linter rule for RLS tables.** `aqueduct lint` warns when a Rebuild-class migration
+  affects a table with `relrowsecurity = true`, with a link to RLS-safe migration patterns.
+
+#### E. Blue/Green Production State Machine (ARCH-3)
+
+- [ ] **Write `aqueduct.blue_green_deployments` at deployment start.** `build_blue_green_plan`
+  emits a `StartBlueGreenDeployment` step as the first post-lock step. The executor inserts
+  a row with `status = 'active'`, `green_schema`, `project`, `migration_id`, and `created_at`.
+
+- [ ] **Wrap all `SwapConsumerViews` in a single transaction.** Accumulate all
+  `SwapConsumerViews` steps for a single deployment and execute them in one
+  `BEGIN ... COMMIT` block. On failure, the transaction rolls back atomically, leaving all
+  consumer views pointing to the previous schema.
+
+- [ ] **Write `status = 'swapped'` after successful swap and `status = 'retired'` after
+  `RetireBlueSchema`.** Update `aqueduct.blue_green_deployments` at each state transition.
+  `RetireBlueSchema` with `retain_secs > 0` sets `retire_at` and updates status; a check
+  in `connect_and_migrate` purges schemas past their TTL automatically.
+
+- [ ] **Rollback within TTL swaps back to blue.** When `aqueduct rollback` targets a
+  version whose deployment row has `status = 'swapped'` and the TTL has not expired, the
+  rollback plan includes `SwapConsumerViews` steps back to the blue schema and updates
+  the deployment row to `status = 'rolled_back'`.
+
+- [ ] **Batch `WaitForConvergence` into a single query (PERF-1).** Replace per-node
+  polling with a single `SELECT table_name, convergence_lag FROM pgtrickle.pgt_stream_tables
+  WHERE schema_name = $1 AND table_name = ANY($2)` query. Compare in memory. Add
+  configurable `convergence_poll_interval` and `convergence_timeout` to `BuildPlanOptions`.
+
+- [ ] **Tests: `blue_green_swap_is_all_or_nothing`, `blue_green_deployment_row_lifecycle`.**
+  Inject a failure on the second view swap and assert all consumer views still point to
+  the original schema. Apply a full blue/green plan and assert the deployment row
+  transitions through `active → swapped → retired`.
+
+#### F. Validation Diagnostics Improvement (M6)
+
+- [ ] **Surface `Diagnostic` structs from the `validate` CLI command.** Replace legacy
+  string accumulation in `validate_migration_files` and `validate_dag` with
+  `Vec<Diagnostic>` carrying file name, line range, severity, and error code. `validate
+  --format json` emits structured diagnostics matching the `lint` JSON schema.
+
+**v0.15 release criteria.**
+- Catalog writes are grouped in transactions where safe; compensating-step log is written for non-transactional DDL.
+- `ExecutionContext` is required for all non-dry-run executors; compile-time enforced.
+- Catalog schema is configurable, threaded through all SQL, validated at parse time.
+- RLS policies are captured before Rebuild drops and restored after recreation.
+- Blue/green consumer swaps are atomic; deployment rows are written at all state transitions.
+- `WaitForConvergence` issues a single batch query per poll interval.
+- All v0.14 tests continue to pass.
+
+---
+
+## v0.16 — CLI Quality, Test Infrastructure & PostgreSQL Compatibility
+
+**Target effort:** 4–5 weeks.
+**Builds on:** v0.15 complete.
+**Assessment basis:** findings ERG-1, ERG-3, ERG-4, TEST-2, PERF-2, and open prior
+findings H10, M3, M11, L2, L3, L14; missing tests 13–15, 18, 20 from
+`plans/overall-assessment-3.md`.
+
+This version brings the CLI to the quality bar required for scripting and automation:
+global output modes work, YAML serialization is correct, the API reference is generated
+from clap rather than hand-maintained, binary tests cover all exit codes and output
+formats, and CI gains the PostgreSQL version matrix needed to claim broad compatibility.
+
+### Phase 19 — CLI Quality, Test Infrastructure & PostgreSQL Compatibility (4–5 weeks)
+
+#### A. Output Mode Emitter (ERG-1, M11)
+
+- [ ] **Introduce `OutputMode` enum and `OutputEmitter` struct.** `OutputMode` has
+  variants `Human`, `Json`, `Yaml`, `Quiet`, and `Porcelain`. `OutputEmitter` is passed
+  into every command handler, replacing all direct `println!`/`eprintln!` calls for normal
+  output. In `Quiet` mode, info-level output is suppressed. In `Porcelain` mode, only
+  structured `key=value` lines are emitted. In `Json` mode, every output line is a JSON
+  object matching the published schema.
+
+- [ ] **Wire `--quiet`, `--porcelain`, and `--log-format json` through `OutputEmitter`.**
+  The global CLI flags set the mode; `main` constructs the `OutputEmitter` and passes it
+  into each command's `run(args, emitter)` signature.
+
+- [ ] **Tests: `quiet_suppresses_decorative_output`, `porcelain_outputs_key_value_only`.**
+  Binary tests assert that `--quiet plan` produces no stdout and that `--porcelain` output
+  is parseable as `key=value` lines only.
+
+#### B. YAML Serialization (ERG-3)
+
+- [ ] **Add `serde_yaml` workspace dependency and replace hand-built YAML in all commands.**
+  Remove the `format!("project: \"{}\"", ...)` pattern from `plan.rs`, `status.rs`, and
+  `diff.rs`. Use `serde_yaml::to_string(&output_struct)`. Derive `Serialize` on all output
+  structs already used for JSON.
+
+- [ ] **Test: `yaml_escapes_quotes_and_newlines`.** Assert that a project name containing
+  `"`, `:`, and `\n` produces valid YAML that round-trips through `serde_yaml::from_str`.
+
+#### C. Generated API Reference (ERG-4, M3)
+
+- [ ] **Generate `docs/api-reference.md` from `aqueduct --help` in CI.** Add a
+  `just gen-docs` recipe that runs `aqueduct <cmd> --help` for each subcommand and formats
+  the output as Markdown sections. Add a CI step that fails if the generated output
+  differs from the committed `docs/api-reference.md`.
+
+- [ ] **Correct stale flags and exit-code semantics.** Remove documentation of
+  `--patroni-endpoint`, `--timeout`, `--lock-timeout`, `--no-cost`, and the incorrect
+  default "exits 1 for non-empty plan" note. Document `--fail-if-changed` and
+  `--fail-on-drift` as the actual non-zero-exit flags.
+
+- [ ] **Align `docs/security.md` with implementation.** Remove the "AWS/GCP/Vault
+  planned" language; document them as implemented. Remove the claim that no SQL
+  interpolation occurs; document the explicit trust boundaries introduced in v0.14.
+
+#### D. Binary CLI Test Coverage (TEST-2)
+
+- [ ] **Add `assert_cmd` tests for every subcommand's success and error paths.**
+  Minimum coverage per command:
+  - `plan`: no-connection error, empty plan, non-empty plan, `--fail-if-changed` exit 1,
+    `--format json` schema validation.
+  - `apply`: `--yes --dry-run` exits 0, missing DSN exits 2, stale `--plan` exits non-zero.
+  - `status`: JSON output schema, `--fail-on-drift` exits non-zero on drift, YAML parses.
+  - `diff`: `--fail-on-drift` exits 1 with drift, JSON schema.
+  - `destroy`: missing `--confirm` exits 2, `--dry-run` exits 0.
+  - `rollback`: `--dry-run` exits 0.
+  - `validate`: fails on IVM-unsupported query, exits 0 on valid files.
+
+- [ ] **Test: `validate_differential_ivm_unsupportable_fails`.** Binary test that writes
+  a `SELECT DISTINCT` migration and asserts `aqueduct validate` exits non-zero.
+
+#### E. Status Watch Performance & Formatter Fixes (PERF-2, L2, L3)
+
+- [ ] **Cache desired state by spec hash in `status --watch` (PERF-2).** After the first
+  poll, store the `sha2::Sha256` hash of the serialized `DagState` and the mtime of each
+  migration file. Only reload migration files when any mtime is newer. Keep reconnecting
+  for live state. Add a `--poll-interval` flag to `StatusArgs`.
+
+- [ ] **Surface `fmt` read errors (L2).** `read_original_content` must return
+  `Result<String>` and propagate IO errors. `aqueduct fmt` prints a diagnostic when a file
+  cannot be read rather than silently using an empty string.
+
+- [ ] **Fix `CANONICAL_KEY_ORDER` purpose (L3).** Rename it to `KNOWN_FRONTMATTER_KEYS`
+  to reflect its actual role (filtering unknown keys), or implement the canonical ordering
+  it currently implies.
+
+- [ ] **Restrict `TestDb.connection_string` visibility to `pub(crate)` (L14).** Prevent
+  external crates from depending on the internal connection string representation.
+
+#### F. PostgreSQL Version Matrix & Developer Experience (H10, backlog-11)
+
+- [ ] **Expand integration CI matrix to PostgreSQL 14–18.** Add a focused
+  `compatibility-tests` job with `pg-version: ["14", "15", "16", "17", "18"]` covering the
+  catalog migration, create/alter/drop cycle, resume, rollback, and consumer view
+  scenarios. Use `postgres:14-alpine` … `postgres:18-alpine` Testcontainers images.
+
+- [ ] **Test: `postgres_version_matrix_min_supported`.** Verify the core
+  create/apply/rollback cycle passes on PG 14 as the declared minimum supported version.
+
+- [ ] **Add `CONTRIBUTING.md`.** Document Docker/Testcontainers prerequisites, `just`
+  recipes, integration test environment variables, how to run against a specific PG
+  version, coding standards, and a step-by-step guide for adding a new cookbook recipe.
+
+**v0.16 release criteria.**
+- `--quiet` suppresses all non-error output; `--porcelain` emits only `key=value` lines.
+- YAML output passes `serde_yaml::from_str` round-trip including special characters.
+- `docs/api-reference.md` is generated by CI; drift fails the build.
+- Binary CLI tests cover every subcommand's exit codes and output format.
+- `status --watch` does not reload migration files when mtimes are unchanged.
+- Integration tests pass on PostgreSQL 14, 15, 16, 17, and 18.
+- `CONTRIBUTING.md` exists and is accurate.
+- All v0.15 tests continue to pass.
+
+---
+
+## v0.17 — HA Operations, Documentation Truthfulness & Observability
+
+**Target effort:** 4–5 weeks.
+**Builds on:** v0.16 complete.
+**Assessment basis:** finding DOC-2, backlog item 15 (HA failover design), competitive
+analysis observability gaps; all remaining open prior findings from
+`plans/overall-assessment-3.md`.
+
+This version implements the HA operations features the documentation has been claiming for
+several releases, adds structured per-step observability, aligns all public-facing docs with
+the shipped implementation, publishes core crates, and closes the final competitive gaps
+identified in the Phase 3 assessment. After this version, `pg_aqueduct` is ready for the
+v1.0 release gate.
+
+### Phase 20 — HA Operations, Documentation Truthfulness & Observability (4–5 weeks)
+
+#### A. Real HA Failover Detection (DOC-2, backlog-15)
+
+- [ ] **Implement `--patroni-endpoint` on `aqueduct apply` (DOC-2).** Add
+  `patroni_endpoint: Option<Url>` to `ApplyArgs` and `TargetConfig`. Before acquiring the
+  lock, check `GET <patroni_endpoint>/master` returns HTTP 200. Between each plan step,
+  re-check the endpoint. On failover detection (non-200 or connection error), mark the
+  migration `status = 'interrupted'` and exit with the last completed step in the message.
+
+- [ ] **Add `status = 'interrupted'` to the migration status constraint.** Add a catalog
+  schema version 7 migration that adds `'interrupted'` to the `status` check constraint.
+  Document the recovery workflow in `docs/ha-operations.md`: reconnect to the new primary
+  and run `aqueduct apply --resume`.
+
+- [ ] **Between-step primary re-check via `pg_is_in_recovery()`.** After each plan step,
+  execute `SELECT pg_is_in_recovery()`. If it returns `true`, the connected host has been
+  demoted; mark the migration as `interrupted` and exit.
+
+- [ ] **Implement `detect_ha_backend()`.** Detect Patroni via `--patroni-endpoint`,
+  CloudNativePG via the `app.cnpg.cluster_name` GUC, and Stolon via
+  `application_name LIKE 'stolon-keeper%'`. Surface the result in
+  `aqueduct status --verbose`.
+
+- [ ] **Update `docs/ha-operations.md` to match the implementation.** Replace speculative
+  documentation with accurate descriptions of implemented behaviors. Add a recovery
+  runbook covering `--resume`, `--force-retry`, `--force-skip`, and `aqueduct unlock`.
+
+#### B. Structured Per-Step Observability (competitive moat)
+
+- [ ] **Emit per-step JSON events to stderr.** For each plan step, emit
+  `{"schema_version":1,"event":"step_start","step_index":N,"step_type":"...","migration_id":...}`
+  at start and `{"event":"step_complete","duration_ms":N,...}` at finish. Add these event
+  types to `docs/cli-events-schema.json` and validate them in CI.
+
+- [ ] **Complete `aqueduct.migration_steps` tracking.** Update each row's `status`,
+  `finished_at`, and `error_message` at step end. Expose a SQL view
+  `aqueduct.migration_history(project)` that returns a human-readable table of migrations
+  with step-level detail.
+
+- [ ] **Add `aqueduct audit` subcommand.** Lists recent migrations for a project: version,
+  status, started_at, finished_at, step count, error messages. Supports `--format json`,
+  `--format yaml`, `--format table`. Orders by `started_at DESC`, default limit 20.
+
+- [ ] **Prometheus metrics endpoint (feature-gated).** Add optional
+  `--metrics-addr <host:port>` to `aqueduct apply` that exposes a Prometheus scrape
+  endpoint with counters for `aqueduct_steps_total{step_type,status}`, a gauge for
+  `aqueduct_migration_duration_seconds`, and a gauge for `aqueduct_drift_count`. Compile
+  under `--features metrics`; excluded from the default binary.
+
+#### C. Release Hygiene & crates.io Publishing
+
+- [ ] **Publish `aqueduct-core` and `aqueduct-testkit` to crates.io.** Add `publish = true`
+  to both `Cargo.toml` files; mark `aqueduct-cli` as `publish = false`. Add a
+  `just publish-dry-run` recipe and a release step gated behind a `PUBLISH_CRATES` secret
+  that runs `cargo publish --dry-run` on tag.
+
+- [ ] **Add SLSA build provenance to release pipeline.** Integrate `slsa-github-generator`
+  into `release.yml` to produce `.sigstore` attestation files alongside the SHA256SUMS.
+  Update `docs/installation.md` with provenance verification steps.
+
+- [ ] **Release-verify CI job.** Add a `release-verify` job that downloads each published
+  archive, verifies its SHA256, extracts the binary, and runs `aqueduct --version` to
+  confirm the version string matches the tag.
+
+#### D. Documentation Truthfulness & Version Linting (ROAD-1 final)
+
+- [ ] **Audit and finalize the ROADMAP.** Mark every completed checklist item `[x]`.
+  Replace the header status line with the true current version. Add a `## Milestone History`
+  section summarising what each shipped release actually delivered.
+
+- [ ] **Ensure CHANGELOG accurately describes every released version.** Add v0.14, v0.15,
+  v0.16, and v0.17 entries as each version ships. Remove any "planned" language from
+  entries for shipped versions.
+
+- [ ] **Add version linting to CI.** A CI step checks that the `README.md` status banner,
+  `docs/installation.md` version examples, and the `Cargo.toml` workspace version all
+  agree. Fail the build if they diverge.
+
+- [ ] **Replace `httpmock` with an actively-maintained alternative.** Complete the
+  tracking work started in v0.14; replace `httpmock` with `wiremock` or `mockito` in
+  `aqueduct-core` dev-dependencies. Remove the `--ignore RUSTSEC-2025-0052` annotation
+  from CI.
+
+**v0.17 release criteria.**
+- `--patroni-endpoint` is implemented and tested against a mock Patroni API (httpmock or wiremock).
+- `status = 'interrupted'` is set on detected HA failover, with a test.
+- `--force-retry` and `--force-skip` are implemented and tested.
+- Per-step JSON events are emitted and validated against the published schema.
+- `aqueduct audit` is implemented with JSON/YAML/table output.
+- `aqueduct-core` and `aqueduct-testkit` publish successfully via dry-run.
+- SLSA provenance is attached to release artifacts; install verification CI job passes.
+- README, `docs/installation.md`, and `Cargo.toml` workspace version all agree.
+- ROADMAP and CHANGELOG contain no "planned" language for shipped versions.
+- All v0.16 tests continue to pass.
+
+---
+
 ## v1.0 — Release Engineering
 
 **Target effort:** ~2 weeks.
-**Builds on:** v0.13 complete.
+**Builds on:** v0.17 complete.
 **Milestone:** Public 1.0 release — the first version declared production-ready.
 
 This version produces the release artefacts and performs the final gate checks needed
