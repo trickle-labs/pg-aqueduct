@@ -5393,9 +5393,9 @@ SELECT 1 AS id;
     // Step 3: Change the schedule — triggers Rebuild on FULL mode.
     let rebuild_file = parse_file(
         "rls_target",
-        r#"-- @aqueduct:schedule = "60s"
+        r#"-- @aqueduct:schedule = "30s"
 -- @aqueduct:refresh_mode = "FULL"
-SELECT 1 AS id;
+SELECT 1 AS renamed_id;
 "#,
     );
     let desired_v2 = build_dag_state(&[rebuild_file], true).expect("build v2 dag");
@@ -5605,9 +5605,8 @@ async fn test_v015_blue_green_swap_is_all_or_nothing() {
     db.client
         .batch_execute(
             "CREATE SCHEMA IF NOT EXISTS reporting_atomic; \
-             CREATE TABLE IF NOT EXISTS public.src_table_atomic (id bigint); \
-             CREATE TABLE IF NOT EXISTS green_atomic.src_table_atomic (id bigint); \
              CREATE SCHEMA IF NOT EXISTS green_atomic; \
+             CREATE TABLE IF NOT EXISTS public.src_table_atomic (id bigint); \
              CREATE TABLE IF NOT EXISTS green_atomic.src_table_atomic (id bigint); \
              CREATE OR REPLACE VIEW reporting_atomic.src_view AS \
                SELECT * FROM public.src_table_atomic;",
