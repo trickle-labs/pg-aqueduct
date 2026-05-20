@@ -23,7 +23,7 @@ SELECT COUNT(*) AS num_customers FROM public.c20_totals;
 
 ## Plan output
 
-```
+```text
   + c20_totals     [create]   level 0
   + c20_summary    [create]   level 1 (depends on c20_totals)
 ```

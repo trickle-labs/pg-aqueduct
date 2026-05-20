@@ -14,7 +14,7 @@ Remove a stream table that was consuming an upstream table, without affecting th
 
 ## Plan output
 
-```
+```text
   = c22_base          [unchanged]
   - c22_downstream    [drop]
 ```

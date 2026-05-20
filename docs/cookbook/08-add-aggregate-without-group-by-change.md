@@ -25,7 +25,7 @@ GROUP BY id;
 
 ## Plan output
 
-```
+```text
   ~ c08_view    [in-place]   add column min_amount (MIN)
 ```
 

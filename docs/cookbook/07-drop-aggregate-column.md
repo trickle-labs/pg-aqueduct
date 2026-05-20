@@ -25,7 +25,7 @@ GROUP BY id;
 
 ## Plan output
 
-```
+```text
   ~ c07_stats    [in-place]   drop column order_count
 ```
 

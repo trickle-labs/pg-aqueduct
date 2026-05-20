@@ -22,7 +22,7 @@ SELECT event_type, COUNT(*) AS n FROM raw_events GROUP BY event_type;
 
 ## Plan output
 
-```
+```text
 Project  analytics  v7 → v8
 Target   prod
 

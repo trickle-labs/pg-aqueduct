@@ -14,7 +14,7 @@ Remove a consumer view that is no longer needed by deleting its migration file.
 
 ## Plan output
 
-```
+```text
   - reporting.c25_view    [consumer drop]
 ```
 

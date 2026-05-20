@@ -35,7 +35,7 @@ SELECT region, COUNT(*) AS event_count FROM raw_events GROUP BY region;
 
 ## Plan output
 
-```
+```text
 Project  analytics  v3 → v4
 Target   prod
 

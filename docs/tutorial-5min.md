@@ -66,7 +66,7 @@ GROUP BY customer_id;
 
 Now you run a plan:
 
-```
+```text
 $ aqueduct plan --to prod
 
 Project  checkout-analytics  v3 → v4
