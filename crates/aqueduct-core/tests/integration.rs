@@ -5390,7 +5390,7 @@ SELECT 1 AS id;
         .get(0);
     assert_eq!(before_count, 1, "RLS policy must exist before rebuild");
 
-    // Step 3: Change the schedule — triggers Rebuild on FULL mode.
+    // Step 3: Rename a column — triggers a Rebuild on FULL mode.
     let rebuild_file = parse_file(
         "rls_target",
         r#"-- @aqueduct:schedule = "30s"
