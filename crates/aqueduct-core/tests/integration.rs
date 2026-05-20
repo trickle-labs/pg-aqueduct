@@ -759,7 +759,8 @@ async fn test_catalog_v2_tables_exist() {
         assert!(exists, "Table aqueduct.{} should exist", table);
     }
 
-    // CATALOG_INIT_V2_SQL now aliases CATALOG_INIT_V5_SQL; version is 5.
+    // CATALOG_INIT_V2_SQL now aliases CATALOG_INIT_V5_SQL which aliases CATALOG_INIT_V8_SQL;
+    // version is 8 (catalog schema was bumped to v8 in v0.17 to add 'interrupted' status).
     let version_row = db
         .client
         .query_one(
@@ -770,7 +771,7 @@ async fn test_catalog_v2_tables_exist() {
         .await
         .expect("query version");
     let version: serde_json::Value = version_row.get(0);
-    assert_eq!(version.as_i64().unwrap(), 5);
+    assert_eq!(version.as_i64().unwrap(), 8);
 }
 
 /// P-02: Catalog v4 creates performance indexes.
@@ -5847,8 +5848,8 @@ async fn test_v015_validate_dag_diagnostic_detects_cycle() {
     );
 }
 
-/// Catalog v5→v7 migration (v0.15): ensure_catalog_current upgrades the schema
-/// and adds the required new columns.
+/// Catalog v8 (v0.17): install_aqueduct_catalog() creates v8 directly; ensure_catalog_current
+/// must be idempotent (no-op when already at current version).
 #[tokio::test]
 async fn test_v015_catalog_v7_migration() {
     use aqueduct_core::catalog::ensure_catalog_current;
@@ -5856,9 +5857,9 @@ async fn test_v015_catalog_v7_migration() {
     let db = TestDb::new().await.expect("start test db");
     db.install_aqueduct_catalog()
         .await
-        .expect("init v5 catalog");
+        .expect("init v8 catalog");
 
-    // Before migration: catalog is at v5.
+    // v0.17: install_aqueduct_catalog() now installs at v8 directly.
     let version_before: i32 = db
         .client
         .query_one(
@@ -5868,14 +5869,14 @@ async fn test_v015_catalog_v7_migration() {
         .await
         .expect("version before")
         .get(0);
-    assert_eq!(version_before, 5, "catalog must start at v5");
+    assert_eq!(version_before, 8, "catalog must start at v8 (current version)");
 
-    // Run the migration.
+    // ensure_catalog_current must be idempotent when already at v8.
     ensure_catalog_current(&db.client)
         .await
         .expect("ensure_catalog_current");
 
-    // After migration: catalog must be at v7.
+    // After no-op migration: catalog must still be at v8.
     let version_after: i32 = db
         .client
         .query_one(
@@ -5886,8 +5887,8 @@ async fn test_v015_catalog_v7_migration() {
         .expect("version after")
         .get(0);
     assert_eq!(
-        version_after, 7,
-        "ARCH-1: catalog must be at v7 after migration"
+        version_after, 8,
+        "ensure_catalog_current must be idempotent at v8"
     );
 
     // The ddl_log table must have migration_id and compensating_sql columns.
@@ -5925,4 +5926,93 @@ async fn test_v015_catalog_v7_migration() {
         )
         .await
         .expect("ARCH-1: 'rolled_back' status must be accepted after v7 migration");
+}
+
+/// Catalog v7→v8 migration (v0.17): ensure_catalog_current upgrades a v7 catalog
+/// to v8 by adding 'interrupted' status and migration_history view.
+#[tokio::test]
+async fn test_v017_catalog_v8_migration() {
+    use aqueduct_core::catalog::{
+        ensure_catalog_current, CATALOG_INIT_SQL, CATALOG_MIGRATE_V1_TO_V2_SQL,
+        CATALOG_MIGRATE_V2_TO_V3_SQL, CATALOG_MIGRATE_V3_TO_V4_SQL,
+        CATALOG_MIGRATE_V4_TO_V5_SQL, CATALOG_MIGRATE_V5_TO_V6_SQL,
+        CATALOG_MIGRATE_V6_TO_V7_SQL,
+    };
+
+    let db = TestDb::new().await.expect("start test db");
+
+    // Bootstrap a v7 catalog by applying migrations from v1 to v7.
+    for (sql, label) in [
+        (CATALOG_INIT_SQL, "init v1"),
+        (CATALOG_MIGRATE_V1_TO_V2_SQL, "v1→v2"),
+        (CATALOG_MIGRATE_V2_TO_V3_SQL, "v2→v3"),
+        (CATALOG_MIGRATE_V3_TO_V4_SQL, "v3→v4"),
+        (CATALOG_MIGRATE_V4_TO_V5_SQL, "v4→v5"),
+        (CATALOG_MIGRATE_V5_TO_V6_SQL, "v5→v6"),
+        (CATALOG_MIGRATE_V6_TO_V7_SQL, "v6→v7"),
+    ] {
+        db.client
+            .batch_execute(sql)
+            .await
+            .unwrap_or_else(|e| panic!("migration {label} failed: {e}"));
+    }
+
+    // Confirm we are at v7 before the upgrade.
+    let version_before: i32 = db
+        .client
+        .query_one(
+            "SELECT value_jsonb::int FROM aqueduct.cluster_profile WHERE key = 'catalog_schema_version'",
+            &[],
+        )
+        .await
+        .expect("version before")
+        .get(0);
+    assert_eq!(version_before, 7, "catalog must be at v7 before upgrade");
+
+    // Run upgrade.
+    ensure_catalog_current(&db.client)
+        .await
+        .expect("ensure_catalog_current");
+
+    // Must be at v8 after upgrade.
+    let version_after: i32 = db
+        .client
+        .query_one(
+            "SELECT value_jsonb::int FROM aqueduct.cluster_profile WHERE key = 'catalog_schema_version'",
+            &[],
+        )
+        .await
+        .expect("version after")
+        .get(0);
+    assert_eq!(
+        version_after, 8,
+        "DOC-2/v0.17: catalog must be at v8 after v7→v8 migration"
+    );
+
+    // The migrations table must accept 'interrupted' status (DOC-2).
+    db.client
+        .execute(
+            "INSERT INTO aqueduct.migrations \
+             (project, status, started_at, cli_version) \
+             VALUES ('interrupted-test', 'interrupted', now(), '0.17.0')",
+            &[],
+        )
+        .await
+        .expect("DOC-2: 'interrupted' status must be accepted after v8 migration");
+
+    // The migration_history view must exist.
+    let view_exists: bool = db
+        .client
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.views \
+             WHERE table_schema = 'aqueduct' AND table_name = 'migration_history')",
+            &[],
+        )
+        .await
+        .expect("check view existence")
+        .get(0);
+    assert!(
+        view_exists,
+        "DOC-2/v0.17: aqueduct.migration_history view must exist after v8 migration"
+    );
 }
