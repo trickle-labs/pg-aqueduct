@@ -267,6 +267,17 @@ pub async fn destroy_project(
         .await
         .ok();
 
+    // Delete ddl_log rows that reference this project's migrations
+    // (FK: ddl_log.migration_id -> migrations.id, added in v7).
+    client
+        .execute(
+            "DELETE FROM aqueduct.ddl_log \
+             WHERE migration_id IN (SELECT id FROM aqueduct.migrations WHERE project = $1)",
+            &[&options.project],
+        )
+        .await
+        .ok();
+
     // Delete migration records (must come before dag_versions due to FK).
     let mig_del = client
         .execute(

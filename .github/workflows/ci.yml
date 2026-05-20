@@ -49,8 +49,7 @@ jobs:
         run: cargo install cargo-audit --locked
 
       - name: Run cargo audit
-        # RUSTSEC-2025-0052: async-std unmaintained warning (transitive via httpmock dev-dep only)
-        run: cargo audit --deny warnings --ignore RUSTSEC-2025-0052
+        run: cargo audit --deny warnings
 
   # ── Unit Tests ──────────────────────────────────────────────────────────────
   unit-tests:
@@ -194,7 +193,7 @@ jobs:
         # 'export' is removed — it does not exist as a CLI subcommand.
         run: |
           FAILED=0
-          for cmd in plan apply diff status validate lint import rollback promote destroy unlock init preview ingest fmt; do
+          for cmd in plan apply diff status validate lint import rollback promote destroy unlock init preview ingest fmt audit; do
             if ./target/release/aqueduct "$cmd" --help &>/dev/null; then
               echo "✓ $cmd --help"
             else
@@ -215,6 +214,42 @@ jobs:
           echo "Binary:     $BIN_VERSION"
           if [ "$CARGO_VERSION" != "$BIN_VERSION" ]; then
             echo "ERROR: version mismatch between Cargo.toml and binary"
+            exit 1
+          fi
+
+  # ── Version lint (v0.17 / ROAD-1) ───────────────────────────────────────────
+  version-lint:
+    name: Version lint (README, docs, Cargo.toml agree)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Verify README banner, installation.md, and Cargo.toml all use the same version
+        run: |
+          CARGO_VERSION="$(grep '^version' Cargo.toml | head -1 | sed 's/version = \"//;s/\"//')"
+          echo "Workspace version: $CARGO_VERSION"
+
+          FAILED=0
+
+          # Check README.md status banner
+          if grep -q "v${CARGO_VERSION}" README.md; then
+            echo "✓ README.md references v${CARGO_VERSION}"
+          else
+            echo "✗ README.md does not reference v${CARGO_VERSION}" >&2
+            FAILED=1
+          fi
+
+          # Check docs/installation.md for a version mention
+          if grep -q "${CARGO_VERSION}" docs/installation.md; then
+            echo "✓ docs/installation.md references v${CARGO_VERSION}"
+          else
+            echo "✗ docs/installation.md does not reference v${CARGO_VERSION}" >&2
+            FAILED=1
+          fi
+
+          if [ "$FAILED" = "1" ]; then
+            echo ""
+            echo "ERROR: version drift detected — update README.md and docs/installation.md to match Cargo.toml ($CARGO_VERSION)"
             exit 1
           fi
 
@@ -281,6 +316,7 @@ jobs:
       - pgtrickle-integration
       - cli-tests
       - msrv
+      - version-lint
     steps:
       - name: All CI checks passed
         run: echo "All required CI checks passed"

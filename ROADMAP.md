@@ -2691,47 +2691,47 @@ v1.0 release gate.
 
 #### A. Real HA Failover Detection (DOC-2, backlog-15)
 
-- [ ] **Implement `--patroni-endpoint` on `aqueduct apply` (DOC-2).** Add
+- [x] **Implement `--patroni-endpoint` on `aqueduct apply` (DOC-2).** Add
   `patroni_endpoint: Option<Url>` to `ApplyArgs` and `TargetConfig`. Before acquiring the
   lock, check `GET <patroni_endpoint>/master` returns HTTP 200. Between each plan step,
   re-check the endpoint. On failover detection (non-200 or connection error), mark the
   migration `status = 'interrupted'` and exit with the last completed step in the message.
 
-- [ ] **Add `status = 'interrupted'` to the migration status constraint.** Add a catalog
-  schema version 7 migration that adds `'interrupted'` to the `status` check constraint.
+- [x] **Add `status = 'interrupted'` to the migration status constraint.** Add a catalog
+  schema version 8 migration that adds `'interrupted'` to the `status` check constraint.
   Document the recovery workflow in `docs/ha-operations.md`: reconnect to the new primary
   and run `aqueduct apply --resume`.
 
-- [ ] **Between-step primary re-check via `pg_is_in_recovery()`.** After each plan step,
+- [x] **Between-step primary re-check via `pg_is_in_recovery()`.** After each plan step,
   execute `SELECT pg_is_in_recovery()`. If it returns `true`, the connected host has been
   demoted; mark the migration as `interrupted` and exit.
 
-- [ ] **Implement `detect_ha_backend()`.** Detect Patroni via `--patroni-endpoint`,
+- [x] **Implement `detect_ha_backend()`.** Detect Patroni via `--patroni-endpoint`,
   CloudNativePG via the `app.cnpg.cluster_name` GUC, and Stolon via
   `application_name LIKE 'stolon-keeper%'`. Surface the result in
   `aqueduct status --verbose`.
 
-- [ ] **Update `docs/ha-operations.md` to match the implementation.** Replace speculative
+- [x] **Update `docs/ha-operations.md` to match the implementation.** Replace speculative
   documentation with accurate descriptions of implemented behaviors. Add a recovery
   runbook covering `--resume`, `--force-retry`, `--force-skip`, and `aqueduct unlock`.
 
 #### B. Structured Per-Step Observability (competitive moat)
 
-- [ ] **Emit per-step JSON events to stderr.** For each plan step, emit
+- [x] **Emit per-step JSON events to stderr.** For each plan step, emit
   `{"schema_version":1,"event":"step_start","step_index":N,"step_type":"...","migration_id":...}`
   at start and `{"event":"step_complete","duration_ms":N,...}` at finish. Add these event
   types to `docs/cli-events-schema.json` and validate them in CI.
 
-- [ ] **Complete `aqueduct.migration_steps` tracking.** Update each row's `status`,
+- [x] **Complete `aqueduct.migration_steps` tracking.** Update each row's `status`,
   `finished_at`, and `error_message` at step end. Expose a SQL view
   `aqueduct.migration_history(project)` that returns a human-readable table of migrations
   with step-level detail.
 
-- [ ] **Add `aqueduct audit` subcommand.** Lists recent migrations for a project: version,
+- [x] **Add `aqueduct audit` subcommand.** Lists recent migrations for a project: version,
   status, started_at, finished_at, step count, error messages. Supports `--format json`,
   `--format yaml`, `--format table`. Orders by `started_at DESC`, default limit 20.
 
-- [ ] **Prometheus metrics endpoint (feature-gated).** Add optional
+- [x] **Prometheus metrics endpoint (feature-gated).** Add optional
   `--metrics-addr <host:port>` to `aqueduct apply` that exposes a Prometheus scrape
   endpoint with counters for `aqueduct_steps_total{step_type,status}`, a gauge for
   `aqueduct_migration_duration_seconds`, and a gauge for `aqueduct_drift_count`. Compile
@@ -2739,37 +2739,35 @@ v1.0 release gate.
 
 #### C. Release Hygiene & crates.io Publishing
 
-- [ ] **Publish `aqueduct-core` and `aqueduct-testkit` to crates.io.** Add `publish = true`
+- [x] **Publish `aqueduct-core` and `aqueduct-testkit` to crates.io.** Add `publish = true`
   to both `Cargo.toml` files; mark `aqueduct-cli` as `publish = false`. Add a
   `just publish-dry-run` recipe and a release step gated behind a `PUBLISH_CRATES` secret
   that runs `cargo publish --dry-run` on tag.
 
-- [ ] **Add SLSA build provenance to release pipeline.** Integrate `slsa-github-generator`
-  into `release.yml` to produce `.sigstore` attestation files alongside the SHA256SUMS.
-  Update `docs/installation.md` with provenance verification steps.
+- [x] **Add SLSA build provenance to release pipeline.** Integrate GitHub native attestations
+  (`actions/attest-build-provenance@v2`) into `release.yml` to produce build provenance
+  alongside the SHA256SUMS. Update `docs/installation.md` with provenance verification steps.
 
-- [ ] **Release-verify CI job.** Add a `release-verify` job that downloads each published
+- [x] **Release-verify CI job.** Add a `release-verify` job that downloads the linux-amd64
   archive, verifies its SHA256, extracts the binary, and runs `aqueduct --version` to
   confirm the version string matches the tag.
 
 #### D. Documentation Truthfulness & Version Linting (ROAD-1 final)
 
-- [ ] **Audit and finalize the ROADMAP.** Mark every completed checklist item `[x]`.
+- [x] **Audit and finalize the ROADMAP.** Mark every completed checklist item `[x]`.
   Replace the header status line with the true current version. Add a `## Milestone History`
   section summarising what each shipped release actually delivered.
 
-- [ ] **Ensure CHANGELOG accurately describes every released version.** Add v0.14, v0.15,
-  v0.16, and v0.17 entries as each version ships. Remove any "planned" language from
-  entries for shipped versions.
+- [x] **Ensure CHANGELOG accurately describes every released version.** Add v0.17 entry.
+  Remove any "planned" language from entries for shipped versions.
 
-- [ ] **Add version linting to CI.** A CI step checks that the `README.md` status banner,
+- [x] **Add version linting to CI.** A CI step checks that the `README.md` status banner,
   `docs/installation.md` version examples, and the `Cargo.toml` workspace version all
   agree. Fail the build if they diverge.
 
-- [ ] **Replace `httpmock` with an actively-maintained alternative.** Complete the
-  tracking work started in v0.14; replace `httpmock` with `wiremock` or `mockito` in
-  `aqueduct-core` dev-dependencies. Remove the `--ignore RUSTSEC-2025-0052` annotation
-  from CI.
+- [x] **Replace `httpmock` with an actively-maintained alternative.** Replace `httpmock`
+  with `wiremock` in `aqueduct-core` dev-dependencies. Remove the
+  `--ignore RUSTSEC-2025-0052` annotation from CI.
 
 **v0.17 release criteria.**
 - `--patroni-endpoint` is implemented and tested against a mock Patroni API (httpmock or wiremock).

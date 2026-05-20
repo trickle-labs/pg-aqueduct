@@ -21,7 +21,7 @@ A `SHA256SUMS.txt` file is attached to each release so you can verify the downlo
 
 ```bash
 # Replace <version> and <platform> as appropriate
-VERSION=0.7.0
+VERSION=0.17.0
 PLATFORM=linux-amd64   # or: linux-arm64, macos-arm64
 
 curl -fsSL \
@@ -46,7 +46,7 @@ Download `aqueduct-<version>-windows-amd64.zip` from the releases page, extract 
 
 ## Build from source
 
-You need the [Rust toolchain](https://rustup.rs/) (stable, 1.80 or later).
+You need the [Rust toolchain](https://rustup.rs/) (stable, 1.88 or later).
 
 ```bash
 git clone https://github.com/trickle-labs/pg-aqueduct.git
@@ -61,7 +61,18 @@ cargo build --release --bin aqueduct
 
 ```bash
 aqueduct --version
-# aqueduct 0.7.0
+# aqueduct 0.17.0
+```
+
+## Verify build provenance (v0.17+)
+
+Starting from v0.17.0, each release carries a GitHub-native build attestation.
+You can verify that the binary you downloaded was built from the official source:
+
+```bash
+# Requires the GitHub CLI (gh)
+gh attestation verify "aqueduct-0.17.0-linux-amd64.tar.gz" \
+  --repo trickle-labs/pg-aqueduct
 ```
 
 Once installed, continue with the [5-Minute Tutorial](tutorial-5min.md) to connect `aqueduct` to your PostgreSQL instance and run your first migration plan.

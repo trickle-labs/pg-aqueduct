@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 description = "Core planner, differ, and executor for aqueduct"
+publish = true
 
 [dependencies]
 tokio = { workspace = true }
@@ -31,4 +32,4 @@ aqueduct-testkit = { workspace = true }
 tokio = { workspace = true }
 tempfile = { workspace = true }
 proptest = { workspace = true }
-httpmock = { workspace = true }
+wiremock = { workspace = true }

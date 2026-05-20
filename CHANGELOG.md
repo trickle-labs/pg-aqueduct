@@ -9,6 +9,53 @@ For planned future versions, see [ROADMAP.md](ROADMAP.md).
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-06-10
+
+### Added
+
+- `--patroni-endpoint <url>` flag on `aqueduct apply`. Between each migration step,
+  the CLI calls `GET <endpoint>/master`; a non-200 response marks the migration
+  `interrupted` and aborts (DOC-2 / v0.17-A).
+- `aqueduct_core::ha` module: `HaBackend` enum, `detect_ha_backend()`,
+  `check_still_primary()` (uses `pg_is_in_recovery()`), and `check_patroni_primary()`
+  HTTP check (DOC-2 / v0.17-A).
+- Between-step primary re-check via `SELECT pg_is_in_recovery()` in the executor.
+  On failover, migration is marked `interrupted` (v0.17-A).
+- Per-step JSON events emitted to stderr: `step_start`, `step_complete`, `step_failed`
+  with `step_index`, `step_type`, `migration_id`, `project`, and `duration_ms` fields
+  (v0.17-B). Documented in `docs/cli-events-schema.json`.
+- `aqueduct audit` subcommand: lists recent migrations with step counts, error messages,
+  and durations. Supports `--format table|json|yaml` and `--limit N` (v0.17-B).
+- `aqueduct.migration_history` SQL view (catalog v8): joins `aqueduct.migrations` and
+  `aqueduct.migration_steps` for per-step audit queries (v0.17-B).
+- `aqueduct_core::catalog::LIST_MIGRATIONS_FOR_AUDIT_SQL` query constant (v0.17-B).
+- Prometheus metrics endpoint behind `--features metrics` on `aqueduct-cli`.
+  Pass `--metrics-addr 0.0.0.0:9090` to expose `/metrics` during `apply` (v0.17-B).
+- Catalog schema v8: adds `'interrupted'` to the `migrations.status` check constraint
+  and a partial index for `interrupted` rows. Includes auto-migration from v7 (v0.17-A).
+- GitHub-native build provenance attestation in release workflow via
+  `actions/attest-build-provenance@v2`. Verify with `gh attestation verify` (v0.17-C).
+- `release-verify` CI job: downloads the linux-amd64 release archive, verifies its
+  SHA256 checksum, and confirms `aqueduct --version` matches the tag (v0.17-C).
+- Version linting CI step (`version-lint` job): fails if README.md status banner,
+  `docs/installation.md`, and `Cargo.toml` workspace version disagree (v0.17-D).
+- `just publish-dry-run` recipe for dry-run crates.io publish verification (v0.17-C).
+
+### Changed
+
+- Catalog schema bumped from v7 to v8 (`CATALOG_SCHEMA_VERSION = 8`).
+- `aqueduct-core` and `aqueduct-testkit` Cargo.toml: `publish = true`;
+  `aqueduct-cli`: `publish = false` (v0.17-C).
+- `docs/ha-operations.md` rewritten to accurately describe implemented behaviors:
+  `check_still_primary()`, Patroni `/master` check, per-step events, `aqueduct audit`,
+  and the recovery runbook. Speculative `system_identifier`/`timeline_id` content removed
+  (v0.17-D).
+- `docs/installation.md`: updated version example to `0.17.0`, MSRV to 1.88,
+  added build provenance verification section (v0.17-C/D).
+- `ci.yml` security-audit job: removed `--ignore RUSTSEC-2025-0052` (httpmock replaced).
+- `httpmock` replaced with `wiremock` in `aqueduct-core` dev-dependencies; all five
+  HTTP mock tests updated to the async wiremock API (v0.17-D).
+
 ## [0.16.0] - 2026-05-20
 
 ### Added
