@@ -126,10 +126,7 @@ pub async fn assert_scheduler_idle(client: &tokio_postgres::Client) {
 ///
 /// Queries `pgtrickle.paused_nodes` and panics if the set differs from
 /// `expected_nodes`. Order does not matter.
-pub async fn assert_scheduler_paused_for(
-    client: &tokio_postgres::Client,
-    expected_nodes: &[&str],
-) {
+pub async fn assert_scheduler_paused_for(client: &tokio_postgres::Client, expected_nodes: &[&str]) {
     let rows = client
         .query(
             "SELECT node_name FROM pgtrickle.paused_nodes ORDER BY node_name",

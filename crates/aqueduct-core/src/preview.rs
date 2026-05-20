@@ -904,7 +904,10 @@ mod tests {
         // Plain-HTTP mock server — does NOT speak TLS.
         let mock = MockServer::start().await;
         let port = mock.address().port();
-        let https_endpoint = format!("api=https://127.0.0.1:{},namespace=test,cluster=test-cluster", port);
+        let https_endpoint = format!(
+            "api=https://127.0.0.1:{},namespace=test,cluster=test-cluster",
+            port
+        );
 
         let config = PreviewConfig {
             branch: "test-branch".to_string(),
@@ -932,7 +935,10 @@ mod tests {
         );
         let err_msg = result.unwrap_err().to_string().to_lowercase();
         assert!(
-            err_msg.contains("tls") || err_msg.contains("ssl") || err_msg.contains("error sending request") || err_msg.contains("connect"),
+            err_msg.contains("tls")
+                || err_msg.contains("ssl")
+                || err_msg.contains("error sending request")
+                || err_msg.contains("connect"),
             "error should indicate a TLS/connection failure, got: {err_msg}"
         );
     }

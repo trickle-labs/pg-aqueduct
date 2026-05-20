@@ -935,9 +935,7 @@ LIMIT $2
 /// Returns `AqueductError::NotYetImplemented` when a non-default value is
 /// detected. Callers in `aqueduct init` and `connect_and_migrate` must call
 /// this before any catalog operations.
-pub fn validate_catalog_schema_not_overridden(
-    catalog_schema: &str,
-) -> crate::error::Result<()> {
+pub fn validate_catalog_schema_not_overridden(catalog_schema: &str) -> crate::error::Result<()> {
     if catalog_schema != "aqueduct" {
         return Err(crate::error::AqueductError::NotYetImplemented {
             feature: "catalog_schema override".to_string(),

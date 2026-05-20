@@ -6133,8 +6133,10 @@ async fn swap_consumer_views_atomicity() {
     //
     // After ROLLBACK, BOTH changes must be undone.
     let retain_str = "3600";
-    let tx_result = db.client.batch_execute(&format!(
-        "BEGIN; \
+    let tx_result = db
+        .client
+        .batch_execute(&format!(
+            "BEGIN; \
          CREATE OR REPLACE VIEW reporting_atomic2.v1 AS \
            SELECT * FROM green_atomic2.t1; \
          UPDATE aqueduct.blue_green_deployments \
@@ -6142,7 +6144,8 @@ async fn swap_consumer_views_atomicity() {
                retire_at = now() + '{retain_str} seconds'::interval \
            WHERE id = {deploy_id}; \
          ROLLBACK"
-    )).await;
+        ))
+        .await;
 
     // batch_execute with BEGIN..ROLLBACK should succeed without error.
     assert!(
@@ -6245,8 +6248,7 @@ async fn catalog_schema_override_rejected_until_implemented() {
     );
 
     // Any non-default value must return NotYetImplemented.
-    let err = validate_catalog_schema_not_overridden("custom_schema")
-        .unwrap_err();
+    let err = validate_catalog_schema_not_overridden("custom_schema").unwrap_err();
     assert!(
         matches!(err, AqueductError::NotYetImplemented { .. }),
         "ARCH-1/v0.19: non-default catalog_schema must return NotYetImplemented; got: {}",
