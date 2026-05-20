@@ -2,10 +2,13 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 mod commands;
+mod output;
+
 use commands::{
     apply, destroy, diff, fmt, import, ingest, init, lint, plan, preview, promote, rollback,
     status, unlock, validate,
 };
+use output::{OutputEmitter, OutputMode};
 
 /// Declarative schema evolution and migration for stream-table DAGs.
 #[derive(Debug, Parser)]
@@ -119,6 +122,21 @@ async fn main() {
     } else {
         tracing_subscriber::fmt().with_env_filter(filter).init();
     }
+
+    // Build the output emitter from global flags.
+    let output_mode = if cli.porcelain {
+        OutputMode::Porcelain
+    } else if cli.quiet {
+        OutputMode::Quiet
+    } else {
+        OutputMode::Human
+    };
+    // The emitter is available for use by command handlers that opt in.
+    let _emitter = OutputEmitter::new(output_mode);
+
+    // ERG-1: set the process-wide quiet flag so command handlers that use
+    // `commands::is_quiet()` can suppress decorative output.
+    commands::set_quiet(quiet);
 
     let result = match cli.command {
         Commands::Init(args) => init::run(args).await,

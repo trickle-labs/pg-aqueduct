@@ -1,6 +1,6 @@
 # pg_aqueduct Roadmap
 
-> **Status:** v0.15.0 released. Versions v0.16–v0.17 address all findings from the
+> **Status:** v0.16.0 released. Versions v0.16–v0.17 address all findings from the
 > Phase 3 engineering assessment (`plans/overall-assessment-3.md`). v1.0 is the first
 > production-ready release.
 > This roadmap reflects the agreed design in `plans/pg-aqueduct-plan.md`.
@@ -43,7 +43,7 @@ versions build on earlier ones without breaking the established CLI surface.
 | [v0.13](#v013--bluegreen-end-to-end-immediate-mode--advanced-features) | Blue/green end-to-end, IMMEDIATE mode & advanced features | 16 | 6–8 weeks |
 | [v0.14](#v014--failure-safety-cicd-trustworthiness--security-hardening) | Failure safety, CI/CD trustworthiness & security hardening | 17 | 4–5 weeks |
 | [v0.15](#v015--execution-integrity-architecture--bluegreen-production) | Execution integrity, architecture & blue/green production | 18 | 5–6 weeks |
-| [v0.16](#v016--cli-quality-test-infrastructure--postgresql-compatibility) | CLI quality, test infrastructure & PostgreSQL compatibility | 19 | 4–5 weeks |
+| [v0.16](#v016--cli-quality-test-infrastructure--postgresql-compatibility) | CLI quality, test infrastructure & PostgreSQL compatibility | 19 | 4–5 weeks | ✅ Released |
 | [v0.17](#v017--ha-operations-documentation-truthfulness--observability) | HA operations, documentation truthfulness & observability | 20 | 4–5 weeks |
 | [v1.0](#v10--release-engineering) | Release engineering | 21 | 2 weeks |
 | [v1.1](#v11--consumer-layer-management) | Consumer layer management | — | TBD |
@@ -2561,6 +2561,7 @@ contexts that prevent future commands from accidentally bypassing safety propert
 **Assessment basis:** findings ERG-1, ERG-3, ERG-4, TEST-2, PERF-2, and open prior
 findings H10, M3, M11, L2, L3, L14; missing tests 13–15, 18, 20 from
 `plans/overall-assessment-3.md`.
+**Status:** ✅ Released as v0.16.0 (2026-05-20).
 
 This version brings the CLI to the quality bar required for scripting and automation:
 global output modes work, YAML serialization is correct, the API reference is generated
@@ -2571,50 +2572,50 @@ formats, and CI gains the PostgreSQL version matrix needed to claim broad compat
 
 #### A. Output Mode Emitter (ERG-1, M11)
 
-- [ ] **Introduce `OutputMode` enum and `OutputEmitter` struct.** `OutputMode` has
+- [x] **Introduce `OutputMode` enum and `OutputEmitter` struct.** `OutputMode` has
   variants `Human`, `Json`, `Yaml`, `Quiet`, and `Porcelain`. `OutputEmitter` is passed
   into every command handler, replacing all direct `println!`/`eprintln!` calls for normal
   output. In `Quiet` mode, info-level output is suppressed. In `Porcelain` mode, only
   structured `key=value` lines are emitted. In `Json` mode, every output line is a JSON
   object matching the published schema.
 
-- [ ] **Wire `--quiet`, `--porcelain`, and `--log-format json` through `OutputEmitter`.**
+- [x] **Wire `--quiet`, `--porcelain`, and `--log-format json` through `OutputEmitter`.**
   The global CLI flags set the mode; `main` constructs the `OutputEmitter` and passes it
   into each command's `run(args, emitter)` signature.
 
-- [ ] **Tests: `quiet_suppresses_decorative_output`, `porcelain_outputs_key_value_only`.**
+- [x] **Tests: `quiet_suppresses_decorative_output`, `porcelain_outputs_key_value_only`.**
   Binary tests assert that `--quiet plan` produces no stdout and that `--porcelain` output
   is parseable as `key=value` lines only.
 
 #### B. YAML Serialization (ERG-3)
 
-- [ ] **Add `serde_yaml` workspace dependency and replace hand-built YAML in all commands.**
+- [x] **Add `serde_yaml` workspace dependency and replace hand-built YAML in all commands.**
   Remove the `format!("project: \"{}\"", ...)` pattern from `plan.rs`, `status.rs`, and
   `diff.rs`. Use `serde_yaml::to_string(&output_struct)`. Derive `Serialize` on all output
   structs already used for JSON.
 
-- [ ] **Test: `yaml_escapes_quotes_and_newlines`.** Assert that a project name containing
+- [x] **Test: `yaml_escapes_quotes_and_newlines`.** Assert that a project name containing
   `"`, `:`, and `\n` produces valid YAML that round-trips through `serde_yaml::from_str`.
 
 #### C. Generated API Reference (ERG-4, M3)
 
-- [ ] **Generate `docs/api-reference.md` from `aqueduct --help` in CI.** Add a
+- [x] **Generate `docs/api-reference.md` from `aqueduct --help` in CI.** Add a
   `just gen-docs` recipe that runs `aqueduct <cmd> --help` for each subcommand and formats
   the output as Markdown sections. Add a CI step that fails if the generated output
   differs from the committed `docs/api-reference.md`.
 
-- [ ] **Correct stale flags and exit-code semantics.** Remove documentation of
+- [x] **Correct stale flags and exit-code semantics.** Remove documentation of
   `--patroni-endpoint`, `--timeout`, `--lock-timeout`, `--no-cost`, and the incorrect
   default "exits 1 for non-empty plan" note. Document `--fail-if-changed` and
   `--fail-on-drift` as the actual non-zero-exit flags.
 
-- [ ] **Align `docs/security.md` with implementation.** Remove the "AWS/GCP/Vault
+- [x] **Align `docs/security.md` with implementation.** Remove the "AWS/GCP/Vault
   planned" language; document them as implemented. Remove the claim that no SQL
   interpolation occurs; document the explicit trust boundaries introduced in v0.14.
 
 #### D. Binary CLI Test Coverage (TEST-2)
 
-- [ ] **Add `assert_cmd` tests for every subcommand's success and error paths.**
+- [x] **Add `assert_cmd` tests for every subcommand's success and error paths.**
   Minimum coverage per command:
   - `plan`: no-connection error, empty plan, non-empty plan, `--fail-if-changed` exit 1,
     `--format json` schema validation.
@@ -2625,50 +2626,50 @@ formats, and CI gains the PostgreSQL version matrix needed to claim broad compat
   - `rollback`: `--dry-run` exits 0.
   - `validate`: fails on IVM-unsupported query, exits 0 on valid files.
 
-- [ ] **Test: `validate_differential_ivm_unsupportable_fails`.** Binary test that writes
+- [x] **Test: `validate_differential_ivm_unsupportable_fails`.** Binary test that writes
   a `SELECT DISTINCT` migration and asserts `aqueduct validate` exits non-zero.
 
 #### E. Status Watch Performance & Formatter Fixes (PERF-2, L2, L3)
 
-- [ ] **Cache desired state by spec hash in `status --watch` (PERF-2).** After the first
+- [x] **Cache desired state by spec hash in `status --watch` (PERF-2).** After the first
   poll, store the `sha2::Sha256` hash of the serialized `DagState` and the mtime of each
   migration file. Only reload migration files when any mtime is newer. Keep reconnecting
   for live state. Add a `--poll-interval` flag to `StatusArgs`.
 
-- [ ] **Surface `fmt` read errors (L2).** `read_original_content` must return
+- [x] **Surface `fmt` read errors (L2).** `read_original_content` must return
   `Result<String>` and propagate IO errors. `aqueduct fmt` prints a diagnostic when a file
   cannot be read rather than silently using an empty string.
 
-- [ ] **Fix `CANONICAL_KEY_ORDER` purpose (L3).** Rename it to `KNOWN_FRONTMATTER_KEYS`
+- [x] **Fix `CANONICAL_KEY_ORDER` purpose (L3).** Rename it to `KNOWN_FRONTMATTER_KEYS`
   to reflect its actual role (filtering unknown keys), or implement the canonical ordering
   it currently implies.
 
-- [ ] **Restrict `TestDb.connection_string` visibility to `pub(crate)` (L14).** Prevent
+- [x] **Restrict `TestDb.connection_string` visibility to `pub(crate)` (L14).** Prevent
   external crates from depending on the internal connection string representation.
 
 #### F. PostgreSQL Version Matrix & Developer Experience (H10, backlog-11)
 
-- [ ] **CI targets PostgreSQL 18+ exclusively.** pg_trickle requires PostgreSQL 18+.
+- [x] **CI targets PostgreSQL 18+ exclusively.** pg_trickle requires PostgreSQL 18+.
   The integration CI job uses `pg-version: ["18"]` and `postgres:18-alpine` images.
   Future releases may add newer PostgreSQL versions to the matrix as they become
   available.
 
-- [ ] **Test: `postgres_version_matrix_min_supported`.** Verify the core
+- [x] **Test: `postgres_version_matrix_min_supported`.** Verify the core
   create/apply/rollback cycle passes on PG 18 (minimum supported by pg_trickle).
 
-- [ ] **Add `CONTRIBUTING.md`.** Document Docker/Testcontainers prerequisites, `just`
+- [x] **Add `CONTRIBUTING.md`.** Document Docker/Testcontainers prerequisites, `just`
   recipes, integration test environment variables, how to run against a specific PG
   version, coding standards, and a step-by-step guide for adding a new cookbook recipe.
 
-**v0.16 release criteria.**
-- `--quiet` suppresses all non-error output; `--porcelain` emits only `key=value` lines.
-- YAML output passes `serde_yaml::from_str` round-trip including special characters.
-- `docs/api-reference.md` is generated by CI; drift fails the build.
-- Binary CLI tests cover every subcommand's exit codes and output format.
-- `status --watch` does not reload migration files when mtimes are unchanged.
-- Integration tests pass on PostgreSQL 18+ (minimum required by pg_trickle).
-- `CONTRIBUTING.md` exists and is accurate.
-- All v0.15 tests continue to pass.
+**v0.16 release criteria.** ✅ All met.
+- ✅ `--quiet` suppresses all non-error output; `--porcelain` emits only `key=value` lines.
+- ✅ YAML output passes `serde_yaml::from_str` round-trip including special characters.
+- ✅ `docs/api-reference.md` is generated by CI; drift fails the build.
+- ✅ Binary CLI tests cover every subcommand's exit codes and output format.
+- ✅ `status --watch` does not reload migration files when mtimes are unchanged.
+- ✅ Integration tests pass on PostgreSQL 18+ (minimum required by pg_trickle).
+- ✅ `CONTRIBUTING.md` exists and is accurate.
+- ✅ All v0.15 tests continue to pass.
 
 ---
 

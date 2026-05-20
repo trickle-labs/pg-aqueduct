@@ -17,6 +17,25 @@ pub mod validate;
 use anyhow::Result;
 use tokio_postgres::NoTls;
 
+// ── Global quiet mode (ERG-1) ────────────────────────────────────────────────
+
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Global quiet-mode flag set by `main()` before dispatching to a command.
+static QUIET_FLAG: AtomicBool = AtomicBool::new(false);
+
+/// Set whether the CLI is running in quiet mode (--quiet or --porcelain).
+pub fn set_quiet(quiet: bool) {
+    QUIET_FLAG.store(quiet, Ordering::Relaxed);
+}
+
+/// Returns `true` when the CLI is running in quiet mode.
+///
+/// Command handlers use this to suppress decorative (non-error) stdout output.
+pub fn is_quiet() -> bool {
+    QUIET_FLAG.load(Ordering::Relaxed)
+}
+
 /// Redact the password portion of a PostgreSQL DSN for safe display in logs or
 /// error messages (U-06/SEC-01).
 ///

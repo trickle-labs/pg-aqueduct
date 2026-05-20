@@ -99,20 +99,41 @@ pub async fn run(args: DiffArgs) -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&output)?);
         }
         "yaml" => {
-            // Manual YAML output (no serde_yaml dep needed).
-            println!("deltas:");
-            for d in &deltas {
-                println!("  - name: \"{}\"", d.qualified_name);
-                println!("    kind: {:?}", d.kind);
-                if let Some(ref spec) = d.desired {
-                    println!("    desired_schedule: \"{}\"", spec.schedule);
-                }
-                if let Some(ref spec) = d.actual {
-                    println!("    actual_schedule: \"{}\"", spec.schedule);
-                }
+            // ERG-3: use serde_yaml so that special characters are correctly escaped.
+            #[derive(serde::Serialize)]
+            struct DeltaYaml<'a> {
+                name: String,
+                kind: String,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                desired_schedule: Option<&'a str>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                actual_schedule: Option<&'a str>,
             }
-            println!("changed: {}", changed_count);
-            println!("total: {}", deltas.len());
+            #[derive(serde::Serialize)]
+            struct DiffYaml<'a> {
+                deltas: Vec<DeltaYaml<'a>>,
+                changed: usize,
+                total: usize,
+            }
+            let doc = DiffYaml {
+                deltas: deltas
+                    .iter()
+                    .map(|d| DeltaYaml {
+                        name: d.qualified_name.to_string(),
+                        kind: format!("{:?}", d.kind),
+                        desired_schedule: d.desired.as_ref().map(|s| s.schedule.as_str()),
+                        actual_schedule: d.actual.as_ref().map(|s| s.schedule.as_str()),
+                    })
+                    .collect(),
+                changed: changed_count,
+                total: deltas.len(),
+            };
+            println!(
+                "{}",
+                serde_yaml::to_string(&doc)
+                    .unwrap_or_else(|e| format!("# YAML error: {}\n", e))
+                    .trim_end()
+            );
         }
         "markdown" | "md" => {
             println!("## aqueduct diff\n");

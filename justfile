@@ -90,6 +90,33 @@ docs-cli:
         echo ""
     done
 
+# Generate docs/api-reference.md from aqueduct --help (ERG-4).
+# Run this after any CLI flag change to keep the reference in sync.
+# CI verifies the committed file matches this output.
+gen-docs:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    BIN="./target/debug/aqueduct"
+    if [ ! -f "$BIN" ]; then cargo build --bin aqueduct; fi
+    {
+        echo "# API Reference"
+        echo ""
+        echo "> **Auto-generated** from \`aqueduct --help\` output."
+        echo "> Do not edit by hand — run \`just gen-docs\` to regenerate."
+        echo ""
+        echo "Binary version: \`$($BIN --version | head -1)\`"
+        echo ""
+        for cmd in plan apply diff status validate lint import rollback promote destroy unlock init preview ingest fmt; do
+            echo "## aqueduct $cmd"
+            echo ""
+            echo '```text'
+            $BIN "$cmd" --help 2>&1 || true
+            echo '```'
+            echo ""
+        done
+    } > docs/api-reference.md
+    echo "docs/api-reference.md updated."
+
 # ── Dev ─────────────────────────────────────────────────────────────────────
 
 # Run the aqueduct binary in development mode.
