@@ -62,7 +62,7 @@
 # Operations
 
 - [Security Guide](security.md)
-- [Role SQL Templates](roles.sql)
+- [Role SQL Templates](roles.md)
 - [HA Operations](ha-operations.md)
 
 ---

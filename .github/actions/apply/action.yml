@@ -41,7 +41,11 @@ inputs:
     default: 'default'
 
   dsn-secret:
-    description: 'Name of the secret that holds the PostgreSQL DSN (injected as AQUEDUCT_DSN)'
+    description: >
+      The PostgreSQL DSN value (pass via `${{ secrets.MY_DSN }}`). Injected as
+      AQUEDUCT_DSN environment variable. Composite actions cannot look up secrets
+      by name, so pass the secret value directly. If empty, AQUEDUCT_DSN must
+      already be set in the calling workflow's environment.
     required: false
     default: ''
 
@@ -158,7 +162,7 @@ runs:
       id: run-apply
       shell: bash
       env:
-        AQUEDUCT_DSN: ${{ inputs.dsn-secret != '' && secrets[inputs.dsn-secret] || '' }}
+        AQUEDUCT_DSN: ${{ inputs.dsn-secret }}
       run: |
         set -euo pipefail
 
