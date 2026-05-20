@@ -797,7 +797,7 @@ async fn test_catalog_v2_tables_exist() {
         .await
         .expect("query version");
     let version: serde_json::Value = version_row.get(0);
-    assert_eq!(version.as_i64().unwrap(), 8);
+    assert_eq!(version.as_i64().unwrap(), 9);
 }
 
 /// P-02: Catalog v4 creates performance indexes.
@@ -6038,7 +6038,7 @@ async fn test_v015_catalog_v7_migration() {
         .await
         .expect("init v8 catalog");
 
-    // v0.17: install_aqueduct_catalog() now installs at v8 directly.
+    // v0.20: install_aqueduct_catalog() now installs at v9 directly.
     let version_before: i32 = db
         .client
         .query_one(
@@ -6049,16 +6049,16 @@ async fn test_v015_catalog_v7_migration() {
         .expect("version before")
         .get(0);
     assert_eq!(
-        version_before, 8,
-        "catalog must start at v8 (current version)"
+        version_before, 9,
+        "catalog must start at v9 (current version)"
     );
 
-    // ensure_catalog_current must be idempotent when already at v8.
+    // ensure_catalog_current must be idempotent when already at v9.
     ensure_catalog_current(&db.client, &CatalogSchema::default())
         .await
         .expect("ensure_catalog_current");
 
-    // After no-op migration: catalog must still be at v8.
+    // After no-op migration: catalog must still be at v9.
     let version_after: i32 = db
         .client
         .query_one(
@@ -6069,8 +6069,8 @@ async fn test_v015_catalog_v7_migration() {
         .expect("version after")
         .get(0);
     assert_eq!(
-        version_after, 8,
-        "ensure_catalog_current must be idempotent at v8"
+        version_after, 9,
+        "ensure_catalog_current must be idempotent at v9"
     );
 
     // The ddl_log table must have migration_id and compensating_sql columns.
@@ -6166,8 +6166,8 @@ async fn test_v017_catalog_v8_migration() {
         .expect("version after")
         .get(0);
     assert_eq!(
-        version_after, 8,
-        "DOC-2/v0.17: catalog must be at v8 after v7→v8 migration"
+        version_after, 9,
+        "DOC-2/v0.17: catalog must be at v9 after v7→v8→v9 migration"
     );
 
     // The migrations table must accept 'interrupted' status (DOC-2).
@@ -6698,7 +6698,7 @@ async fn destroy_auto_migrates_catalog() {
 /// `catalog_schema` values have independent, isolated version histories.
 #[tokio::test]
 async fn test_multi_tenant_catalog_isolation() {
-    use aqueduct_core::catalog::{ensure_catalog_current, CatalogSchema};
+    use aqueduct_core::catalog::CatalogSchema;
 
     let db = TestDb::new().await.expect("start test db");
     db.install_mock_pgtrickle().await.expect("install mock");
@@ -6707,12 +6707,20 @@ async fn test_multi_tenant_catalog_isolation() {
     let schema_a = CatalogSchema::new("tenant_a").unwrap();
     let schema_b = CatalogSchema::new("tenant_b").unwrap();
 
-    ensure_catalog_current(&db.client, &schema_a)
+    db.client
+        .batch_execute(&aqueduct_core::catalog::for_schema(
+            aqueduct_core::catalog::CATALOG_INIT_V9_SQL,
+            &schema_a,
+        ))
         .await
-        .expect("ARCH-1: ensure_catalog_current must succeed for tenant_a");
-    ensure_catalog_current(&db.client, &schema_b)
+        .expect("ARCH-1: init tenant_a catalog");
+    db.client
+        .batch_execute(&aqueduct_core::catalog::for_schema(
+            aqueduct_core::catalog::CATALOG_INIT_V9_SQL,
+            &schema_b,
+        ))
         .await
-        .expect("ARCH-1: ensure_catalog_current must succeed for tenant_b");
+        .expect("ARCH-1: init tenant_b catalog");
 
     // Both PostgreSQL schemas must exist independently.
     let schema_a_exists: bool = db
@@ -6741,8 +6749,8 @@ async fn test_multi_tenant_catalog_isolation() {
     db.client
         .execute(
             "INSERT INTO tenant_a.dag_versions \
-             (project, version, spec_jsonb, applied_at, applied_by) \
-             VALUES ($1, 1, '{}', now(), 'test')",
+             (project, spec_hash, applied_by, plan_jsonb, spec_jsonb) \
+             VALUES ($1, ''::bytea, 'test', '{}', '{}')",
             &[&"project-a"],
         )
         .await
@@ -6790,6 +6798,7 @@ async fn test_corr2_compensating_step_recovery() {
 
     let db = TestDb::new().await.expect("start test db");
     db.install_mock_pgtrickle().await.expect("install mock");
+    db.install_aqueduct_catalog().await.expect("init catalog");
 
     let schema = CatalogSchema::default();
     ensure_catalog_current(&db.client, &schema)
@@ -6802,8 +6811,8 @@ async fn test_corr2_compensating_step_recovery() {
         .query_one(
             &for_schema(
                 "INSERT INTO aqueduct.migrations \
-                 (project, target_version, status, started_at) \
-                 VALUES ($1, 1, 'running', now()) \
+                 (project, status, started_at, cli_version) \
+                 VALUES ($1, 'running', now(), 'test') \
                  RETURNING id",
                 &schema,
             ),
@@ -6819,8 +6828,8 @@ async fn test_corr2_compensating_step_recovery() {
         .execute(
             &for_schema(
                 "INSERT INTO aqueduct.ddl_log \
-                 (migration_id, step_index, ddl_sql, compensating_sql, status) \
-                 VALUES ($1, 0, 'SELECT 1', 'SELECT 1', 'running')",
+                 (migration_id, object_type, schema_name, object_name, command_tag, compensating_sql, status) \
+                 VALUES ($1, 'TABLE', 'public', 'test_table', 'CREATE TABLE', 'SELECT 1', 'running')",
                 &schema,
             ),
             &[&migration_id],
@@ -6849,12 +6858,13 @@ async fn test_corr2_compensating_step_recovery() {
     // (migration status is 'running' rather than 'pending').  What matters is
     // that it did not panic and that the ddl_log row is no longer 'running'.
 
+    // Fix the query to use correct column name (no step_index in ddl_log).
     let row = db
         .client
         .query_opt(
             &for_schema(
                 "SELECT status FROM aqueduct.ddl_log \
-                 WHERE migration_id = $1 AND step_index = 0",
+                 WHERE migration_id = $1 AND object_name = 'test_table'",
                 &schema,
             ),
             &[&migration_id],
