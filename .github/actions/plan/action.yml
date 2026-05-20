@@ -50,7 +50,7 @@ inputs:
 
   dsn-secret:
     description: >
-      The PostgreSQL DSN value (pass via `${{ secrets.MY_DSN }}`). Injected as
+      The PostgreSQL DSN value (pass via your secret, e.g. secrets.MY_DSN). Injected as
       AQUEDUCT_DSN environment variable. Composite actions cannot look up secrets
       by name, so pass the secret value directly. If empty, AQUEDUCT_DSN must
       already be set in the calling workflow's environment.
