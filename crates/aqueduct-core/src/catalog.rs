@@ -346,15 +346,18 @@ CREATE TABLE IF NOT EXISTS aqueduct.cluster_profile (
 );
 
 -- DDL event log (populated by the optional pg_aqueduct companion extension).
+-- Includes v7 columns: migration_id and compensating_sql (CORR-2).
 CREATE TABLE IF NOT EXISTS aqueduct.ddl_log (
-    id           bigserial PRIMARY KEY,
-    object_type  text      NOT NULL,
-    schema_name  text      NOT NULL,
-    object_name  text      NOT NULL,
-    command_tag  text      NOT NULL,
-    command_text text,
-    recorded_at  timestamptz NOT NULL DEFAULT now(),
-    pg_role      text      NOT NULL DEFAULT current_role
+    id              bigserial PRIMARY KEY,
+    object_type     text      NOT NULL,
+    schema_name     text      NOT NULL,
+    object_name     text      NOT NULL,
+    command_tag     text      NOT NULL,
+    command_text    text,
+    recorded_at     timestamptz NOT NULL DEFAULT now(),
+    pg_role         text      NOT NULL DEFAULT current_role,
+    migration_id    bigint    REFERENCES aqueduct.migrations(id),
+    compensating_sql text
 );
 
 -- Consumer view registry.
@@ -371,6 +374,7 @@ CREATE TABLE IF NOT EXISTS aqueduct.consumer_views (
 );
 
 -- Blue/green deployment tracking.
+-- Includes v7 columns: rolled_back_at, 'rolled_back' status (ARCH-3).
 CREATE TABLE IF NOT EXISTS aqueduct.blue_green_deployments (
     id             bigserial PRIMARY KEY,
     project        text      NOT NULL,
@@ -383,7 +387,8 @@ CREATE TABLE IF NOT EXISTS aqueduct.blue_green_deployments (
     swapped_at     timestamptz,
     retired_at     timestamptz,
     retire_at      timestamptz,
-    CONSTRAINT bg_status_check CHECK (status IN ('active', 'swapped', 'retired', 'failed'))
+    rolled_back_at timestamptz,
+    CONSTRAINT bg_status_check CHECK (status IN ('active', 'swapped', 'retired', 'failed', 'rolled_back'))
 );
 
 -- Multi-project ownership registry: tracks which project owns each stream table.
@@ -395,13 +400,13 @@ CREATE TABLE IF NOT EXISTS aqueduct.stream_table_ownership (
     PRIMARY KEY (schema_name, table_name)
 );
 
--- Performance indexes (P-02 / v0.12).
+-- Performance indexes (P-02 / v0.12). Index includes 'interrupted' (v0.17).
 CREATE INDEX IF NOT EXISTS aqueduct_dag_versions_project
     ON aqueduct.dag_versions (project, version DESC);
 
 CREATE INDEX IF NOT EXISTS aqueduct_migrations_project_status
     ON aqueduct.migrations (project, status)
-    WHERE status IN ('running', 'recoverable_failure');
+    WHERE status IN ('running', 'recoverable_failure', 'interrupted');
 
 CREATE INDEX IF NOT EXISTS aqueduct_migrations_project_started
     ON aqueduct.migrations (project, started_at DESC);
@@ -411,6 +416,10 @@ CREATE INDEX IF NOT EXISTS aqueduct_locks_project
 
 CREATE INDEX IF NOT EXISTS aqueduct_migration_steps_migration
     ON aqueduct.migration_steps (migration_id, step_index);
+
+CREATE INDEX IF NOT EXISTS aqueduct_ddl_log_migration
+    ON aqueduct.ddl_log (migration_id)
+    WHERE migration_id IS NOT NULL;
 
 -- Migration history view: human-readable table of migrations with step detail.
 CREATE OR REPLACE VIEW aqueduct.migration_history AS
