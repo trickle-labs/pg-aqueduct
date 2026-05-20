@@ -114,14 +114,26 @@ pub async fn run(args: PlanArgs) -> anyhow::Result<()> {
 
     // Check for drift if requested.
     if args.fail_on_drift {
+        // M-2 (v0.18): count all three delta collections to detect consumer-layer
+        // and source-layer drift, not just stream-table deltas.
         let drift_count = diff
             .deltas
             .iter()
             .filter(|d| d.kind != aqueduct_core::diff::DeltaKind::Unchanged)
-            .count();
+            .count()
+            + diff
+                .source_deltas
+                .iter()
+                .filter(|s| s.kind != aqueduct_core::diff::SourceDeltaKind::Unchanged)
+                .count()
+            + diff
+                .consumer_deltas
+                .iter()
+                .filter(|c| c.kind != aqueduct_core::diff::ConsumerDeltaKind::Unchanged)
+                .count();
         if drift_count > 0 {
             anyhow::bail!(
-                "Drift detected: {} table{} differ between live state and desired state. \
+                "Drift detected: {} change{} between live state and desired state. \
                  Run `aqueduct plan` to see the full plan.",
                 drift_count,
                 if drift_count == 1 { "" } else { "s" }

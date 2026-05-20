@@ -123,7 +123,36 @@ REST endpoint (`GET /master`) before applying. Pass `--patroni-endpoint <url>`.
   layer does not perform string interpolation into SQL; explicit trust boundaries for
   identifier construction were introduced in v0.14 (see `CatalogSchema` newtype and
   the `catalog.rs` query builder).
+- **Consumer SQL injection (SEC-1):** Consumer view bodies are validated as a single
+  `SELECT` statement by `validate_consumer_sql_is_single_select()` before any
+  `CREATE OR REPLACE VIEW` is executed. Multi-statement bodies and bare DDL are rejected
+  with `AqueductError::UntrustedSqlBody` before any database call is made.
 - **Sensitive data exposure:** DSNs containing passwords are masked in log output. Secret
   values are never echoed or stored.
 - **Misconfiguration:** `aqueduct lint` warns about overly permissive configurations
   (e.g., `allow_full_refresh = true` in a production target).
+
+## CNPG preview TLS
+
+When using `aqueduct preview` with CloudNativePG, the CLI validates TLS certificates
+on all Kubernetes API calls by default. To connect to a development cluster with a
+self-signed certificate, set the **development-only** escape hatch:
+
+```bash
+export CNPG_INSECURE_SKIP_VERIFY=1
+aqueduct preview create --branch feat/my-branch
+```
+
+> **Warning:** Never set `CNPG_INSECURE_SKIP_VERIFY` in production. Disabling TLS
+> verification exposes the connection to man-in-the-middle attacks.
+
+## Age identity file security
+
+The `age` secret backend validates both the encrypted-file path (`key`) and the
+identity file path (`AGE_KEY_FILE` / `SOPS_AGE_KEY_FILE`) before passing them to
+the `age` subprocess:
+
+1. **Path traversal:** paths containing `..` components are rejected with
+   `AqueductError::InvalidSecretPath`.
+2. **Flag injection:** identity file paths starting with `-` are rejected to prevent
+   the value from being interpreted as a CLI flag by the `age` binary.

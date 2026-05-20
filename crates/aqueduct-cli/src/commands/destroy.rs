@@ -4,7 +4,7 @@ use aqueduct_core::{
 };
 use clap::Args;
 
-use super::connect;
+use super::connect_and_migrate;
 
 #[derive(Debug, Args)]
 pub struct DestroyArgs {
@@ -58,7 +58,9 @@ pub async fn run(args: DestroyArgs) -> anyhow::Result<()> {
         );
     }
 
-    let client = connect(&dsn).await?;
+    // M-5 (v0.18): use connect_and_migrate so a stale catalog is auto-migrated
+    // before destroy queries it, preventing missing-column errors.
+    let client = connect_and_migrate(&dsn).await?;
 
     let options = DestroyOptions {
         project: project_name.clone(),

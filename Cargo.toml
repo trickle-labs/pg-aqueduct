@@ -7,7 +7,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.17.0"
+version = "0.18.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/trickle-labs/pg-aqueduct"
@@ -26,7 +26,7 @@ postgres-types = { version = "0.2", features = ["derive"] }
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# DEP-1 (v0.14): pre-declare serde_yaml for v0.16 YAML work.
+# YAML serialization for plan/status/diff --format yaml output.
 serde_yaml = "0.9"
 toml = "0.8"
 

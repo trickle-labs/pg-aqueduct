@@ -916,6 +916,47 @@ SELECT customer_id, total FROM public.order_totals;
     assert!(exists, "Consumer view reporting.orders should exist");
 }
 
+/// SEC-1 (v0.18): a consumer migration file containing injected DDL is rejected
+/// by the executor before any database call is made.
+#[tokio::test]
+async fn consumer_sql_injection_rejected_at_apply() {
+    let db = TestDb::new().await.expect("start test db");
+    db.install_mock_pgtrickle().await.expect("install mock");
+    db.install_aqueduct_catalog().await.expect("init catalog");
+
+    // Build a consumer spec whose sql_body is a CREATE TABLE injection.
+    let consumer_file = parse_migration_file(
+        &PathBuf::from("consumers/injected.sql"),
+        r#"-- @aqueduct:kind = consumer
+-- @aqueduct:source = public.order_totals
+-- @aqueduct:expose_as = reporting.injected
+CREATE TABLE evil (id bigint);
+"#,
+        &HashMap::new(),
+    )
+    .expect("parse consumer");
+
+    let files = vec![consumer_file];
+    let desired = build_dag_state(&files, false).expect("desired");
+    let actual = read_live_state(&db.client, None).await.expect("actual");
+    let diff = compute_diff(&desired, &actual);
+    let topo = topological_sort(&desired).expect("topo");
+    let plan = build_plan("sec1-test", None, 1, &diff, &topo).expect("build_plan");
+
+    let executor = PlanExecutor::new(&db.client, "sec1-test", "0.18.0", false);
+    let result = executor.execute(&plan).await;
+    assert!(
+        result.is_err(),
+        "Executor should reject injected DDL in consumer sql_body"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("UntrustedSqlBody") || err_msg.contains("CREATE"),
+        "Expected UntrustedSqlBody error, got: {}",
+        err_msg
+    );
+}
+
 /// Test: detect_extension_installed returns false when no event trigger exists.
 #[tokio::test]
 async fn test_extension_detection_false() {

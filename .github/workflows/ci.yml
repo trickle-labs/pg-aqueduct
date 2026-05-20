@@ -217,14 +217,14 @@ jobs:
             exit 1
           fi
 
-  # ── Version lint (v0.17 / ROAD-1) ───────────────────────────────────────────
+  # ── Version lint (v0.18 / CI-1) ─────────────────────────────────────────────
   version-lint:
     name: Version lint (README, docs, Cargo.toml agree)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
-      - name: Verify README banner, installation.md, and Cargo.toml all use the same version
+      - name: Verify all tracked files reference the same version as Cargo.toml
         run: |
           CARGO_VERSION="$(grep '^version' Cargo.toml | head -1 | sed 's/version = \"//;s/\"//')"
           echo "Workspace version: $CARGO_VERSION"
@@ -241,15 +241,71 @@ jobs:
 
           # Check docs/installation.md for a version mention
           if grep -q "${CARGO_VERSION}" docs/installation.md; then
-            echo "✓ docs/installation.md references v${CARGO_VERSION}"
+            echo "✓ docs/installation.md references ${CARGO_VERSION}"
           else
-            echo "✗ docs/installation.md does not reference v${CARGO_VERSION}" >&2
+            echo "✗ docs/installation.md does not reference ${CARGO_VERSION}" >&2
+            FAILED=1
+          fi
+
+          # Check docs/api-reference.md binary version header
+          if grep -q "aqueduct ${CARGO_VERSION}" docs/api-reference.md; then
+            echo "✓ docs/api-reference.md references aqueduct ${CARGO_VERSION}"
+          else
+            echo "✗ docs/api-reference.md does not reference aqueduct ${CARGO_VERSION}" >&2
+            FAILED=1
+          fi
+
+          # Check docs/introduction.md status line
+          if grep -q "v${CARGO_VERSION}" docs/introduction.md; then
+            echo "✓ docs/introduction.md references v${CARGO_VERSION}"
+          else
+            echo "✗ docs/introduction.md does not reference v${CARGO_VERSION}" >&2
+            FAILED=1
+          fi
+
+          # Check ci/gitlab/aqueduct.gitlab-ci.yml
+          if grep -q "\"${CARGO_VERSION}\"" ci/gitlab/aqueduct.gitlab-ci.yml; then
+            echo "✓ ci/gitlab/aqueduct.gitlab-ci.yml references ${CARGO_VERSION}"
+          else
+            echo "✗ ci/gitlab/aqueduct.gitlab-ci.yml does not reference ${CARGO_VERSION}" >&2
+            FAILED=1
+          fi
+
+          # Check .pre-commit-hooks.yaml example rev
+          if grep -q "v${CARGO_VERSION}" .pre-commit-hooks.yaml; then
+            echo "✓ .pre-commit-hooks.yaml references v${CARGO_VERSION}"
+          else
+            echo "✗ .pre-commit-hooks.yaml does not reference v${CARGO_VERSION}" >&2
+            FAILED=1
+          fi
+
+          # Check .github/workflows/aqueduct-plan.yml action ref
+          if grep -q "@v${CARGO_VERSION}" .github/workflows/aqueduct-plan.yml; then
+            echo "✓ .github/workflows/aqueduct-plan.yml references @v${CARGO_VERSION}"
+          else
+            echo "✗ .github/workflows/aqueduct-plan.yml does not reference @v${CARGO_VERSION}" >&2
+            FAILED=1
+          fi
+
+          # Check .github/workflows/aqueduct-apply.yml action ref
+          if grep -q "@v${CARGO_VERSION}" .github/workflows/aqueduct-apply.yml; then
+            echo "✓ .github/workflows/aqueduct-apply.yml references @v${CARGO_VERSION}"
+          else
+            echo "✗ .github/workflows/aqueduct-apply.yml does not reference @v${CARGO_VERSION}" >&2
+            FAILED=1
+          fi
+
+          # Check ROADMAP.md status line references this version
+          if grep -q "v${CARGO_VERSION}" ROADMAP.md; then
+            echo "✓ ROADMAP.md references v${CARGO_VERSION}"
+          else
+            echo "✗ ROADMAP.md does not reference v${CARGO_VERSION}" >&2
             FAILED=1
           fi
 
           if [ "$FAILED" = "1" ]; then
             echo ""
-            echo "ERROR: version drift detected — update README.md and docs/installation.md to match Cargo.toml ($CARGO_VERSION)"
+            echo "ERROR: version drift detected — update all tracked files to match Cargo.toml ($CARGO_VERSION)"
             exit 1
           fi
 

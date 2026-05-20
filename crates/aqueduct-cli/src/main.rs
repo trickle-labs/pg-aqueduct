@@ -100,10 +100,12 @@ async fn main() {
     let quiet = cli.quiet || cli.porcelain;
 
     // Initialise structured logging.
-    // L7 (v0.14): Check the env-var value, not just presence.
-    // GITHUB_ACTIONS is set to "true" (not just present) in GitHub Actions.
-    // CI is "true" on most CI platforms. CIRCLECI is "true" on CircleCI.
-    // JENKINS_URL is the URL string on Jenkins (truthy when set and non-empty).
+    // Detect CI environments by checking env-var values, not just presence.
+    // GITHUB_ACTIONS is set to "true" (string) in GitHub Actions.
+    // CI is "true" on most CI platforms (GitHub Actions, GitLab CI, etc.).
+    // GITLAB_CI is "true" on GitLab CI/CD.
+    // CIRCLECI is "true" on CircleCI.
+    // JENKINS_URL is the Jenkins base URL (truthy when set and non-empty).
     let is_ci = std::env::var("CI").as_deref() == Ok("true")
         || std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true")
         || std::env::var("GITLAB_CI").as_deref() == Ok("true")

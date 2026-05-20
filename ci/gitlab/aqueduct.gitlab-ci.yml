@@ -4,13 +4,13 @@
 #
 #   include:
 #     - project: 'trickle-labs/pg-aqueduct'
-#       ref: v0.4.0
+#       ref: v0.18.0
 #       file: 'ci/gitlab/aqueduct.gitlab-ci.yml'
 #
 # Then override the variables in your project's .gitlab-ci.yml as needed:
 #
 #   variables:
-#     AQUEDUCT_VERSION: "0.4.0"
+#     AQUEDUCT_VERSION: "0.18.0"
 #     AQUEDUCT_TARGET: "prod"
 #     AQUEDUCT_PROJECT_DIR: "."
 #
@@ -18,7 +18,7 @@
 # Configure it under Settings → CI/CD → Variables.
 
 variables:
-  AQUEDUCT_VERSION: "0.4.0"
+  AQUEDUCT_VERSION: "0.18.0"
   AQUEDUCT_TARGET: "prod"
   AQUEDUCT_PROJECT_DIR: "."
   # Set AQUEDUCT_FAIL_IF_CHANGED to "true" to block MR merges with pending migrations.
@@ -33,13 +33,15 @@ variables:
   OS="linux"
   ARCH="$(uname -m)"
   case "$ARCH" in
-    x86_64)  ARCH="x86_64" ;;
-    aarch64) ARCH="aarch64" ;;
+    x86_64)  ARCH="amd64" ;;
+    aarch64) ARCH="arm64" ;;
     *) echo "Unsupported arch: $ARCH" >&2; exit 1 ;;
   esac
-  BINARY="aqueduct-${OS}-${ARCH}"
-  DOWNLOAD_URL="https://github.com/trickle-labs/pg-aqueduct/releases/download/v${AQUEDUCT_VERSION}/${BINARY}"
-  curl -fsSL -o /usr/local/bin/aqueduct "$DOWNLOAD_URL"
+  BINARY="aqueduct-${AQUEDUCT_VERSION}-${OS}-${ARCH}"
+  DOWNLOAD_URL="https://github.com/trickle-labs/pg-aqueduct/releases/download/v${AQUEDUCT_VERSION}/${BINARY}.tar.gz"
+  curl -fsSL -o aqueduct.tar.gz "$DOWNLOAD_URL"
+  tar xzf aqueduct.tar.gz
+  mv "${BINARY}/aqueduct" /usr/local/bin/aqueduct
   chmod +x /usr/local/bin/aqueduct
   aqueduct --version
 
