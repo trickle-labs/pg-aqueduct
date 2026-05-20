@@ -1238,7 +1238,9 @@ pub async fn import_from_live(
 ) -> Result<usize> {
     use crate::live_state::read_live_state;
 
-    let state = read_live_state(client, Some(project)).await?;
+    // Import reads ALL stream tables visible on the database — no ownership
+    // filtering at this stage since we are bootstrapping a new project.
+    let state = read_live_state(client, None).await?;
     let streams_dir = output_dir.join("migrations").join("streams");
     std::fs::create_dir_all(&streams_dir)?;
 
