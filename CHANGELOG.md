@@ -11,6 +11,10 @@ For planned future versions, see [ROADMAP.md](ROADMAP.md).
 
 ## [0.17.0] - 2026-06-10
 
+This release is all about confidence and safety for teams running critical database infrastructure. When you're managing a high-availability PostgreSQL cluster using tools like Patroni, you can now tell Aqueduct exactly where to check that the database is still the primary leader between every migration step. If the database fails over to a replica mid-migration, Aqueduct detects this immediately, stops what it's doing, and marks the migration as interrupted — rather than blindly continuing and potentially corrupting data on a read-only standby. This dramatically reduces the risk of one of the most dangerous scenarios in database operations: a migration that half-completes during a failover event.
+
+Beyond failover protection, this version gives teams unprecedented visibility into what Aqueduct is doing at runtime. Every single migration step — when it starts, how long it takes, whether it succeeded or failed — is now emitted as a structured event, making it trivial to connect Aqueduct to monitoring dashboards, alerting pipelines, or log aggregation systems. The new `aqueduct audit` command lets you look back at recent migrations and see exactly what happened and when. For teams that need to demonstrate compliance or investigate incidents, this audit trail is invaluable. And with a built-in Prometheus metrics endpoint, you can wire Aqueduct directly into Grafana and get real-time migration dashboards with zero extra tooling.
+
 ### Added
 
 - `--patroni-endpoint <url>` flag on `aqueduct apply`. Between each migration step,
@@ -57,6 +61,10 @@ For planned future versions, see [ROADMAP.md](ROADMAP.md).
   HTTP mock tests updated to the async wiremock API (v0.17-D).
 
 ## [0.16.0] - 2026-05-20
+
+Version 0.16 is a polish release focused on making Aqueduct a pleasure to work with, both for humans sitting at a terminal and for automated systems parsing its output. Teams integrating Aqueduct into CI/CD pipelines can now choose between structured JSON, clean YAML, a minimal porcelain format designed for shell scripting, or a completely silent quiet mode that suppresses all decorative output and shows only what matters. These improvements mean that whatever your downstream tooling looks like — Slack alerts, dashboards, custom scripts — Aqueduct can speak its language directly without any fragile text scraping.
+
+Under the hood, this version also significantly raised the quality bar for testing, adding a comprehensive suite of binary-level tests that verify every subcommand's exit codes, help text, and output formats behave exactly as documented. This means fewer surprises when you upgrade — if a command's behavior changed accidentally, a test will catch it before it ships. The `aqueduct status` command gained a new `--poll-interval` flag with smarter file-change detection, so in watch mode it only reloads migration files when they actually change, making long-running monitoring sessions faster and lighter on the database.
 
 ### Added
 
@@ -109,6 +117,10 @@ For planned future versions, see [ROADMAP.md](ROADMAP.md).
 
 ## [0.15.0] - 2026-05-20
 
+This release is the one that gives operations teams confidence to run Aqueduct in the most demanding production environments. Database schema changes are inherently risky — if something goes wrong halfway through, you need a clear path back. Version 0.15 introduces "saga-style" compensating actions: before Aqueduct executes any potentially destructive DDL, it first records what it would take to undo that action. If the process crashes or is interrupted, you can resume from exactly where you left off, or roll back cleanly without any manual investigation. For teams who have ever been woken up at 3 AM to manually clean up a half-finished migration, this is a transformative improvement.
+
+Security and resilience round out this release. Aqueduct now validates catalog schema names at the earliest possible point, firmly rejecting any value that could be used to inject SQL — a class of vulnerability that has burned many database automation tools. Row-level security policies, which PostgreSQL uses to control which users can see which data, are now properly preserved across table recreations, meaning a migration that rebuilds a stream table won't silently drop your access controls. And for situations where a migration step is genuinely ambiguous — perhaps a step that appears to have started but you can't confirm it completed — operators now have `--force-retry` and `--force-skip` flags to advance past stuck states safely.
+
 ### Added
 
 - Saga-style compensating steps: `CreateStreamTable` and `DropStreamTable` write a
@@ -154,6 +166,10 @@ For planned future versions, see [ROADMAP.md](ROADMAP.md).
 
 ## [0.14.0] - 2026-05-20
 
+Version 0.14 is a focused correctness and security release that addressed a number of real-world edge cases discovered through extensive integration testing. The most important of these is that failed migrations are now properly marked as recoverable and can be resumed — previously, a failure in certain code paths could leave the migration in a state where Aqueduct wouldn't offer a clean resume path. A heartbeat mechanism that keeps the database advisory lock alive during long-running migrations now correctly signals the main process when the lock is lost, preventing processes from continuing work on a database they no longer exclusively own.
+
+Three security improvements shipped alongside these correctness fixes. Connection strings that embed plaintext passwords are now caught and rejected for keyword-value style DSNs, matching the protection already in place for URL-style connections. Consumer view SQL bodies are validated to be single SELECT statements before any database objects are created, closing off a potential SQL injection path through migration files. Read-only connections now explicitly begin a READ ONLY transaction and use a safe allowlist for statement timeout values, preventing injection through configuration parameters. Together these fixes ensure that even if a migration file or configuration value is maliciously crafted, Aqueduct won't execute arbitrary SQL against your database.
+
 ### Added
 
 - `pg_version` field in `aqueduct status --format json` output.
@@ -197,6 +213,10 @@ For planned future versions, see [ROADMAP.md](ROADMAP.md).
 
 ## [0.13.0] - 2026-05-20
 
+Version 0.13 delivers the complete blue/green deployment workflow that enterprise teams need for zero-downtime schema migrations on production databases. When your changes are complex enough to require restructuring the underlying tables — for example, changing which columns are used as grouping keys in a large aggregation — Aqueduct now orchestrates the full sequence automatically: creating a parallel "green" schema, building the new stream tables there, waiting for them to fully catch up with the "blue" production tables, atomically swapping all consumer views in a single transaction, and then retiring the old schema. The entire process is hands-off once initiated, dramatically reducing the skill and attention required to execute what was previously one of the most nerve-wracking database operations.
+
+Two other significant capabilities arrived in this release. Pre- and post-migration hooks let teams wire Aqueduct into their broader operational playbook — for example, firing a Slack notification when a migration starts, or triggering a cache flush after it completes — all configured declaratively in `aqueduct.toml`. The new `--out` and `--plan` flags let teams generate a migration plan during a code review, have a human or automated system approve it, and then execute exactly that pre-approved plan later — with a cryptographic hash check ensuring the plan hasn't been tampered with between approval and execution. This separation of planning from execution is a powerful governance tool for organizations with strict change-management requirements.
+
 ### Added
 
 - Full blue/green migration step sequence for topology-restructuring diffs
@@ -224,6 +244,10 @@ For planned future versions, see [ROADMAP.md](ROADMAP.md).
   `docs/cli-events-schema.json`.
 
 ## [0.12.0] - 2026-05-20
+
+Version 0.12 is a major leap forward for production readiness, tackling three areas that enterprise teams consistently ask about: secret management, resilience against infrastructure variation, and confidence in the planner's correctness. Rather than requiring database passwords to live in environment variables or configuration files, Aqueduct can now fetch connection credentials directly from AWS Secrets Manager, GCP Secret Manager, or HashiCorp Vault at runtime. This means your production database password never needs to touch a CI/CD configuration file, a developer's laptop, or a Kubernetes secret — it stays in your secrets vault and is retrieved only at the moment it's needed.
+
+A subtler but equally important improvement is how Aqueduct now deals with different versions of pg_trickle, the underlying PostgreSQL extension it builds on. Rather than assuming all features are available and failing at runtime, Aqueduct now probes the installed version's capabilities at startup and gracefully skips or adapts any step the current version doesn't support. This makes deployments far more robust across environments where the extension version may differ from what was tested in CI. The addition of property-based fuzz testing — automatically generating thousands of random migration scenarios and verifying that the planner never panics and always produces consistent results — gives the entire planning engine a level of correctness assurance that hand-written tests simply can't match.
 
 ### Added
 
@@ -281,6 +305,10 @@ For planned future versions, see [ROADMAP.md](ROADMAP.md).
 
 ## [0.11.0] - 2026-05-19
 
+Version 0.11 focuses on the experience of getting help when something goes wrong. All errors, lint warnings, and validation failures that Aqueduct produces now share a single, unified format that includes the exact file and line number where the problem occurred, a stable numeric error code, and a severity level. This means that editor plugins, CI parsers, and custom tooling can all reliably interpret Aqueduct's output without having to guess at error message formats. The stable numeric codes are particularly valuable for teams writing runbooks — instead of matching on potentially-changing error text, you can reference code 1200 for a planning error or 1300 for an execution error and know that code will remain stable across versions.
+
+The documentation story got a major upgrade too. A new CI job now automatically builds the documentation and verifies that every subcommand mentioned in the docs actually exists and responds to `--help`, so documentation can never silently drift out of sync with the binary. Security also improved: all database connection strings are now scrubbed of passwords before they appear in error messages, log output, or CI logs — a simple but critical safeguard that prevents credentials from leaking into build artifacts or error reports. The `aqueduct plan` and `aqueduct status` commands are now strictly read-only at the connection level, making it physically impossible for them to accidentally modify database state even in edge-case error paths.
+
 ### Added
 
 - Unified `Diagnostic` type and `DiagnosticSet` with file/line/column context,
@@ -323,6 +351,10 @@ For planned future versions, see [ROADMAP.md](ROADMAP.md).
   error messages, covering both URL-form and keyword-value DSNs.
 
 ## [0.10.0] - 2026-05-19
+
+Version 0.10 closes out a category of subtle bugs that could cause incorrect behavior when working with consumer views — the downstream SQL views that read from stream tables. Previously, a plan that only added, dropped, or modified consumer views without touching any stream tables was silently treated as a no-op and never executed. This was a correctness bug with real consequences: teams could deploy consumer view changes, see no errors, and then discover their views weren't updated because Aqueduct thought there was nothing to do. All consumer operations now correctly flow through the full plan-and-execute path with proper tracking and reporting.
+
+Project isolation — the ability to manage multiple independent DAGs in the same PostgreSQL database — received a significant reliability upgrade. All live state reads now correctly filter by project, meaning one project's tables can never accidentally appear in another project's plan or status. The `aqueduct destroy` command now verifies that it actually owns the tables it's about to drop, preventing accidental cross-project destruction. Several concurrency scenarios were also hardened: the lock heartbeat is now bound to the specific holder that acquired the lock, so a fresh Aqueduct process starting up won't be fooled by a stale heartbeat from a crashed predecessor into thinking the database is still locked.
 
 ### Added
 
@@ -369,6 +401,10 @@ For planned future versions, see [ROADMAP.md](ROADMAP.md).
 - Scheduler pause failure is now fatal by default.
 
 ## [0.9.0] - 2026-05-19
+
+Version 0.9 is a turning point in how operators interact with Aqueduct day-to-day. The new `aqueduct diff` command provides a clear, human-readable comparison between what your migration files describe and what currently exists in the live database — across every table, every column, and every configuration detail. This makes drift visible at a glance before you commit to running any migration, transforming what was previously a moment of uncertainty before a production apply into a clear-eyed, informed decision. Whether you're checking before a deployment, investigating after an incident, or auditing compliance, `aqueduct diff` gives you the full picture.
+
+This release also introduced the secret backend system that underpins enterprise-grade credential management: database connection strings can now reference secrets stored in AWS, GCP, Vault, SOPS-encrypted files, or age-encrypted files using a simple `${secret:BACKEND:KEY}` syntax, keeping credentials entirely out of configuration files and CI logs. Every successful `aqueduct apply` now emits a structured JSON event with the migration ID, version numbers, and project name — making it trivial for CI systems to capture and act on migration results. For teams using interactive terminals, a confirmation prompt before any apply ensures no one accidentally runs a migration they didn't intend to.
 
 ### Added
 
@@ -418,6 +454,10 @@ For planned future versions, see [ROADMAP.md](ROADMAP.md).
 
 ## [0.8.0] - 2026-05-19
 
+Version 0.8 tackles one of the hardest problems in database automation: what happens when things go wrong in the middle of a migration. The executor now tracks progress at the granularity of individual steps, persisting a checkpoint to the database after each one. If a migration is interrupted — whether by a network blip, a process crash, or an operator hitting Ctrl-C — re-running `aqueduct apply --resume` will pick up from exactly where it left off, skipping every step that already completed successfully. For long-running migrations that touch large tables, this means an interruption no longer requires starting over from scratch.
+
+The lock mechanism that prevents two Aqueduct processes from stepping on each other's work was made significantly more robust. A background task now continuously renews the advisory lock while a migration is running, sending a heartbeat every ten seconds on a dedicated database connection. This ensures that a migration taking longer than PostgreSQL's default lock timeout can complete without its lock expiring mid-flight. If the heartbeat connection is lost — for example, because the database restarted — the main migration process is immediately notified and can shut down cleanly rather than continuing to issue commands to a database that may no longer be in the expected state.
+
 ### Added
 
 - Resume-aware step-level progress tracking: `PlanExecutor` skips steps below
@@ -460,6 +500,10 @@ For planned future versions, see [ROADMAP.md](ROADMAP.md).
 
 ## [0.7.0] - 2026-05-18
 
+Version 0.7 is the documentation and confidence-building release. Thirty detailed cookbook recipes were added covering every migration pattern that Aqueduct supports — from simply adding a column, to changing GROUP BY keys, to performing a full blue/green topology restructure — each with a complete before-and-after example and a matching integration test. Whether you're a new team trying to understand what Aqueduct can do, or an experienced operator looking for the exact right pattern for a non-obvious migration, the cookbook gives you a concrete, tested answer rather than requiring you to reason from first principles.
+
+Public benchmarks were published for the first time, quantifying the core value proposition in plain numbers: on a 200-node DAG with a 5-node change set, Aqueduct applies changes in roughly 6 milliseconds — compared to approximately 180 seconds that a naive drop-and-recreate approach would take on the same workload. That's a 28,000× speed improvement. Security and high-availability documentation were written in depth, covering everything from setting up least-privilege database roles to handling failover events and crash recovery. With 197 tests now passing across unit, integration, and CLI test suites, this version represents the highest level of tested confidence the project had achieved to that point.
+
 ### Added
 
 - 30 cookbook patterns in `docs/cookbook/` covering every migration class (Free,
@@ -475,6 +519,10 @@ For planned future versions, see [ROADMAP.md](ROADMAP.md).
 - 197 tests total (101 unit + 63 integration + 33 CLI); all passing, none skipped.
 
 ## [0.6.0] - 2026-05-18
+
+Version 0.6 completes the core operational toolset that teams need to manage Aqueduct migrations across the full software delivery lifecycle. The `aqueduct promote` command solves the environment promotion problem elegantly: rather than manually copying migration files between staging and production and hoping you didn't miss anything, you point Aqueduct at your source environment, it validates that everything is clean, computes exactly what needs to happen in the destination environment, asks for confirmation, and records the promotion event in the audit trail. This makes the act of "promoting to production" repeatable, auditable, and safe — the same migration files validated in staging are what get applied to production.
+
+The `aqueduct destroy` command gives teams a clean, safe way to tear down all objects associated with a project — useful for cleaning up ephemeral preview environments or decommissioning retired workloads. High-availability primary detection was formalized with support for Patroni, CloudNativePG, and Stolon, so Aqueduct can reliably determine whether it's talking to a writable primary before taking any action. The `aqueduct status --watch` mode, combined with configurable alerting thresholds, means teams can leave a monitor running in production that immediately flags any drift between what's deployed and what the migration files describe — turning Aqueduct into a lightweight continuous compliance tool as well as a migration executor.
 
 ### Added
 
@@ -496,6 +544,10 @@ For planned future versions, see [ROADMAP.md](ROADMAP.md).
 
 ## [0.5.0] - 2026-05-18
 
+Version 0.5 bridges two worlds that data teams live in simultaneously: dbt, the SQL transformation tool that millions of data engineers use to define their data models, and Aqueduct, which manages the real-time stream tables that power live analytics. The new `aqueduct ingest --from dbt-target` command reads the compiled output of a dbt project and automatically generates a canonical Aqueduct migrations directory. Schedule, refresh mode, CDC mode, schema, and dependency relationships are all inferred from the dbt model configuration, so no manual translation work is required — what you express in dbt flows directly into Aqueduct.
+
+The practical impact is that teams can maintain a single source of truth in their dbt project and have Aqueduct automatically stay in sync. The `examples/dbt-roundtrip/` example included with this release demonstrates the full workflow: run dbt, ingest the results into Aqueduct, validate, plan, apply, and roll back — end to end, without any manual steps. Because the ingest command is idempotent, it can safely be re-run after every dbt compile without risk of creating duplicates or inconsistencies, making it trivial to slot into CI/CD pipelines that already build dbt artifacts.
+
 ### Added
 
 - `aqueduct ingest --from dbt-target` command reading compiled dbt artefacts and
@@ -506,6 +558,10 @@ For planned future versions, see [ROADMAP.md](ROADMAP.md).
   → rollback round-trip.
 
 ## [0.4.0] - 2026-05-18
+
+Version 0.4 is the release that makes Aqueduct a first-class member of your development workflow rather than just a tool you run manually before deployments. The `aqueduct fmt` command automatically reformats migration files to a canonical style — consistent SQL keyword casing, stable front-matter ordering, no trailing whitespace — and a `--check` mode makes it easy to enforce this standard in CI without modifying files. The `aqueduct lint` command catches five categories of common mistakes before they ever reach a database: schedules that are too aggressive for the workload, queries that IVM can't optimize, consumer views that reference sources that don't exist, and more.
+
+The GitHub Actions composite actions make it genuinely effortless to add Aqueduct to any GitHub-hosted project: a single line in your PR workflow will install the binary, run `aqueduct plan`, and post the plan as a PR comment so reviewers can see exactly what database changes a PR will produce before merging. The same experience is available for GitLab CI via provided templates. Pre-commit hooks for `fmt`, `validate`, and `lint` mean that quality checks happen before code is even committed, catching problems at the earliest possible moment. Together, these integrations turn database migration management from an afterthought into a first-class, automated part of the code review process.
 
 ### Added
 
@@ -529,6 +585,10 @@ For planned future versions, see [ROADMAP.md](ROADMAP.md).
 
 ## [0.3.0] - 2026-05-18
 
+Version 0.3 introduces three powerful capabilities that together define Aqueduct's vision for sophisticated, production-safe database change management. Blue/green plan steps — creating a parallel schema, building new stream tables, waiting for convergence, atomically swapping consumer views in a single transaction, retiring the old schema — provide the foundation for zero-downtime migrations of even the most complex DAG topologies. Consumer views give teams a clean way to expose stable, versioned SQL interfaces to downstream applications, completely decoupling what the application queries from the underlying stream table implementation.
+
+The `aqueduct preview` command is perhaps the most innovative addition in this release: it creates a throwaway copy of your entire DAG in a scratch schema, populated with a sampled subset of real production data, so you can run and test your new migration against realistic data without any risk of affecting production. This works natively against any PostgreSQL instance and has stub implementations for CloudNativePG and Neon-managed databases. For data teams building and iterating on complex analytics queries, the ability to spin up a safe, realistic preview environment in seconds — and tear it down just as quickly — fundamentally changes how development and testing workflows operate.
+
 ### Added
 
 - Blue/green plan step variants: `CreateGreenSchema`, `CreateStreamTableInGreen`,
@@ -547,6 +607,10 @@ For planned future versions, see [ROADMAP.md](ROADMAP.md).
 
 ## [0.2.0] - 2026-05-18
 
+Version 0.2 introduces the intelligence at the core of Aqueduct's value proposition: the migration classifier. When you change a migration file, Aqueduct doesn't just blindly re-execute everything — it analyzes what changed and classifies the migration into one of four cost categories: Free (can be applied with zero downtime and no data movement), In-place (a structural change made with a simple ALTER TABLE), Rebuild (requires recreating the table, typically within a maintenance window), or Blue/green (a topology-level restructure requiring the full zero-downtime workflow). This classification drives every decision Aqueduct makes about how to safely apply your changes.
+
+A particularly important extension of this classifier is the automatic cascade analysis for ALTER TABLE changes. When a source table that stream tables depend on changes — for example, a column is renamed or its type changes — Aqueduct automatically identifies every stream table in the DAG that references that source and escalates them to a Rebuild classification. This prevents the silent failures that plague naive migration tools, where a source table change breaks dependent views in ways that aren't discovered until queries start returning errors. The new `--explain-cost` flag rounds out this release by showing per-step row count estimates and duration projections, giving operators a clear picture of what a migration will actually cost before committing to run it.
+
 ### Added
 
 - Full migration classifier decision tree: Free (schedule / `cdc_mode` /
@@ -562,6 +626,10 @@ For planned future versions, see [ROADMAP.md](ROADMAP.md).
 - 85 tests total (unit + integration + CLI); all passing, none skipped.
 
 ## [0.1.0] - 2026-05-18
+
+Version 0.1 is the foundation on which everything else is built. At its core, Aqueduct solves a problem that every team managing real-time analytics in PostgreSQL eventually hits: how do you safely change a complex web of interdependent materialized views and stream tables — built with extensions like pg_trickle — without causing outages, data loss, or hours of manual database administration? The answer is to treat database schema changes the same way software engineers treat code changes: with version control, automated planning, safe execution, and the ability to roll back. This first release establishes all of those primitives.
+
+The key capabilities in this release — automatic DAG inference from SQL FROM/JOIN clauses, cycle detection, migration classification, advisory locking for crash-safe serialization, read-only plan and status commands, structured JSON logging for CI, and standby detection via `pg_is_in_recovery()` — together form a complete and production-usable system even at this initial version. The minimal example included in the repository shows a 3-node DAG going from nothing to a fully-managed real-time analytics pipeline in a handful of configuration lines. With 58 tests passing and five CI jobs running on every commit, the project launched with a commitment to quality and correctness that every subsequent release has built upon.
 
 ### Added
 
