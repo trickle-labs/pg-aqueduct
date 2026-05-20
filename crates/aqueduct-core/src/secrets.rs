@@ -901,8 +901,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(
-                ResponseTemplate::new(403)
-                    .set_body_string(r#"{"errors":["permission denied"]}"#),
+                ResponseTemplate::new(403).set_body_string(r#"{"errors":["permission denied"]}"#),
             )
             .mount(&server)
             .await;

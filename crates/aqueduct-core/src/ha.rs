@@ -1,7 +1,7 @@
-/// HA backend detection and Patroni failover checking (DOC-2 / backlog-15 / v0.17).
-///
-/// Implements `detect_ha_backend()` which identifies the HA solution in use and
-/// enables per-step primary re-checks via `check_still_primary()`.
+//! HA backend detection and Patroni failover checking (DOC-2 / backlog-15 / v0.17).
+//!
+//! Implements `detect_ha_backend()` which identifies the HA solution in use and
+//! enables per-step primary re-checks via `check_still_primary()`.
 
 /// The detected HA backend type.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,10 +51,7 @@ pub async fn detect_ha_backend(
 
     // CloudNativePG: probe `app.cnpg.cluster_name` GUC.
     if let Ok(rows) = client
-        .query(
-            "SELECT current_setting('app.cnpg.cluster_name', true)",
-            &[],
-        )
+        .query("SELECT current_setting('app.cnpg.cluster_name', true)", &[])
         .await
     {
         if let Some(row) = rows.first() {
@@ -69,10 +66,7 @@ pub async fn detect_ha_backend(
 
     // Stolon: check application_name.
     if let Ok(row) = client
-        .query_one(
-            "SELECT current_setting('application_name', true)",
-            &[],
-        )
+        .query_one("SELECT current_setting('application_name', true)", &[])
         .await
     {
         let app_name: Option<String> = row.try_get(0).ok();
@@ -92,9 +86,7 @@ pub async fn detect_ha_backend(
 /// (not a hot standby that was promoted or demoted).
 ///
 /// Returns `Ok(())` if still primary, `Err` if the host has been demoted.
-pub async fn check_still_primary(
-    client: &tokio_postgres::Client,
-) -> crate::error::Result<()> {
+pub async fn check_still_primary(client: &tokio_postgres::Client) -> crate::error::Result<()> {
     let is_primary: bool = client
         .query_one("SELECT NOT pg_is_in_recovery()", &[])
         .await
@@ -168,10 +160,7 @@ mod tests {
         let backend = HaBackend::Patroni {
             endpoint: endpoint.to_string(),
         };
-        assert_eq!(
-            backend.to_string(),
-            "patroni (http://patroni-api:8008)"
-        );
+        assert_eq!(backend.to_string(), "patroni (http://patroni-api:8008)");
     }
 
     /// Test that check_patroni_primary succeeds against a mock 200 response.
@@ -189,7 +178,11 @@ mod tests {
             .await;
 
         let result = check_patroni_primary(&server.uri()).await;
-        assert!(result.is_ok(), "expected OK for 200 response, got {:?}", result);
+        assert!(
+            result.is_ok(),
+            "expected OK for 200 response, got {:?}",
+            result
+        );
     }
 
     /// Test that check_patroni_primary fails against a mock 503 response.

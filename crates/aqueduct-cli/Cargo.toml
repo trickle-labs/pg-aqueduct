@@ -31,11 +31,7 @@ sha2 = { workspace = true }
 [features]
 # Optional Prometheus metrics endpoint (aqueduct apply --metrics-addr).
 # Enable with: cargo build --features metrics
-metrics = ["dep:prometheus"]
-
-[dependencies.prometheus]
-version = "0.13"
-optional = true
+metrics = []
 
 [dev-dependencies]
 aqueduct-testkit = { workspace = true }

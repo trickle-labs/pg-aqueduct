@@ -77,7 +77,10 @@ pub async fn run(args: AuditArgs) -> anyhow::Result<()> {
             started_at: started_at.map(|dt| dt.to_rfc3339()),
             finished_at: finished_at.map(|dt| dt.to_rfc3339()),
             to_version: row.try_get::<_, Option<i64>>("to_version").ok().flatten(),
-            cli_version: row.try_get::<_, Option<String>>("cli_version").ok().flatten(),
+            cli_version: row
+                .try_get::<_, Option<String>>("cli_version")
+                .ok()
+                .flatten(),
             step_count,
             failed_steps,
             last_error: row
@@ -101,8 +104,8 @@ pub async fn run(args: AuditArgs) -> anyhow::Result<()> {
                 return Ok(());
             }
             println!(
-                "{:<6} {:<12} {:<20} {:<25} {:<8} {:<8} {}",
-                "ID", "STATUS", "STARTED", "VERSION", "STEPS", "FAILED", "ERROR"
+                "{:<6} {:<12} {:<20} {:<25} {:<8} {:<8} ERROR",
+                "ID", "STATUS", "STARTED", "VERSION", "STEPS", "FAILED",
             );
             println!("{}", "-".repeat(100));
             for r in &records {

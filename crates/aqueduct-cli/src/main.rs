@@ -2,13 +2,13 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 mod commands;
-mod output;
 #[cfg(feature = "metrics")]
 mod metrics;
+mod output;
 
 use commands::{
-    apply, audit, destroy, diff, fmt, import, ingest, init, lint, plan, preview, promote,
-    rollback, status, unlock, validate,
+    apply, audit, destroy, diff, fmt, import, ingest, init, lint, plan, preview, promote, rollback,
+    status, unlock, validate,
 };
 use output::{OutputEmitter, OutputMode};
 
