@@ -2,13 +2,16 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{oneshot, watch};
 use tokio_postgres::NoTls;
 
+use crate::catalog::CatalogSchema;
 use crate::catalog::{
-    ACQUIRE_LOCK_SQL, DELETE_CONSUMER_VIEW_SQL, DEREGISTER_OWNERSHIP_SQL, FAIL_MIGRATION_STEP_SQL,
-    FINISH_MIGRATION_RECOVERABLE_SQL, FINISH_MIGRATION_SQL, FINISH_MIGRATION_STEP_SQL,
+    for_schema, ACQUIRE_LOCK_SQL, COMPLETE_COMPENSATING_STEP_SQL, DELETE_CONSUMER_VIEW_SQL,
+    DEREGISTER_OWNERSHIP_SQL, FAIL_MIGRATION_STEP_SQL, FINISH_MIGRATION_RECOVERABLE_SQL,
+    FINISH_MIGRATION_SQL, FINISH_MIGRATION_STEP_SQL, GET_PENDING_COMPENSATING_STEPS_SQL,
     GET_RUNNING_OR_RECOVERABLE_MIGRATION_SQL, HEARTBEAT_LOCK_SQL, INSERT_COMPENSATING_STEP_SQL,
-    INSERT_DAG_VERSION_SQL, MARK_MIGRATION_INTERRUPTED_SQL, REGISTER_OWNERSHIP_SQL,
-    RELEASE_LOCK_SQL, RETIRE_BLUE_GREEN_SQL, START_BLUE_GREEN_SQL, START_MIGRATION_SQL,
-    START_MIGRATION_STEP_SQL, SWAP_BLUE_GREEN_SQL, UPDATE_MIGRATION_PROGRESS_SQL,
+    INSERT_DAG_VERSION_SQL, MARK_COMPENSATING_APPLIED_SQL, MARK_MIGRATION_INTERRUPTED_SQL,
+    REGISTER_OWNERSHIP_SQL, RELEASE_LOCK_SQL, RETIRE_BLUE_GREEN_SQL, START_BLUE_GREEN_SQL,
+    START_MIGRATION_SQL, START_MIGRATION_STEP_SQL, SWAP_BLUE_GREEN_SQL,
+    UPDATE_MIGRATION_PROGRESS_SQL,
 };
 use crate::dag::DagState;
 use crate::error::{AqueductError, Result};
@@ -146,57 +149,38 @@ fn hostname_str() -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-/// Typed execution context for `PlanExecutor` (ARCH-2 / v0.15).
+/// Typed execution context for live `PlanExecutor` constructors (ARCH-2 / v0.20).
 ///
-/// This enum prevents accidentally constructing a non-dry-run executor without
-/// a DSN and desired state. The `Apply`, `Rollback`, and `Promote` variants
-/// require both at construction time; `DryRun` may omit them.
+/// Both `desired_state` and `connection_string` are required non-optional fields.
+/// Passing this struct to `for_apply`, `for_rollback`, or `for_promote` is a
+/// compile-time guarantee that the executor has the information it needs to
+/// renew the advisory lock via heartbeat and to record `spec_jsonb` on apply.
+///
+/// Dry-run mode does **not** require an `ExecutionContext`; use `for_dry_run`
+/// which accepts no context.
+///
+/// # Compile-fail example
+/// ```compile_fail
+/// use aqueduct_core::executor::PlanExecutor;
+/// // Calling for_apply with wrong arity is a compile error — ExecutionContext is required.
+/// let _ = PlanExecutor::for_apply(todo!(), "project", "0.20.0");
+/// ```
 #[derive(Debug, Clone)]
-pub enum ExecutionContext {
-    /// Normal `aqueduct apply` execution.
-    Apply {
-        dsn: String,
-        desired_state: DagState,
-    },
-    /// `aqueduct rollback` execution.
-    Rollback {
-        dsn: String,
-        desired_state: DagState,
-    },
-    /// `aqueduct promote` execution (blue/green promotion).
-    Promote {
-        dsn: String,
-        desired_state: DagState,
-    },
-    /// Dry-run preview: never writes to the database.
-    DryRun,
-}
-
-impl ExecutionContext {
-    /// Returns the DSN if this is a live-execution context.
-    pub fn dsn(&self) -> Option<&str> {
-        match self {
-            ExecutionContext::Apply { dsn, .. }
-            | ExecutionContext::Rollback { dsn, .. }
-            | ExecutionContext::Promote { dsn, .. } => Some(dsn.as_str()),
-            ExecutionContext::DryRun => None,
-        }
-    }
-
-    /// Returns the desired state if this is a live-execution context.
-    pub fn desired_state(&self) -> Option<&DagState> {
-        match self {
-            ExecutionContext::Apply { desired_state, .. }
-            | ExecutionContext::Rollback { desired_state, .. }
-            | ExecutionContext::Promote { desired_state, .. } => Some(desired_state),
-            ExecutionContext::DryRun => None,
-        }
-    }
-
-    /// Returns true if this is a dry-run context.
-    pub fn is_dry_run(&self) -> bool {
-        matches!(self, ExecutionContext::DryRun)
-    }
+pub struct ExecutionContext {
+    /// Target DAG state, serialised into `spec_jsonb` on `RecordSnapshot`.
+    pub desired_state: DagState,
+    /// DSN for the heartbeat background task and any reconnect on failover.
+    pub connection_string: String,
+    /// Optional Patroni REST endpoint for HA primary checks between steps.
+    pub patroni_endpoint: Option<String>,
+    /// Resume an interrupted migration (skip already-completed steps).
+    pub resume: bool,
+    /// Force-retry the step at this index (bypasses resume checkpoint).
+    pub force_retry: Option<usize>,
+    /// Force-skip the step at this index (marks it complete without executing).
+    pub force_skip: Option<usize>,
+    /// Catalog schema to use for all catalog SQL (ARCH-1 / v0.20).
+    pub catalog_schema: CatalogSchema,
 }
 
 /// Execute a plan against the target database.
@@ -217,6 +201,8 @@ pub struct PlanExecutor<'a> {
     force_skip_step: Option<usize>,
     /// DOC-2 / v0.17: Optional Patroni endpoint for between-step primary checks.
     patroni_endpoint: Option<String>,
+    /// ARCH-1 / v0.20: Catalog schema for all catalog SQL operations.
+    catalog_schema: CatalogSchema,
 }
 
 impl<'a> PlanExecutor<'a> {
@@ -237,6 +223,7 @@ impl<'a> PlanExecutor<'a> {
             force_retry_step: None,
             force_skip_step: None,
             patroni_endpoint: None,
+            catalog_schema: CatalogSchema::default(),
         }
     }
 
@@ -264,33 +251,87 @@ impl<'a> PlanExecutor<'a> {
         self
     }
 
+    /// Set the catalog schema for all catalog SQL operations (ARCH-1 / v0.20).
+    pub fn with_catalog_schema(mut self, schema: CatalogSchema) -> Self {
+        self.catalog_schema = schema;
+        self
+    }
+
     // Q-02: Typed constructors document intent and make tests self-explanatory.
 
-    /// Create an executor for `aqueduct apply` (normal apply, no dry run).
+    /// Create an executor for `aqueduct apply` (ARCH-2 / v0.20).
+    ///
+    /// Requires an `ExecutionContext` with both `desired_state` and
+    /// `connection_string` set — omitting either is a **compile error**.
     pub fn for_apply(
         client: &'a tokio_postgres::Client,
         project: &'a str,
         cli_version: &'a str,
+        ctx: ExecutionContext,
     ) -> Self {
-        Self::new(client, project, cli_version, false)
+        Self {
+            client,
+            project,
+            cli_version,
+            dry_run: false,
+            resume: ctx.resume,
+            connection_string: Some(ctx.connection_string),
+            desired_state: Some(ctx.desired_state),
+            force_retry_step: ctx.force_retry,
+            force_skip_step: ctx.force_skip,
+            patroni_endpoint: ctx.patroni_endpoint,
+            catalog_schema: ctx.catalog_schema,
+        }
     }
 
-    /// Create an executor for `aqueduct rollback`.
+    /// Create an executor for `aqueduct rollback` (ARCH-2 / v0.20).
+    ///
+    /// Requires an `ExecutionContext` with both `desired_state` and
+    /// `connection_string` set — omitting either is a **compile error**.
     pub fn for_rollback(
         client: &'a tokio_postgres::Client,
         project: &'a str,
         cli_version: &'a str,
+        ctx: ExecutionContext,
     ) -> Self {
-        Self::new(client, project, cli_version, false)
+        Self {
+            client,
+            project,
+            cli_version,
+            dry_run: false,
+            resume: ctx.resume,
+            connection_string: Some(ctx.connection_string),
+            desired_state: Some(ctx.desired_state),
+            force_retry_step: ctx.force_retry,
+            force_skip_step: ctx.force_skip,
+            patroni_endpoint: ctx.patroni_endpoint,
+            catalog_schema: ctx.catalog_schema,
+        }
     }
 
-    /// Create an executor for `aqueduct promote`.
+    /// Create an executor for `aqueduct promote` (ARCH-2 / v0.20).
+    ///
+    /// Requires an `ExecutionContext` with both `desired_state` and
+    /// `connection_string` set — omitting either is a **compile error**.
     pub fn for_promote(
         client: &'a tokio_postgres::Client,
         project: &'a str,
         cli_version: &'a str,
+        ctx: ExecutionContext,
     ) -> Self {
-        Self::new(client, project, cli_version, false)
+        Self {
+            client,
+            project,
+            cli_version,
+            dry_run: false,
+            resume: ctx.resume,
+            connection_string: Some(ctx.connection_string),
+            desired_state: Some(ctx.desired_state),
+            force_retry_step: ctx.force_retry,
+            force_skip_step: ctx.force_skip,
+            patroni_endpoint: ctx.patroni_endpoint,
+            catalog_schema: ctx.catalog_schema,
+        }
     }
 
     /// Create a dry-run executor (plan preview, never writes to the database).
@@ -304,17 +345,30 @@ impl<'a> PlanExecutor<'a> {
 
     /// Provide a DSN so the executor can spawn a heartbeat task to renew the
     /// advisory lock while long-running steps are in progress.
+    ///
+    /// Prefer constructing via `for_apply` with an `ExecutionContext` in new code.
     pub fn with_connection_string(mut self, dsn: String) -> Self {
         self.connection_string = Some(dsn);
         self
     }
 
     /// Provide the desired `DagState` so it is serialised into `spec_jsonb`
-    /// when the `RecordSnapshot` step executes.  Without this, `spec_jsonb`
-    /// is written as an empty object (which breaks `rollback`).
+    /// when the `RecordSnapshot` step executes.
+    ///
+    /// Prefer constructing via `for_apply` with an `ExecutionContext` in new code.
     pub fn with_desired_state(mut self, state: DagState) -> Self {
         self.desired_state = Some(state);
         self
+    }
+
+    /// Returns a schema-parameterized version of a SQL constant (ARCH-1 / v0.20).
+    ///
+    /// Replaces all `aqueduct.` occurrences in the template with the configured
+    /// catalog schema prefix. When the schema is the default (`"aqueduct"`),
+    /// this is a no-op string copy preserving backward compatibility.
+    #[inline]
+    fn schema_sql(&self, template: &'static str) -> String {
+        for_schema(template, &self.catalog_schema)
     }
 
     /// Execute the plan, returning the new DAG version and migration id (U-05).
@@ -350,7 +404,10 @@ impl<'a> PlanExecutor<'a> {
             // Find the existing running or recoverable migration (S-01/S-02).
             let row = self
                 .client
-                .query_opt(GET_RUNNING_OR_RECOVERABLE_MIGRATION_SQL, &[&self.project])
+                .query_opt(
+                    &self.schema_sql(GET_RUNNING_OR_RECOVERABLE_MIGRATION_SQL),
+                    &[&self.project],
+                )
                 .await?;
             if let Some(r) = row {
                 r.get::<_, i64>(0)
@@ -358,7 +415,7 @@ impl<'a> PlanExecutor<'a> {
                 // No running migration found; start fresh.
                 self.client
                     .query_one(
-                        START_MIGRATION_SQL,
+                        &self.schema_sql(START_MIGRATION_SQL),
                         &[
                             &self.project,
                             &plan.from_version.map(|v| v as i64),
@@ -372,7 +429,7 @@ impl<'a> PlanExecutor<'a> {
         } else {
             self.client
                 .query_one(
-                    START_MIGRATION_SQL,
+                    &self.schema_sql(START_MIGRATION_SQL),
                     &[
                         &self.project,
                         &plan.from_version.map(|v| v as i64),
@@ -396,7 +453,7 @@ impl<'a> PlanExecutor<'a> {
                 if let Err(e) = self
                     .client
                     .execute(
-                        FINISH_MIGRATION_SQL,
+                        &self.schema_sql(FINISH_MIGRATION_SQL),
                         &[
                             &migration_id,
                             &"committed",
@@ -424,7 +481,10 @@ impl<'a> PlanExecutor<'a> {
                 if is_ha_failover {
                     if let Err(mark_err) = self
                         .client
-                        .execute(MARK_MIGRATION_INTERRUPTED_SQL, &[&migration_id])
+                        .execute(
+                            &self.schema_sql(MARK_MIGRATION_INTERRUPTED_SQL),
+                            &[&migration_id],
+                        )
                         .await
                     {
                         tracing::error!(
@@ -437,7 +497,10 @@ impl<'a> PlanExecutor<'a> {
                     // Preserve progress — do NOT clear it (CORR-1 / v0.14).
                     if let Err(mark_err) = self
                         .client
-                        .execute(FINISH_MIGRATION_RECOVERABLE_SQL, &[&migration_id])
+                        .execute(
+                            &self.schema_sql(FINISH_MIGRATION_RECOVERABLE_SQL),
+                            &[&migration_id],
+                        )
                         .await
                     {
                         tracing::error!(
@@ -459,15 +522,63 @@ impl<'a> PlanExecutor<'a> {
 
     /// Find the step index to resume from by reading progress from the running
     /// or recoverable migration (S-01/S-02).
+    /// CORR-2 / v0.20: Also executes any pending compensating steps (status='running'
+    /// in ddl_log) before returning the resume index, so that partial DDL from the
+    /// crashed migration is rolled back before retrying.
     /// NOTE: LockDag always re-executes (resume_from resets to 0 for it).
     async fn find_resume_step(&self) -> Result<usize> {
         let row = self
             .client
-            .query_opt(GET_RUNNING_OR_RECOVERABLE_MIGRATION_SQL, &[&self.project])
+            .query_opt(
+                &self.schema_sql(GET_RUNNING_OR_RECOVERABLE_MIGRATION_SQL),
+                &[&self.project],
+            )
             .await?;
 
         if let Some(r) = row {
+            let migration_id: i64 = r.get(0);
             let progress: serde_json::Value = r.get(1);
+
+            // CORR-2 / v0.20: Execute pending compensating steps for any DDL
+            // that started but did not complete before the crash.
+            let pending = self
+                .client
+                .query(
+                    &self.schema_sql(GET_PENDING_COMPENSATING_STEPS_SQL),
+                    &[&migration_id],
+                )
+                .await?;
+
+            for comp_row in &pending {
+                let comp_id: i64 = comp_row.get(0);
+                let comp_sql: Option<String> = comp_row.get(1);
+                let cmd_tag: Option<String> = comp_row.get(2);
+                let obj_name: Option<String> = comp_row.get(3);
+
+                if let Some(sql) = comp_sql {
+                    tracing::info!(
+                        migration_id = migration_id,
+                        command_tag = cmd_tag.as_deref().unwrap_or("unknown"),
+                        object = obj_name.as_deref().unwrap_or("unknown"),
+                        "CORR-2: executing compensating step to undo partial DDL"
+                    );
+                    // Best-effort: log but don't abort if compensating SQL fails.
+                    if let Err(e) = self.client.batch_execute(&sql).await {
+                        tracing::warn!(
+                            migration_id = migration_id,
+                            comp_id = comp_id,
+                            "CORR-2: compensating step failed (may have been partially applied): {}",
+                            e
+                        );
+                    }
+                    // Mark as compensated regardless — we've done our best.
+                    let _ = self
+                        .client
+                        .execute(&self.schema_sql(MARK_COMPENSATING_APPLIED_SQL), &[&comp_id])
+                        .await;
+                }
+            }
+
             let completed = progress
                 .get("completed_steps")
                 .and_then(|v| v.as_u64())
@@ -503,8 +614,15 @@ impl<'a> PlanExecutor<'a> {
             // CORR-3 (v0.19): Clone lock_lost_tx so the panic supervisor can
             // signal lock loss independently of the heartbeat task itself.
             let lock_lost_for_supervisor = lock_lost_tx.clone();
-            let heartbeat_handle =
-                tokio::spawn(run_heartbeat(dsn, project, holder, rx, lock_lost_tx));
+            let heartbeat_sql = for_schema(HEARTBEAT_LOCK_SQL, &self.catalog_schema);
+            let heartbeat_handle = tokio::spawn(run_heartbeat(
+                dsn,
+                project,
+                holder,
+                heartbeat_sql,
+                rx,
+                lock_lost_tx,
+            ));
             // CORR-3 (v0.19): Supervisor task catches panics in the heartbeat.
             // If the heartbeat task panics (JoinError::is_panic() == true),
             // the supervisor signals LockLost so the main executor loop aborts
@@ -588,7 +706,7 @@ impl<'a> PlanExecutor<'a> {
                 let _ = self
                     .client
                     .execute(
-                        START_MIGRATION_STEP_SQL,
+                        &self.schema_sql(START_MIGRATION_STEP_SQL),
                         &[&migration_id, &(step_idx as i32), &step_type, &step_hash],
                     )
                     .await;
@@ -658,7 +776,7 @@ impl<'a> PlanExecutor<'a> {
                         let _ = self
                             .client
                             .execute(
-                                INSERT_COMPENSATING_STEP_SQL,
+                                &self.schema_sql(INSERT_COMPENSATING_STEP_SQL),
                                 &[
                                     &migration_id,
                                     &"stream_table",
@@ -682,12 +800,20 @@ impl<'a> PlanExecutor<'a> {
                                 ],
                             )
                             .await?;
+                        // CORR-2 / v0.20: Mark compensating step as 'completed' — DDL succeeded.
+                        let _ = self
+                            .client
+                            .execute(
+                                &self.schema_sql(COMPLETE_COMPENSATING_STEP_SQL),
+                                &[&migration_id, &spec.qualified_name.name],
+                            )
+                            .await;
                         // C-06: Register ownership so destroy_project can scope drops.
                         // Best-effort: table may not exist on old catalogs.
                         let _ = self
                             .client
                             .execute(
-                                REGISTER_OWNERSHIP_SQL,
+                                &self.schema_sql(REGISTER_OWNERSHIP_SQL),
                                 &[
                                     &self.project,
                                     &spec.qualified_name.schema,
@@ -745,7 +871,7 @@ impl<'a> PlanExecutor<'a> {
                         let _ = self
                             .client
                             .execute(
-                                INSERT_COMPENSATING_STEP_SQL,
+                                &self.schema_sql(INSERT_COMPENSATING_STEP_SQL),
                                 &[
                                     &migration_id,
                                     &"stream_table",
@@ -778,12 +904,20 @@ impl<'a> PlanExecutor<'a> {
                                 )
                                 .await?;
                         }
+                        // CORR-2 / v0.20: Mark compensating step as 'completed' — DDL succeeded.
+                        let _ = self
+                            .client
+                            .execute(
+                                &self.schema_sql(COMPLETE_COMPENSATING_STEP_SQL),
+                                &[&migration_id, &name.name],
+                            )
+                            .await;
                         // C-06: Deregister ownership. Best-effort: table may not
                         // exist on old catalogs.
                         let _ = self
                             .client
                             .execute(
-                                DEREGISTER_OWNERSHIP_SQL,
+                                &self.schema_sql(DEREGISTER_OWNERSHIP_SQL),
                                 &[&name.schema, &name.name],
                             )
                             .await;
@@ -818,7 +952,7 @@ impl<'a> PlanExecutor<'a> {
                         // actual bigserial version assigned by the DB.
                         let row = self.client
                             .query_one(
-                                INSERT_DAG_VERSION_SQL,
+                                &self.schema_sql(INSERT_DAG_VERSION_SQL),
                                 &[
                                     &self.project,
                                     &spec_hash,
@@ -828,7 +962,7 @@ impl<'a> PlanExecutor<'a> {
                                 ],
                             )
                             .await?;
-                        // If INSERT_DAG_VERSION_SQL returns the version, capture it.
+                        // If &self.schema_sql(INSERT_DAG_VERSION_SQL) returns the version, capture it.
                         // Fall back to plan.to_version if the column isn't present.
                         if let Ok(db_version) = row.try_get::<_, i64>(0) {
                             new_version = db_version as u64;
@@ -840,7 +974,7 @@ impl<'a> PlanExecutor<'a> {
                             // S-05: Release lock.  Even if this fails we mark
                             // locked=false so we don't retry on the error path.
                             self.client
-                                .execute(RELEASE_LOCK_SQL, &[&self.project, &lock_holder])
+                                .execute(&self.schema_sql(RELEASE_LOCK_SQL), &[&self.project, &lock_holder])
                                 .await
                                 .ok();
                             locked = false;
@@ -859,7 +993,7 @@ impl<'a> PlanExecutor<'a> {
                         let row = self
                             .client
                             .query_opt(
-                                START_BLUE_GREEN_SQL,
+                                &self.schema_sql(START_BLUE_GREEN_SQL),
                                 &[project, &from_v, blue_schema, green_schema],
                             )
                             .await?;
@@ -1037,7 +1171,7 @@ impl<'a> PlanExecutor<'a> {
                                 let _ = self
                                     .client
                                     .execute(
-                                        SWAP_BLUE_GREEN_SQL,
+                                        &self.schema_sql(SWAP_BLUE_GREEN_SQL),
                                         &[&deploy_id, &Option::<i64>::None, &retain.to_string()],
                                     )
                                     .await;
@@ -1082,7 +1216,7 @@ impl<'a> PlanExecutor<'a> {
                         if let Some(deploy_id) = active_bg_deployment_id {
                             let _ = self
                                 .client
-                                .execute(RETIRE_BLUE_GREEN_SQL, &[&deploy_id])
+                                .execute(&self.schema_sql(RETIRE_BLUE_GREEN_SQL), &[&deploy_id])
                                 .await;
                         }
                     }
@@ -1109,7 +1243,7 @@ impl<'a> PlanExecutor<'a> {
                                 let _ = self
                                     .client
                                     .execute(
-                                        DELETE_CONSUMER_VIEW_SQL,
+                                        &self.schema_sql(DELETE_CONSUMER_VIEW_SQL),
                                         &[&self.project, &spec.name],
                                     )
                                     .await;
@@ -1158,7 +1292,7 @@ impl<'a> PlanExecutor<'a> {
                                 if let Err(e) = self
                                     .client
                                     .execute(
-                                        crate::catalog::UPSERT_CONSUMER_VIEW_SQL,
+                                        &self.schema_sql(crate::catalog::UPSERT_CONSUMER_VIEW_SQL),
                                         &[
                                             &self.project,
                                             &spec.name,
@@ -1211,7 +1345,7 @@ impl<'a> PlanExecutor<'a> {
                                 let _ = self
                                     .client
                                     .execute(
-                                        INSERT_COMPENSATING_STEP_SQL,
+                                        &self.schema_sql(INSERT_COMPENSATING_STEP_SQL),
                                         &[
                                             &migration_id,
                                             &"rls_policy",
@@ -1441,7 +1575,7 @@ impl<'a> PlanExecutor<'a> {
                     let _ = self
                         .client
                         .execute(
-                            FAIL_MIGRATION_STEP_SQL,
+                            &self.schema_sql(FAIL_MIGRATION_STEP_SQL),
                             &[&migration_id, &(step_idx as i32), err_str],
                         )
                         .await;
@@ -1463,7 +1597,7 @@ impl<'a> PlanExecutor<'a> {
                     let _ = self
                         .client
                         .execute(
-                            FINISH_MIGRATION_STEP_SQL,
+                            &self.schema_sql(FINISH_MIGRATION_STEP_SQL),
                             &[&migration_id, &(step_idx as i32)],
                         )
                         .await;
@@ -1476,7 +1610,7 @@ impl<'a> PlanExecutor<'a> {
                 // means we cannot safely resume.
                 self.client
                     .execute(
-                        UPDATE_MIGRATION_PROGRESS_SQL,
+                        &self.schema_sql(UPDATE_MIGRATION_PROGRESS_SQL),
                         &[
                             &migration_id,
                             &serde_json::json!({ "completed_steps": step_idx }),
@@ -1500,7 +1634,7 @@ impl<'a> PlanExecutor<'a> {
             // S-05: Ensure lock is released on the success path too.
             if locked {
                 self.client
-                    .execute(RELEASE_LOCK_SQL, &[&self.project, &lock_holder])
+                    .execute(&self.schema_sql(RELEASE_LOCK_SQL), &[&self.project, &lock_holder])
                     .await
                     .ok();
                 locked = false;
@@ -1513,7 +1647,10 @@ impl<'a> PlanExecutor<'a> {
         // S-05: Release the lock on ANY exit path (success or error).
         if locked {
             self.client
-                .execute(RELEASE_LOCK_SQL, &[&self.project, &lock_holder])
+                .execute(
+                    &self.schema_sql(RELEASE_LOCK_SQL),
+                    &[&self.project, &lock_holder],
+                )
                 .await
                 .ok();
         }
@@ -1557,14 +1694,20 @@ impl<'a> PlanExecutor<'a> {
     async fn acquire_lock(&self, project: &str, holder: &str, ttl: &str) -> Result<()> {
         let rows = self
             .client
-            .query(ACQUIRE_LOCK_SQL, &[&project, &holder, &ttl])
+            .query(
+                &self.schema_sql(ACQUIRE_LOCK_SQL),
+                &[&project, &holder, &ttl],
+            )
             .await?;
 
         if rows.is_empty() {
             let lock_row = self
                 .client
                 .query_opt(
-                    "SELECT holder FROM aqueduct.locks WHERE project = $1",
+                    &for_schema(
+                        "SELECT holder FROM aqueduct.locks WHERE project = $1",
+                        &self.catalog_schema,
+                    ),
                     &[&project],
                 )
                 .await?;
@@ -1596,6 +1739,7 @@ async fn run_heartbeat(
     dsn: String,
     project: String,
     holder: String,
+    heartbeat_sql: String,
     mut cancel_rx: oneshot::Receiver<()>,
     lock_lost_tx: watch::Sender<bool>,
 ) {
@@ -1615,7 +1759,7 @@ async fn run_heartbeat(
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                match client.execute(HEARTBEAT_LOCK_SQL, &[&project, &holder]).await {
+                match client.execute(&heartbeat_sql, &[&project, &holder]).await {
                     Err(e) => {
                         tracing::warn!("Heartbeat: lock renewal failed: {}", e);
                     }
@@ -1774,12 +1918,13 @@ pub async fn import_from_live(
     project: &str,
     output_dir: &std::path::Path,
     exclude_patterns: &[String],
+    catalog_schema: &crate::catalog::CatalogSchema,
 ) -> Result<usize> {
     use crate::live_state::read_live_state;
 
     // Import reads ALL stream tables visible on the database — no ownership
     // filtering at this stage since we are bootstrapping a new project.
-    let state = read_live_state(client, None).await?;
+    let state = read_live_state(client, None, catalog_schema).await?;
     let streams_dir = output_dir.join("migrations").join("streams");
     std::fs::create_dir_all(&streams_dir)?;
 
@@ -1849,7 +1994,7 @@ allow_full_refresh = true
     // M-06: Record an initial baseline snapshot (version 1) in the catalog so
     // that a subsequent `aqueduct plan` returns an empty plan.
     // Best-effort: if the catalog tables don't exist yet, skip silently.
-    if let Err(e) = record_import_baseline(client, project, &state).await {
+    if let Err(e) = record_import_baseline(client, project, &state, catalog_schema).await {
         tracing::warn!(
             "Could not record import baseline snapshot (non-fatal): {}",
             e
@@ -1865,11 +2010,12 @@ async fn record_import_baseline(
     client: &tokio_postgres::Client,
     project: &str,
     state: &crate::dag::DagState,
+    catalog_schema: &crate::catalog::CatalogSchema,
 ) -> Result<()> {
     use sha2::Digest;
 
     // Ensure the catalog schema is bootstrapped.
-    crate::catalog::ensure_catalog_current(client).await?;
+    crate::catalog::ensure_catalog_current(client, catalog_schema).await?;
 
     // Serialize the live state as our desired spec snapshot.
     let spec_json = serde_json::to_value(state).map_err(crate::error::AqueductError::Json)?;
@@ -1884,7 +2030,7 @@ async fn record_import_baseline(
 
     client
         .execute(
-            INSERT_DAG_VERSION_SQL,
+            &for_schema(INSERT_DAG_VERSION_SQL, catalog_schema),
             &[&project, &spec_hash, &applied_by, &plan_json, &spec_json],
         )
         .await?;

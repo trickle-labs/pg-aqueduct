@@ -1,6 +1,7 @@
 /// CLI-level integration tests.
 /// These tests spin up a Testcontainers PostgreSQL container, install the mock
 /// pg_trickle schema, and exercise the CLI commands end-to-end.
+use aqueduct_core::catalog::CatalogSchema;
 use aqueduct_testkit::TestDb;
 use std::fs;
 use std::path::PathBuf;
@@ -114,9 +115,10 @@ async fn test_end_to_end_lifecycle() {
         aqueduct_core::parser::load_migrations(tmp.path(), &std::collections::HashMap::new())
             .unwrap();
     let desired = aqueduct_core::dag::build_dag_state(&files, true).unwrap();
-    let actual = aqueduct_core::live_state::read_live_state(&db.client, None)
-        .await
-        .unwrap();
+    let actual =
+        aqueduct_core::live_state::read_live_state(&db.client, None, &CatalogSchema::default())
+            .await
+            .unwrap();
     let diff = aqueduct_core::diff::compute_diff(&desired, &actual);
     assert!(!diff.is_empty());
 
@@ -138,9 +140,10 @@ async fn test_end_to_end_lifecycle() {
     assert_eq!(count, 1);
 
     // Plan again: should be a no-op.
-    let actual2 = aqueduct_core::live_state::read_live_state(&db.client, None)
-        .await
-        .unwrap();
+    let actual2 =
+        aqueduct_core::live_state::read_live_state(&db.client, None, &CatalogSchema::default())
+            .await
+            .unwrap();
     let diff2 = aqueduct_core::diff::compute_diff(&desired, &actual2);
     assert!(diff2.is_empty());
 }
@@ -161,9 +164,10 @@ async fn test_plan_renderer() {
     .unwrap();
 
     let desired = aqueduct_core::dag::build_dag_state(&[file], false).unwrap();
-    let actual = aqueduct_core::live_state::read_live_state(&db.client, None)
-        .await
-        .unwrap();
+    let actual =
+        aqueduct_core::live_state::read_live_state(&db.client, None, &CatalogSchema::default())
+            .await
+            .unwrap();
     let diff = aqueduct_core::diff::compute_diff(&desired, &actual);
     let topo = aqueduct_core::dag::topological_sort(&desired).unwrap();
     let plan = aqueduct_core::plan::build_plan("renderer-test", None, 1, &diff, &topo)
@@ -366,9 +370,10 @@ async fn test_plan_renderer_with_cost() {
     .unwrap();
 
     let desired = aqueduct_core::dag::build_dag_state(&[file], false).unwrap();
-    let actual = aqueduct_core::live_state::read_live_state(&db.client, None)
-        .await
-        .unwrap();
+    let actual =
+        aqueduct_core::live_state::read_live_state(&db.client, None, &CatalogSchema::default())
+            .await
+            .unwrap();
     let diff = aqueduct_core::diff::compute_diff(&desired, &actual);
     let topo = aqueduct_core::dag::topological_sort(&desired).unwrap();
     let plan = aqueduct_core::plan::build_plan("cost-render-test", None, 1, &diff, &topo)
@@ -409,9 +414,10 @@ SELECT customer_id, total FROM public.order_totals;
     let desired = aqueduct_core::dag::build_dag_state(&[consumer_file], false).unwrap();
     assert_eq!(desired.consumers.len(), 1);
 
-    let actual = aqueduct_core::live_state::read_live_state(&db.client, None)
-        .await
-        .unwrap();
+    let actual =
+        aqueduct_core::live_state::read_live_state(&db.client, None, &CatalogSchema::default())
+            .await
+            .unwrap();
     let diff = aqueduct_core::diff::compute_diff(&desired, &actual);
     let topo = aqueduct_core::dag::topological_sort(&desired).unwrap();
     let plan = aqueduct_core::plan::build_plan("consumer-cli-test", None, 1, &diff, &topo)
@@ -955,6 +961,7 @@ fn test_destroy_options_dry_run_flag() {
         dry_run: true,
         force_cascade: false,
         force_unowned: false,
+        catalog_schema: CatalogSchema::default(),
     };
     assert!(opts.dry_run);
 }
@@ -1022,7 +1029,7 @@ async fn test_promote_plan_is_empty_when_in_sync() {
         dry_run: true,
     };
 
-    let plan = compute_promotion_plan(&db.client, &files, &opts)
+    let plan = compute_promotion_plan(&db.client, &files, &opts, &CatalogSchema::default())
         .await
         .expect("compute plan");
 
@@ -1084,9 +1091,10 @@ async fn test_destroy_project_dry_run_cli() {
     .unwrap();
 
     let desired = aqueduct_core::dag::build_dag_state(&[file], false).unwrap();
-    let actual = aqueduct_core::live_state::read_live_state(&db.client, None)
-        .await
-        .unwrap();
+    let actual =
+        aqueduct_core::live_state::read_live_state(&db.client, None, &CatalogSchema::default())
+            .await
+            .unwrap();
     let diff = aqueduct_core::diff::compute_diff(&desired, &actual);
     let topo = aqueduct_core::dag::topological_sort(&desired).unwrap();
     let plan = aqueduct_core::plan::build_plan("destroy-cli-test", None, 1, &diff, &topo)
@@ -1100,6 +1108,7 @@ async fn test_destroy_project_dry_run_cli() {
         dry_run: true,
         force_cascade: false,
         force_unowned: false,
+        catalog_schema: CatalogSchema::default(),
     };
     let result = destroy_project(&db.client, &opts).await.unwrap();
 
@@ -1671,9 +1680,10 @@ async fn postgres_version_matrix_min_supported() {
     .unwrap();
 
     let desired = aqueduct_core::dag::build_dag_state(&[file], false).unwrap();
-    let actual = aqueduct_core::live_state::read_live_state(&db.client, None)
-        .await
-        .unwrap();
+    let actual =
+        aqueduct_core::live_state::read_live_state(&db.client, None, &CatalogSchema::default())
+            .await
+            .unwrap();
     let diff = aqueduct_core::diff::compute_diff(&desired, &actual);
     let topo = aqueduct_core::dag::topological_sort(&desired).unwrap();
     let plan =

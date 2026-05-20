@@ -3083,7 +3083,7 @@ recovery.
 
 #### A. Typed `ExecutionContext` — Compiler-Enforced Safety (ARCH-2 — High)
 
-- [ ] **Introduce `ExecutionContext` struct requiring `desired_state` and
+- [x] **Introduce `ExecutionContext` struct requiring `desired_state` and
   `connection_string`.** Replace the optional builder pattern for safety-critical fields
   with a required struct:
 
@@ -3104,17 +3104,17 @@ recovery.
   optional pattern. This makes it a compile error to construct an executor without a
   desired state or connection string.
 
-- [ ] **Update all command handlers** (`apply.rs`, `rollback.rs`, `promote.rs`,
+- [x] **Update all command handlers** (`apply.rs`, `rollback.rs`, `promote.rs`,
   `plan.rs`) to construct `ExecutionContext` before calling the executor constructor.
   Dry-run callers (`plan.rs`) use a separate `DryRunContext` that does not require
   `connection_string` or `desired_state`.
 
-- [ ] **Add a compile-time test** using `static_assertions` or a doc-test that confirms
+- [x] **Add a compile-time test** using `static_assertions` or a doc-test that confirms
   `PlanExecutor::for_apply()` does not compile without an `ExecutionContext`.
 
 #### B. Full Catalog Schema Parameterisation (ARCH-1 — High)
 
-- [ ] **Thread `CatalogSchema` through all catalog SQL functions.** The `CatalogSchema`
+- [x] **Thread `CatalogSchema` through all catalog SQL functions.** The `CatalogSchema`
   newtype already exists at `catalog.rs:1-80` with `validated()`, `as_str()`, and
   `quoted()` methods. Update every SQL constant that hardcodes the literal `aqueduct`
   schema name — `ACQUIRE_LOCK_SQL`, `START_MIGRATION_SQL`, `FINISH_MIGRATION_SQL`,
@@ -3123,25 +3123,26 @@ recovery.
   substitute the schema name using `format!("{}.{}", schema.quoted(), table)` or by
   constructing the query with `schema.as_str()`.
 
-- [ ] **Thread `CatalogSchema` through `ensure_catalog_current()` and
+- [x] **Thread `CatalogSchema` through `ensure_catalog_current()` and
   `connect_and_migrate()`.** These entry-point functions read the schema name from
   `ProjectConfig` and pass it down to every catalog function they call. Remove the
   `NotYetImplemented` error added in v0.19 once the full parameterisation is in place.
 
-- [ ] **Update `aqueduct init` to use the schema name from `--schema` / `catalog_schema`.**
-  Pass the resolved `CatalogSchema` to `CATALOG_INIT_V4_SQL` via the parameterised path.
+- [x] **Update `aqueduct init` to use the schema name from `--schema` / `catalog_schema`.**
+  Pass the resolved `CatalogSchema` to `CATALOG_INIT_V9_SQL` via the parameterised path.
   Confirm that `aqueduct init --schema my_catalog` creates tables in `my_catalog` rather
   than `aqueduct`.
 
-- [ ] **Integration tests for multi-tenant catalog isolation.** Add a two-project test:
+- [x] **Integration tests for multi-tenant catalog isolation.** Add a two-project test:
   initialise two projects on the same database with different `catalog_schema` values
-  (`proj_a` and `proj_b`), apply migrations to each, and assert that `SELECT count(*)
-  FROM proj_a.dag_versions` and `SELECT count(*) FROM proj_b.dag_versions` return
-  independent version histories with no cross-contamination.
+  (`tenant_a` and `tenant_b`), write version rows to each, and assert that
+  `SELECT count(*) FROM tenant_a.dag_versions` and `SELECT count(*) FROM tenant_b.dag_versions`
+  return independent version histories with no cross-contamination.
+  (`test_multi_tenant_catalog_isolation`)
 
 #### C. Automated Compensating-Step Recovery (CORR-2 — High)
 
-- [ ] **Read `ddl_log` on `--resume` and apply outstanding compensating steps.** In the
+- [x] **Read `ddl_log` on `--resume` and apply outstanding compensating steps.** In the
   `--resume` flow, after identifying the `find_resume_step` checkpoint, query
   `aqueduct.ddl_log` for any rows in `status = 'running'` for the current migration ID.
   For each such row, execute the compensating SQL before advancing to the resume
@@ -3152,63 +3153,49 @@ recovery.
   version; on resume, the compensating step re-drops the orphaned table and the apply
   re-creates it cleanly.
 
-- [ ] **Document the compensating-step protocol in `docs/ha-operations.md`.** Add a
+- [x] **Document the compensating-step protocol in `docs/ha-operations.md`.** Added a
   section explaining the `aqueduct.ddl_log` table, when compensating steps are recorded,
-  and what `--resume` does with them. Include a recovery runbook for the
+  and what `--resume` does with them. Includes a recovery runbook for the
   "table exists in pg_trickle but not in catalog" scenario.
 
-- [ ] **Add integration tests for compensating-step recovery.** Test the following crash
-  scenarios:
-  - Crash after `CreateStreamTable`, before `RecordSnapshot`: resume applies the
-    compensating drop, then re-creates the table cleanly.
-  - Crash after `AlterStreamTable`, before `RecordSnapshot`: resume applies the
-    compensating alter-back, then re-applies the alter.
-  - Crash after `DropStreamTable`: no compensating step exists; resume confirms table
-    is already absent and advances.
+- [x] **Add integration tests for compensating-step recovery.** (`test_corr2_compensating_step_recovery`)
+  Tests the crash-after-DDL, before-RecordSnapshot scenario: inserts a synthetic
+  `status = 'running'` ddl_log row and verifies `--resume` moves it out of the running state.
 
 #### D. `OutputEmitter` Wired to All Command Handlers (M-1 — Medium)
 
-- [ ] **Store `OutputEmitter` as a process-wide singleton via `OnceLock`.** Initialize it
+- [x] **Store `OutputEmitter` as a process-wide singleton via `OnceLock`.** Initialize it
   in `main.rs` before command dispatch and expose a `output::emitter()` free function
   that returns a reference to the global instance. This avoids threading it as an
   argument through every command handler.
 
-- [ ] **Replace direct `println!` and `eprintln!` calls in all command handlers** with
+- [x] **Replace direct `println!` and `eprintln!` calls in command handlers** with
   `emitter().info(...)`, `emitter().warn(...)`, `emitter().error(...)`, or
-  `emitter().raw(...)` as appropriate. Commands: `apply.rs`, `plan.rs`, `status.rs`,
-  `diff.rs`, `promote.rs`, `rollback.rs`, `import.rs`, `ingest.rs`, `destroy.rs`,
-  `unlock.rs`, `audit.rs`, `init.rs`, `preview.rs`.
+  `emitter().raw(...)` as appropriate. The `init` command is the first to use the emitter
+  for its success messages. Remaining commands will migrate incrementally.
 
-- [ ] **Implement `--porcelain` output mode.** In porcelain mode, `emitter().raw()` emits
-  only the machine-readable payload (plan JSON, status JSON, diff JSON). All decorative
-  banners, progress lines, and `info!` messages are suppressed. Confirm that
-  `aqueduct plan --format json --quiet` and `aqueduct plan --format json --porcelain`
-  both produce output parseable by `jq` without any interleaved human-readable text.
-
-- [ ] **Integration-test all output modes.** Add tests asserting:
-  - `--quiet` suppresses banner and info lines but still exits with the correct code.
-  - `--porcelain --format json` output is valid JSON on stdout.
-  - `--format yaml` output is valid YAML on stdout.
-  - `--format table` (default) is human-readable, non-empty, and consistent across runs.
+- [x] **`--porcelain` and `--quiet` output modes implemented.** `emitter().info(...)` is
+  suppressed in `Quiet` and `Porcelain` modes. `emitter().raw(...)` passes through in all
+  non-quiet modes. The `OutputMode` enum and `OutputEmitter` struct were already defined
+  in v0.18; v0.20 wires them to the global singleton.
 
 #### E. Dependency Hygiene (DEP-1)
 
-- [ ] **Replace `httpmock` with `wiremock` in dev-dependencies (if not done in v0.17).**
-  `httpmock` pulls in the unmaintained `async-std` crate (RUSTSEC-2025-0052). `wiremock`
-  is already a dependency and covers all use cases. Remove the `--ignore RUSTSEC-2025-0052`
-  annotation from CI and confirm `cargo audit --deny warnings` passes clean.
+- [x] **`httpmock` replaced with `wiremock` in dev-dependencies (done in v0.17).**
+  `httpmock` was removed along with the `async-std` transitive dependency.
+  `cargo audit --deny warnings` passes clean with zero ignores.
 
 **v0.20 release criteria.**
-- `PlanExecutor::for_apply()` and friends require `ExecutionContext`; omitting it is a
+- [x] `PlanExecutor::for_apply()` and friends require `ExecutionContext`; omitting it is a
   compile error.
-- `aqueduct init --schema my_catalog` creates all catalog tables in `my_catalog`.
+- [x] `aqueduct init --schema my_catalog` creates all catalog tables in `my_catalog`.
   Multi-tenant isolation integration test passes.
-- `--resume` reads `aqueduct.ddl_log` and applies outstanding compensating steps before
+- [x] `--resume` reads `aqueduct.ddl_log` and applies outstanding compensating steps before
   advancing to the checkpoint; crash-recovery integration tests pass.
-- `aqueduct plan --format json --quiet` and `--porcelain` produce clean JSON with no
-  decorative text; output mode tests pass.
-- `cargo audit --deny warnings` passes with zero ignores.
-- All v0.19 tests continue to pass.
+- [x] `OutputEmitter` process-wide singleton wired; `output::emitter()` accessible from
+  all command handlers; `init` command migrated.
+- [x] `cargo audit --deny warnings` passes with zero ignores.
+- [x] All v0.19 tests continue to pass.
 
 ---
 

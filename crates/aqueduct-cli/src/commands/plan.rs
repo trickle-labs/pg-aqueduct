@@ -74,6 +74,10 @@ pub async fn run(args: PlanArgs) -> anyhow::Result<()> {
         .as_ref()
         .map(|c| c.project.name.clone())
         .unwrap_or_else(|| "unknown".to_string());
+    let catalog_schema = config
+        .as_ref()
+        .and_then(|c| aqueduct_core::catalog::CatalogSchema::new(&c.project.catalog_schema).ok())
+        .unwrap_or_default();
 
     // Read migration files.
     let files = aqueduct_core::parser::load_migrations(&args.project_dir, &vars)?;
@@ -102,11 +106,12 @@ pub async fn run(args: PlanArgs) -> anyhow::Result<()> {
     }
 
     // Read actual live state.
-    let actual = read_live_state(&client, Some(&project_name)).await?;
+    let actual = read_live_state(&client, Some(&project_name), &catalog_schema).await?;
 
     // Get current version.
     let current_version =
-        aqueduct_core::live_state::get_latest_dag_version(&client, &project_name).await?;
+        aqueduct_core::live_state::get_latest_dag_version(&client, &project_name, &catalog_schema)
+            .await?;
     let next_version = current_version.map(|v| v + 1).unwrap_or(1);
 
     // Compute diff.

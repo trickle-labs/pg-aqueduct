@@ -57,10 +57,14 @@ pub async fn run(args: DiffArgs) -> anyhow::Result<()> {
         .as_ref()
         .map(|c| c.project.name.clone())
         .unwrap_or_else(|| "unknown".to_string());
+    let catalog_schema = config
+        .as_ref()
+        .and_then(|c| aqueduct_core::catalog::CatalogSchema::new(&c.project.catalog_schema).ok())
+        .unwrap_or_default();
 
     let files = load_migrations(&args.project_dir, &vars)?;
     let desired = build_dag_state(&files, true)?;
-    let actual = read_live_state(&client, Some(&project_name)).await?;
+    let actual = read_live_state(&client, Some(&project_name), &catalog_schema).await?;
     let diff = compute_diff(&desired, &actual);
 
     // Filter to a single table if requested.

@@ -52,8 +52,9 @@ async fn poll_once(
     project_dir: &std::path::Path,
     format: &str,
     fail_on_drift: bool,
+    catalog_schema: &aqueduct_core::catalog::CatalogSchema,
 ) -> anyhow::Result<u32> {
-    let current_version = get_latest_dag_version(client, project_name).await?;
+    let current_version = get_latest_dag_version(client, project_name, catalog_schema).await?;
     let stream_table_count = get_stream_table_count(client).await?;
     let pgtrickle_version = check_pgtrickle_version(client).await?;
 
@@ -66,7 +67,10 @@ async fn poll_once(
     let (applied_at, applied_by) = if let Some(v) = current_version {
         let row = client
             .query_opt(
-                "SELECT applied_at, applied_by FROM aqueduct.dag_versions WHERE version = $1",
+                &aqueduct_core::catalog::for_schema(
+                    "SELECT applied_at, applied_by FROM aqueduct.dag_versions WHERE version = $1",
+                    catalog_schema,
+                ),
                 &[&(v as i64)],
             )
             .await?;
@@ -85,7 +89,9 @@ async fn poll_once(
     // diff.deltas counts stream table changes; source_deltas and consumer_deltas
     // cover source DDL changes and consumer view divergence respectively.
     let drift_count: usize = {
-        let live = aqueduct_core::live_state::read_live_state(client, Some(project_name)).await?;
+        let live =
+            aqueduct_core::live_state::read_live_state(client, Some(project_name), catalog_schema)
+                .await?;
         let files = aqueduct_core::parser::load_migrations(project_dir, &Default::default())?;
         let desired = aqueduct_core::dag::build_dag_state(&files, true)?;
         let diff = aqueduct_core::diff::compute_diff(&desired, &live);
@@ -216,6 +222,10 @@ pub async fn run(args: StatusArgs) -> anyhow::Result<()> {
         .as_ref()
         .map(|c| c.project.name.clone())
         .unwrap_or_else(|| "unknown".to_string());
+    let catalog_schema = config
+        .as_ref()
+        .and_then(|c| aqueduct_core::catalog::CatalogSchema::new(&c.project.catalog_schema).ok())
+        .unwrap_or_default();
 
     if !args.watch {
         let drift_count = poll_once(
@@ -224,6 +234,7 @@ pub async fn run(args: StatusArgs) -> anyhow::Result<()> {
             &args.project_dir,
             &args.format,
             args.fail_on_drift,
+            &catalog_schema,
         )
         .await?;
         if args.fail_on_drift && drift_count > 0 {
@@ -298,6 +309,7 @@ pub async fn run(args: StatusArgs) -> anyhow::Result<()> {
                 &args.project_dir,
                 &args.format,
                 false,
+                &catalog_schema,
             )
             .await
         }

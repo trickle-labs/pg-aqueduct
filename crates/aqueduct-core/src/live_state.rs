@@ -1,3 +1,4 @@
+use crate::catalog::{for_schema, CatalogSchema};
 use crate::dag::{ConsumerSpec, DagState, QualifiedName, RefreshMode, StreamTableSpec};
 use crate::error::Result;
 
@@ -8,6 +9,7 @@ use crate::error::Result;
 pub async fn read_live_state(
     client: &tokio_postgres::Client,
     project: Option<&str>,
+    catalog_schema: &CatalogSchema,
 ) -> Result<DagState> {
     // Check if pg_trickle is installed by looking for the pgtrickle schema.
     let pgtrickle_exists: bool = client
@@ -26,11 +28,14 @@ pub async fn read_live_state(
         // C-06: filter by project via the ownership catalog table.
         let ownership_exists: bool = client
             .query_one(
-                "SELECT EXISTS (
+                &for_schema(
+                    "SELECT EXISTS (
                     SELECT 1 FROM information_schema.tables
                     WHERE table_schema = 'aqueduct'
                       AND table_name   = 'stream_table_ownership'
                 )",
+                    catalog_schema,
+                ),
                 &[],
             )
             .await?
@@ -39,7 +44,8 @@ pub async fn read_live_state(
         if ownership_exists {
             client
                 .query(
-                    r#"
+                    &for_schema(
+                        r#"
                     SELECT
                         s.schema_name,
                         s.table_name,
@@ -54,6 +60,8 @@ pub async fn read_live_state(
                      AND o.project     = $1
                     ORDER BY s.schema_name, s.table_name
                     "#,
+                        catalog_schema,
+                    ),
                     &[&proj],
                 )
                 .await?
@@ -109,13 +117,15 @@ pub async fn read_live_state(
     // C-05: Read sources from the last recorded spec_jsonb so base-table DDL
     // changes are accurately reflected.
     let sources = if let Some(proj) = project {
-        read_live_sources(client, proj).await.unwrap_or_default()
+        read_live_sources(client, proj, catalog_schema)
+            .await
+            .unwrap_or_default()
     } else {
         vec![]
     };
 
     // C-07: filter consumers by project too.
-    let consumers = read_live_consumers(client, project)
+    let consumers = read_live_consumers(client, project, catalog_schema)
         .await
         .unwrap_or_default();
 
@@ -130,11 +140,15 @@ pub async fn read_live_state(
 async fn read_live_sources(
     client: &tokio_postgres::Client,
     project: &str,
+    catalog_schema: &CatalogSchema,
 ) -> Result<Vec<crate::dag::SourceSpec>> {
     let row = client
         .query_opt(
-            "SELECT spec_jsonb FROM aqueduct.dag_versions \
+            &for_schema(
+                "SELECT spec_jsonb FROM aqueduct.dag_versions \
              WHERE project = $1 ORDER BY version DESC LIMIT 1",
+                catalog_schema,
+            ),
             &[&project],
         )
         .await?;
@@ -156,14 +170,18 @@ async fn read_live_sources(
 async fn read_live_consumers(
     client: &tokio_postgres::Client,
     project: Option<&str>,
+    catalog_schema: &CatalogSchema,
 ) -> Result<Vec<ConsumerSpec>> {
     // Check if the consumer_views table exists.
     let table_exists: bool = client
         .query_one(
-            "SELECT EXISTS (
+            &for_schema(
+                "SELECT EXISTS (
                 SELECT 1 FROM information_schema.tables
                 WHERE table_schema = 'aqueduct' AND table_name = 'consumer_views'
             )",
+                catalog_schema,
+            ),
             &[],
         )
         .await?
@@ -177,17 +195,20 @@ async fn read_live_consumers(
         // C-07: filter by project.
         client
             .query(
-                "SELECT name, expose_as, source, sql_body \
+                &for_schema(
+                    "SELECT name, expose_as, source, sql_body \
                  FROM aqueduct.consumer_views \
                  WHERE project = $1 \
                  ORDER BY name",
+                    catalog_schema,
+                ),
                 &[&proj],
             )
             .await?
     } else {
         client
             .query(
-                "SELECT name, expose_as, source, sql_body FROM aqueduct.consumer_views ORDER BY name",
+                &for_schema("SELECT name, expose_as, source, sql_body FROM aqueduct.consumer_views ORDER BY name", catalog_schema),
                 &[],
             )
             .await?
@@ -244,12 +265,13 @@ pub async fn check_pgtrickle_version(client: &tokio_postgres::Client) -> Result<
 pub async fn get_latest_dag_version(
     client: &tokio_postgres::Client,
     project: &str,
+    catalog_schema: &CatalogSchema,
 ) -> Result<Option<u64>> {
     // Check if catalog exists first.
     let catalog_exists: bool = client
         .query_one(
-            "SELECT EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = 'aqueduct')",
-            &[],
+            "SELECT EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = $1)",
+            &[&catalog_schema.as_str()],
         )
         .await?
         .get(0);
@@ -260,7 +282,7 @@ pub async fn get_latest_dag_version(
 
     let row = client
         .query_opt(
-            "SELECT version FROM aqueduct.dag_versions WHERE project = $1 ORDER BY version DESC LIMIT 1",
+            &for_schema("SELECT version FROM aqueduct.dag_versions WHERE project = $1 ORDER BY version DESC LIMIT 1", catalog_schema),
             &[&project],
         )
         .await?;
@@ -305,12 +327,15 @@ pub async fn get_stream_table_count(client: &tokio_postgres::Client) -> Result<i
 /// Returns:
 /// - `true` if the extension is installed and the DDL event trigger is active
 /// - `false` if operating in fallback mode (polling-based drift detection)
-pub async fn detect_extension_installed(client: &tokio_postgres::Client) -> Result<bool> {
+pub async fn detect_extension_installed(
+    client: &tokio_postgres::Client,
+    catalog_schema: &CatalogSchema,
+) -> Result<bool> {
     // First check if the aqueduct schema exists (extension always creates it).
     let schema_exists: bool = client
         .query_one(
-            "SELECT EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = 'aqueduct')",
-            &[],
+            "SELECT EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = $1)",
+            &[&catalog_schema.as_str()],
         )
         .await?
         .get(0);
@@ -321,7 +346,10 @@ pub async fn detect_extension_installed(client: &tokio_postgres::Client) -> Resu
 
     // Check for the DDL event trigger that the extension registers.
     let trigger_exists: bool = client
-        .query_one(crate::catalog::DETECT_EXTENSION_SQL, &[])
+        .query_one(
+            &for_schema(crate::catalog::DETECT_EXTENSION_SQL, catalog_schema),
+            &[],
+        )
         .await?
         .get(0);
 
@@ -345,14 +373,21 @@ pub struct DdlEvent {
 ///
 /// Returns an empty list when the `aqueduct.ddl_log` table does not exist or
 /// when the companion extension is not installed (CLI fallback mode).
-pub async fn read_ddl_log(client: &tokio_postgres::Client, limit: i64) -> Result<Vec<DdlEvent>> {
+pub async fn read_ddl_log(
+    client: &tokio_postgres::Client,
+    limit: i64,
+    catalog_schema: &CatalogSchema,
+) -> Result<Vec<DdlEvent>> {
     // Check if the table exists first.
     let table_exists: bool = client
         .query_one(
-            "SELECT EXISTS (
+            &for_schema(
+                "SELECT EXISTS (
                 SELECT 1 FROM information_schema.tables
                 WHERE table_schema = 'aqueduct' AND table_name = 'ddl_log'
             )",
+                catalog_schema,
+            ),
             &[],
         )
         .await?
@@ -363,7 +398,10 @@ pub async fn read_ddl_log(client: &tokio_postgres::Client, limit: i64) -> Result
     }
 
     let rows = client
-        .query(crate::catalog::READ_DDL_LOG_SQL, &[&limit])
+        .query(
+            &for_schema(crate::catalog::READ_DDL_LOG_SQL, catalog_schema),
+            &[&limit],
+        )
         .await?;
 
     let events = rows

@@ -39,6 +39,8 @@ pub struct PromoteArgs {
 pub async fn run(args: PromoteArgs) -> anyhow::Result<()> {
     let config = AqueductConfig::load(&args.project_dir)?;
     let project_name = config.project.name.clone();
+    let catalog_schema = aqueduct_core::catalog::CatalogSchema::new(&config.project.catalog_schema)
+        .unwrap_or_default();
 
     // Resolve destination target DSN.
     let dest_target = config.target(&args.to)?;
@@ -61,14 +63,14 @@ pub async fn run(args: PromoteArgs) -> anyhow::Result<()> {
     if !args.skip_source_check {
         let source_target = config.target(&args.from)?;
         let source_client = connect(&source_target.dsn).await?;
-        validate_source_clean(&source_client, &files, &project_name).await?;
+        validate_source_clean(&source_client, &files, &project_name, &catalog_schema).await?;
         println!("✓ Source environment '{}' is clean.", args.from);
     }
 
     // Connect to destination using connect_and_migrate so the catalog is
     // self-migrated before any plan steps run (CORR-5 / v0.14).
-    let dest_client = connect_and_migrate(&dest_dsn).await?;
-    let plan = compute_promotion_plan(&dest_client, &files, &promote_opts).await?;
+    let dest_client = connect_and_migrate(&dest_dsn, &catalog_schema).await?;
+    let plan = compute_promotion_plan(&dest_client, &files, &promote_opts, &catalog_schema).await?;
 
     if plan.summary.is_empty() {
         println!(
@@ -109,7 +111,8 @@ pub async fn run(args: PromoteArgs) -> anyhow::Result<()> {
         env!("CARGO_PKG_VERSION"),
         false,
     )
-    .with_connection_string(dest_dsn.clone());
+    .with_connection_string(dest_dsn.clone())
+    .with_catalog_schema(catalog_schema);
     if let Some(state) = desired_state {
         executor = executor.with_desired_state(state);
     }

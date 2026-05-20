@@ -3,6 +3,7 @@
 //!
 //! `aqueduct destroy --project <name> --to <target> [--confirm]`
 
+use crate::catalog::{for_schema, CatalogSchema};
 use crate::dag::QualifiedName;
 use crate::error::{AqueductError, Result};
 use crate::live_state::read_live_state;
@@ -20,6 +21,8 @@ pub struct DestroyOptions {
     /// If true, skip ownership verification and drop tables not in this
     /// project's ownership registry (C-06).
     pub force_unowned: bool,
+    /// Catalog schema to use for all catalog SQL (ARCH-1 / v0.20).
+    pub catalog_schema: CatalogSchema,
 }
 
 /// Summary of what was (or would be) destroyed.
@@ -65,18 +68,24 @@ pub async fn destroy_project(
 
     // Read the live state to find managed stream tables.
     // C-06: filter by project so we only touch this project's tables.
-    let live = read_live_state(client, Some(&options.project)).await?;
+    let live = read_live_state(client, Some(&options.project), &options.catalog_schema).await?;
+
+    // Helper to inject the catalog schema into SQL constants.
+    let _sch = |sql: &'static str| for_schema(sql, &options.catalog_schema);
+    let sch_str = |sql: &str| for_schema(sql, &options.catalog_schema);
 
     // C-06: Verify ownership for each stream table before dropping.
     // If `force_unowned` is false, reject any table not owned by this project.
     if !options.force_unowned {
         let ownership_exists: bool = client
             .query_one(
-                "SELECT EXISTS (
+                &sch_str(
+                    "SELECT EXISTS (
                     SELECT 1 FROM information_schema.tables
                     WHERE table_schema = 'aqueduct'
                       AND table_name   = 'stream_table_ownership'
                 )",
+                ),
                 &[],
             )
             .await?
@@ -86,8 +95,10 @@ pub async fn destroy_project(
             for table in &live.stream_tables {
                 let owner: Option<String> = client
                     .query_opt(
-                        "SELECT project FROM aqueduct.stream_table_ownership \
+                        &sch_str(
+                            "SELECT project FROM aqueduct.stream_table_ownership \
                          WHERE schema_name = $1 AND table_name = $2",
+                        ),
                         &[&table.qualified_name.schema, &table.qualified_name.name],
                     )
                     .await?
@@ -113,10 +124,12 @@ pub async fn destroy_project(
     let consumer_views: Vec<String> = {
         let exists: bool = client
             .query_one(
-                "SELECT EXISTS (
+                &sch_str(
+                    "SELECT EXISTS (
                     SELECT 1 FROM information_schema.tables
                     WHERE table_schema = 'aqueduct' AND table_name = 'consumer_views'
                 )",
+                ),
                 &[],
             )
             .await?
@@ -125,7 +138,7 @@ pub async fn destroy_project(
         if exists {
             let rows = client
                 .query(
-                    "SELECT expose_as FROM aqueduct.consumer_views WHERE project = $1",
+                    &sch_str("SELECT expose_as FROM aqueduct.consumer_views WHERE project = $1"),
                     &[&options.project],
                 )
                 .await?;
@@ -230,7 +243,7 @@ pub async fn destroy_project(
     // Delete consumer_views rows.
     let consumer_del = client
         .execute(
-            "DELETE FROM aqueduct.consumer_views WHERE project = $1",
+            &sch_str("DELETE FROM aqueduct.consumer_views WHERE project = $1"),
             &[&options.project],
         )
         .await
@@ -240,7 +253,7 @@ pub async fn destroy_project(
     // Delete blue_green_deployments rows.
     let bg_del = client
         .execute(
-            "DELETE FROM aqueduct.blue_green_deployments WHERE project = $1",
+            &sch_str("DELETE FROM aqueduct.blue_green_deployments WHERE project = $1"),
             &[&options.project],
         )
         .await
@@ -250,7 +263,7 @@ pub async fn destroy_project(
     // Delete locks.
     let lock_del = client
         .execute(
-            "DELETE FROM aqueduct.locks WHERE project = $1",
+            &sch_str("DELETE FROM aqueduct.locks WHERE project = $1"),
             &[&options.project],
         )
         .await
@@ -260,8 +273,10 @@ pub async fn destroy_project(
     // Delete migration_steps rows first (FK: migration_steps.migration_id -> migrations.id).
     client
         .execute(
-            "DELETE FROM aqueduct.migration_steps \
+            &sch_str(
+                "DELETE FROM aqueduct.migration_steps \
              WHERE migration_id IN (SELECT id FROM aqueduct.migrations WHERE project = $1)",
+            ),
             &[&options.project],
         )
         .await
@@ -271,8 +286,10 @@ pub async fn destroy_project(
     // (FK: ddl_log.migration_id -> migrations.id, added in v7).
     client
         .execute(
-            "DELETE FROM aqueduct.ddl_log \
+            &sch_str(
+                "DELETE FROM aqueduct.ddl_log \
              WHERE migration_id IN (SELECT id FROM aqueduct.migrations WHERE project = $1)",
+            ),
             &[&options.project],
         )
         .await
@@ -281,7 +298,7 @@ pub async fn destroy_project(
     // Delete migration records (must come before dag_versions due to FK).
     let mig_del = client
         .execute(
-            "DELETE FROM aqueduct.migrations WHERE project = $1",
+            &sch_str("DELETE FROM aqueduct.migrations WHERE project = $1"),
             &[&options.project],
         )
         .await
@@ -291,7 +308,7 @@ pub async fn destroy_project(
     // Delete dag_versions.
     let ver_del = client
         .execute(
-            "DELETE FROM aqueduct.dag_versions WHERE project = $1",
+            &sch_str("DELETE FROM aqueduct.dag_versions WHERE project = $1"),
             &[&options.project],
         )
         .await
@@ -301,7 +318,7 @@ pub async fn destroy_project(
     // Delete stream_table_ownership rows (best-effort; table may not exist in v2 catalogs).
     client
         .execute(
-            "DELETE FROM aqueduct.stream_table_ownership WHERE project = $1",
+            &sch_str("DELETE FROM aqueduct.stream_table_ownership WHERE project = $1"),
             &[&options.project],
         )
         .await
@@ -331,6 +348,7 @@ mod tests {
             dry_run: true,
             force_cascade: false,
             force_unowned: false,
+            catalog_schema: crate::catalog::CatalogSchema::default(),
         };
         assert!(opts.dry_run);
     }

@@ -3,6 +3,27 @@
 //! Replaces direct `println!`/`eprintln!` calls with a typed emitter so that
 //! `--quiet`, `--porcelain`, and `--log-format json` behave consistently
 //! across every subcommand (ERG-1, M11).
+//!
+//! A process-wide singleton is stored in `EMITTER` via [`std::sync::OnceLock`].
+//! Command handlers obtain the global instance via [`emitter()`].
+
+use std::sync::OnceLock;
+
+/// Process-wide singleton emitter (M-1 / v0.20).
+static EMITTER: OnceLock<OutputEmitter> = OnceLock::new();
+
+/// Initialise the global emitter.  Must be called once in `main` before any
+/// command handler runs.  Subsequent calls are silently ignored (OnceLock
+/// semantics).
+pub fn init_emitter(mode: OutputMode) {
+    let _ = EMITTER.set(OutputEmitter::new(mode));
+}
+
+/// Return a reference to the global emitter.  Falls back to a [`OutputMode::Human`]
+/// emitter if `init_emitter` was never called (e.g. in unit tests).
+pub fn emitter() -> &'static OutputEmitter {
+    EMITTER.get_or_init(|| OutputEmitter::new(OutputMode::Human))
+}
 
 /// Output mode selected by global CLI flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

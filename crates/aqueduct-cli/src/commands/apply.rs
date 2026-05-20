@@ -96,21 +96,18 @@ pub async fn run(args: ApplyArgs) -> anyhow::Result<()> {
 
     // S-07: For dry-run mode, use a plain connect() to avoid accidentally
     // upgrading the catalog schema when only previewing.
+    // Load config early so we can get catalog_schema for connect_and_migrate.
+    let config = AqueductConfig::load(&args.project_dir).ok();
+    let catalog_schema = config
+        .as_ref()
+        .and_then(|c| aqueduct_core::catalog::CatalogSchema::new(&c.project.catalog_schema).ok())
+        .unwrap_or_default();
+
     let client = if args.dry_run {
         super::connect(&dsn).await?
     } else {
-        super::connect_and_migrate(&dsn).await?
+        super::connect_and_migrate(&dsn, &catalog_schema).await?
     };
-
-    // Load config.
-    let config = AqueductConfig::load(&args.project_dir).ok();
-
-    // ARCH-1 (v0.19): Reject non-default catalog schema until full
-    // parameterised SQL substitution is implemented in v0.20.
-    if let Some(ref cfg) = config {
-        aqueduct_core::catalog::validate_catalog_schema_not_overridden(&cfg.project.catalog_schema)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-    }
 
     let vars = config
         .as_ref()
@@ -129,10 +126,11 @@ pub async fn run(args: ApplyArgs) -> anyhow::Result<()> {
     // Read migration files.
     let files = aqueduct_core::parser::load_migrations(&args.project_dir, &vars)?;
     let desired = build_dag_state(&files, true)?;
-    let actual = read_live_state(&client, Some(&project_name)).await?;
+    let actual = read_live_state(&client, Some(&project_name), &catalog_schema).await?;
 
     let current_version =
-        aqueduct_core::live_state::get_latest_dag_version(&client, &project_name).await?;
+        aqueduct_core::live_state::get_latest_dag_version(&client, &project_name, &catalog_schema)
+            .await?;
     let next_version = current_version.map(|v| v + 1).unwrap_or(1);
 
     let diff = compute_diff(&desired, &actual);
@@ -274,6 +272,7 @@ pub async fn run(args: ApplyArgs) -> anyhow::Result<()> {
         .with_force_skip(args.force_skip)
         .with_connection_string(dsn.clone())
         .with_desired_state(desired)
+        .with_catalog_schema(catalog_schema)
         .with_patroni_endpoint(args.patroni_endpoint.clone());
 
     // v0.17 / metrics feature: Start Prometheus scrape endpoint if requested.
