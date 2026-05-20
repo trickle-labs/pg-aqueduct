@@ -73,9 +73,14 @@ pub async fn run(args: RollbackArgs) -> anyhow::Result<()> {
     let dsn =
         super::resolve_dsn(args.dsn.as_deref(), args.to.as_deref(), &args.project_dir).await?;
 
-    let client = connect_and_migrate(&dsn).await?;
-
     let config = AqueductConfig::load(&args.project_dir).ok();
+    let catalog_schema = config
+        .as_ref()
+        .and_then(|c| aqueduct_core::catalog::CatalogSchema::new(&c.project.catalog_schema).ok())
+        .unwrap_or_default();
+
+    let client = connect_and_migrate(&dsn, &catalog_schema).await?;
+
     let project_name = config
         .as_ref()
         .map(|c| c.project.name.clone())
@@ -83,7 +88,8 @@ pub async fn run(args: RollbackArgs) -> anyhow::Result<()> {
 
     // Get the current version.
     let current_version =
-        aqueduct_core::live_state::get_latest_dag_version(&client, &project_name).await?;
+        aqueduct_core::live_state::get_latest_dag_version(&client, &project_name, &catalog_schema)
+            .await?;
     let Some(current_v) = current_version else {
         anyhow::bail!(
             "No version history found for project '{}'. Cannot roll back.",
@@ -147,7 +153,7 @@ pub async fn run(args: RollbackArgs) -> anyhow::Result<()> {
         let files = aqueduct_core::parser::load_migrations(&args.project_dir, &vars)?;
         aqueduct_core::dag::build_dag_state(&files, true)?
     };
-    let actual = read_live_state(&client, Some(&project_name)).await?;
+    let actual = read_live_state(&client, Some(&project_name), &catalog_schema).await?;
 
     let next_version = current_v + 1;
     let diff = compute_diff(&desired, &actual);
@@ -268,7 +274,8 @@ pub async fn run(args: RollbackArgs) -> anyhow::Result<()> {
 
     let executor = PlanExecutor::new(&client, &project_name, env!("CARGO_PKG_VERSION"), false)
         .with_desired_state(desired)
-        .with_connection_string(dsn.clone());
+        .with_connection_string(dsn.clone())
+        .with_catalog_schema(catalog_schema);
     let result = executor.execute(&plan).await?;
 
     println!("✓ Rollback applied. New version: v{}", result.dag_version);

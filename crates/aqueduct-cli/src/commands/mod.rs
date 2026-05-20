@@ -157,9 +157,12 @@ fn sanitize_statement_timeout(timeout: &str) -> Option<&str> {
 }
 
 /// Connect and ensure the aqueduct catalog is up-to-date.
-pub async fn connect_and_migrate(dsn: &str) -> Result<tokio_postgres::Client> {
+pub async fn connect_and_migrate(
+    dsn: &str,
+    schema: &aqueduct_core::catalog::CatalogSchema,
+) -> Result<tokio_postgres::Client> {
     let client = connect(dsn).await?;
-    aqueduct_core::catalog::ensure_catalog_current(&client).await?;
+    aqueduct_core::catalog::ensure_catalog_current(&client, schema).await?;
     Ok(client)
 }
 

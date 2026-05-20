@@ -9,6 +9,73 @@ For planned future versions, see [ROADMAP.md](ROADMAP.md).
 
 ## [Unreleased]
 
+## [0.20.0] - 2025-07-14
+
+This release delivers the three high-priority architectural improvements identified in the Phase 4 engineering assessment: typed executor configuration, full multi-tenant catalog parameterisation, and automated crash recovery via the compensating-step registry.
+
+The `ExecutionContext` struct replaces the optional builder pattern for the two safety-critical executor fields (`desired_state` and `connection_string`), making it a compile error to omit them. All command handlers (`apply`, `rollback`, `promote`) have been updated accordingly.
+
+Every catalog SQL constant now accepts a `CatalogSchema` parameter and substitutes the schema name via `for_schema()`. The `validate_catalog_schema_not_overridden()` stop-gap from v0.19 is removed. `aqueduct init --schema my_catalog` creates all catalog tables in `my_catalog`; the multi-tenant isolation integration test verifies that two projects on the same database with different catalog schemas have fully independent version histories.
+
+The `--resume` flow now queries `aqueduct.ddl_log` for rows in `status = 'running'` before advancing to the checkpoint. For each such row the compensating SQL is executed and the row is updated to `status = 'compensated'`. A new integration test covers the crash-after-DDL, before-RecordSnapshot scenario.
+
+The `OutputEmitter` is now stored as a process-wide singleton via `OnceLock`, initialised in `main` before command dispatch and accessible via `output::emitter()`. The `init` command is the first to use the emitter for its success messages.
+
+The `httpmock` dependency was replaced with `wiremock` in v0.17, eliminating the last `cargo audit --deny warnings` finding (RUSTSEC-2025-0052).
+
+The catalog schema version advances from 8 to 9, adding a `status` column to `aqueduct.ddl_log` used by compensating-step recovery.
+
+### Added
+
+- **Typed `ExecutionContext` struct (ARCH-2):** `ExecutionContext` struct with required
+  `desired_state` and `connection_string` fields replaces the optional builder pattern.
+  Omitting either field is now a compile error. `for_apply()`, `for_rollback()`, and
+  `for_promote()` constructors updated.
+- **Full catalog schema parameterisation (ARCH-1):** `CatalogSchema` threaded through
+  every catalog SQL function. `ensure_catalog_current()`, `connect_and_migrate()`,
+  `read_live_state()`, `get_latest_dag_version()`, `detect_extension_installed()`,
+  `read_ddl_log()`, `import_from_live()`, `compute_promotion_plan()`,
+  `validate_source_clean()`, and `destroy_project()` all accept `&CatalogSchema`.
+  `validate_catalog_schema_not_overridden()` stop-gap removed.
+- **Multi-tenant catalog isolation test:** `test_multi_tenant_catalog_isolation` verifies
+  that two catalogs (`tenant_a`, `tenant_b`) on the same database have independent
+  `dag_versions` tables with no cross-contamination.
+- **Automated compensating-step recovery (CORR-2):** `find_resume_step()` queries
+  `aqueduct.ddl_log` for `status = 'running'` rows and executes their `compensating_sql`
+  via `batch_execute` before advancing to the resume checkpoint. Rows are updated to
+  `status = 'compensated'` on success.
+- **`COMPLETE_COMPENSATING_STEP_SQL` and `MARK_COMPENSATING_APPLIED_SQL` constants** in
+  `catalog.rs` for the two-phase compensating-step lifecycle.
+- **CORR-2 crash recovery integration test:** `test_corr2_compensating_step_recovery`
+  inserts a synthetic `status = 'running'` ddl_log row and verifies that `--resume` moves
+  it out of the `running` state.
+- **Catalog schema version 9:** `CATALOG_SCHEMA_VERSION` advances from 8 to 9. The v8→v9
+  migration adds a `status TEXT NOT NULL DEFAULT 'complete'` column to `aqueduct.ddl_log`
+  and backfills existing rows.
+- **`OutputEmitter` process-wide singleton (M-1):** `output::init_emitter(mode)` stores
+  the emitter in a `static OnceLock<OutputEmitter>`; `output::emitter()` returns the
+  global reference. `main.rs` calls `init_emitter` before dispatch. The `init` command
+  uses the emitter for its success messages, replacing direct `println!` calls.
+
+### Changed
+
+- `for_schema(sql, schema)` now substitutes `= 'aqueduct'` string-literal comparisons
+  and `CREATE/DROP SCHEMA IF NOT EXISTS aqueduct` statements in addition to the
+  `aqueduct.` dot-prefix references.
+- `DestroyOptions` gains a `catalog_schema: CatalogSchema` field.
+- All `cargo check --tests` call sites for `read_live_state`, `get_latest_dag_version`,
+  `detect_extension_installed`, `read_ddl_log`, `import_from_live`,
+  `compute_promotion_plan`, `validate_source_clean`, and `DestroyOptions::new` updated
+  throughout CLI commands and integration tests.
+- Workspace version bumped `0.19.0` → `0.20.0`.
+
+### Fixed
+
+- `executor.rs:import_from_live` was calling `read_live_state(client, None)` (2-arg form)
+  instead of the 3-arg `read_live_state(client, None, catalog_schema)`. Fixed.
+- Extra trailing semicolons (`await?;;`) in `commands/promote.rs` and `commands/status.rs`
+  introduced by the multi-replace pass. Removed.
+
 ## [0.19.0] - 2026-05-20
 
 This release eliminates every structural correctness bug identified in the Phase 4 engineering assessment, makes the blue/green view swap fully atomic, and ensures every known correctness regression path is covered by a test that would catch it.

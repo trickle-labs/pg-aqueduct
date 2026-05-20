@@ -60,13 +60,18 @@ pub async fn run(args: DestroyArgs) -> anyhow::Result<()> {
 
     // M-5 (v0.18): use connect_and_migrate so a stale catalog is auto-migrated
     // before destroy queries it, preventing missing-column errors.
-    let client = connect_and_migrate(&dsn).await?;
+    let catalog_schema = config
+        .as_ref()
+        .and_then(|c| aqueduct_core::catalog::CatalogSchema::new(&c.project.catalog_schema).ok())
+        .unwrap_or_default();
+    let client = connect_and_migrate(&dsn, &catalog_schema).await?;
 
     let options = DestroyOptions {
         project: project_name.clone(),
         dry_run: args.dry_run,
         force_cascade: args.force_cascade,
         force_unowned: args.force_unowned,
+        catalog_schema: catalog_schema.clone(),
     };
 
     let result = destroy_project(&client, &options).await?;

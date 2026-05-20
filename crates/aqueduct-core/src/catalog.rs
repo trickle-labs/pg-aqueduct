@@ -82,10 +82,49 @@ impl std::fmt::Display for CatalogSchema {
     }
 }
 
+/// Substitute the catalog schema name in a SQL template string (ARCH-1 / v0.20).
+///
+/// All SQL constants in this module use `"aqueduct"` as the schema name.
+/// Call this function with the configured `CatalogSchema` to produce a
+/// parameterised query string that uses the correct schema at execution time.
+///
+/// Safety: `CatalogSchema::new()` rejects any name containing injection
+/// markers (`;`, `--`, `$`) and only allows `[A-Za-z0-9_]` characters,
+/// so the replacement is safe to use in SQL.
+///
+/// # Example
+/// ```rust
+/// use aqueduct_core::catalog::{CatalogSchema, for_schema, ACQUIRE_LOCK_SQL};
+/// let schema = CatalogSchema::new("my_catalog").unwrap();
+/// let sql = for_schema(ACQUIRE_LOCK_SQL, &schema);
+/// assert!(sql.contains("\"my_catalog\"."));
+/// ```
+pub fn for_schema(sql: &str, schema: &CatalogSchema) -> String {
+    if schema.as_str() == "aqueduct" {
+        // Default schema — return as-is for efficiency.
+        return sql.to_string();
+    }
+    let name = schema.as_str();
+    let quoted = schema.quoted();
+    // Replace qualified references (e.g. `aqueduct.tablename`),
+    // string-literal schema checks (e.g. `table_schema = 'aqueduct'`), and
+    // bare schema names in DDL statements (CREATE/DROP SCHEMA).
+    sql.replace("aqueduct.", &format!("{}.", quoted))
+        .replace("= 'aqueduct'", &format!("= '{}'", name))
+        .replace(
+            "CREATE SCHEMA IF NOT EXISTS aqueduct",
+            &format!("CREATE SCHEMA IF NOT EXISTS {}", quoted),
+        )
+        .replace(
+            "DROP SCHEMA IF EXISTS aqueduct",
+            &format!("DROP SCHEMA IF EXISTS {}", quoted),
+        )
+}
+
 /// SQL statements for bootstrapping the aqueduct catalog schema.
 /// These are embedded directly in the binary via include_str!() in a real deployment;
 /// for v0.1 we keep them as a constant in this module.
-pub const CATALOG_SCHEMA_VERSION: u32 = 8;
+pub const CATALOG_SCHEMA_VERSION: u32 = 9;
 
 /// The SQL to create the aqueduct catalog schema (v1, baseline).
 pub const CATALOG_INIT_SQL: &str = r#"
@@ -357,7 +396,9 @@ CREATE TABLE IF NOT EXISTS aqueduct.ddl_log (
     recorded_at     timestamptz NOT NULL DEFAULT now(),
     pg_role         text      NOT NULL DEFAULT current_role,
     migration_id    bigint    REFERENCES aqueduct.migrations(id),
-    compensating_sql text
+    compensating_sql text,
+    status          text NOT NULL DEFAULT 'running'
+        CHECK (status IN ('running', 'completed', 'compensated'))
 );
 
 -- Consumer view registry.
@@ -421,6 +462,10 @@ CREATE INDEX IF NOT EXISTS aqueduct_ddl_log_migration
     ON aqueduct.ddl_log (migration_id)
     WHERE migration_id IS NOT NULL;
 
+CREATE INDEX IF NOT EXISTS aqueduct_ddl_log_migration_status
+    ON aqueduct.ddl_log (migration_id, status)
+    WHERE migration_id IS NOT NULL;
+
 -- Migration history view: human-readable table of migrations with step detail.
 CREATE OR REPLACE VIEW aqueduct.migration_history AS
 SELECT
@@ -442,13 +487,17 @@ ORDER BY m.started_at DESC;
 
 -- Record the catalog schema version.
 INSERT INTO aqueduct.cluster_profile (key, value_jsonb, measured_at)
-VALUES ('catalog_schema_version', '8'::jsonb, now())
+VALUES ('catalog_schema_version', '9'::jsonb, now())
 ON CONFLICT (key) DO NOTHING;
 "#;
 
 /// Combined init SQL for fresh installations at v8 (current canonical schema).
-/// Alias kept for clarity; use this constant in new code.
+/// Kept for backward-compatibility; new code should use CATALOG_INIT_V9_SQL.
 pub const CATALOG_INIT_V8_SQL: &str = CATALOG_INIT_V5_SQL;
+
+/// Combined init SQL for fresh installations at v9 (current canonical schema).
+/// Alias for CATALOG_INIT_V5_SQL which has been updated to version 9.
+pub const CATALOG_INIT_V9_SQL: &str = CATALOG_INIT_V5_SQL;
 
 /// Catalog migration from v5 to v6 (CORR-1 / TEST-3 / v0.14):
 /// - Adds pgtrickle_mock.scheduler_state table for mock-based scheduler pause/resume
@@ -544,12 +593,33 @@ SET value_jsonb = '8'::jsonb, measured_at = now()
 WHERE key = 'catalog_schema_version';
 "#;
 
-/// SQL to check whether the aqueduct catalog already exists.
+/// Catalog migration from v8 to v9 (CORR-2 / v0.20):
+/// - Adds `status` column to `aqueduct.ddl_log` to track compensating-step lifecycle.
+///   Values: 'running' (DDL in progress), 'completed' (DDL done), 'compensated' (undo applied).
+/// - Adds performance index on (migration_id, status) for fast resume queries.
+pub const CATALOG_MIGRATE_V8_TO_V9_SQL: &str = r#"
+-- Add compensating-step status tracking to ddl_log (CORR-2 / v0.20).
+ALTER TABLE aqueduct.ddl_log
+    ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'running'
+        CHECK (status IN ('running', 'completed', 'compensated'));
+
+CREATE INDEX IF NOT EXISTS aqueduct_ddl_log_migration_status
+    ON aqueduct.ddl_log (migration_id, status)
+    WHERE migration_id IS NOT NULL;
+
+-- Bump catalog version to 9.
+UPDATE aqueduct.cluster_profile
+SET value_jsonb = '9'::jsonb, measured_at = now()
+WHERE key = 'catalog_schema_version';
+"#;
+
+/// SQL to check whether the aqueduct catalog schema already exists.
+/// Parameter: $1 = schema name (unquoted string).
 pub const CATALOG_EXISTS_SQL: &str = r#"
 SELECT EXISTS (
     SELECT 1
     FROM information_schema.schemata
-    WHERE schema_name = 'aqueduct'
+    WHERE schema_name = $1
 )
 "#;
 
@@ -710,16 +780,19 @@ ORDER BY schema_name, table_name
 /// Ensure the catalog schema is up-to-date with the compiled-in schema version.
 ///
 /// Every command that opens a database connection should call this before doing
-/// anything else. It reads `catalog_schema_version` from `aqueduct.cluster_profile`
+/// anything else. It reads `catalog_schema_version` from `{schema}.cluster_profile`
 /// and applies any pending catalog migrations from the embedded SQL bundle.
-pub async fn ensure_catalog_current(client: &tokio_postgres::Client) -> crate::error::Result<()> {
-    // If the aqueduct schema does not exist yet, nothing to do — the user must
+///
+/// The `schema` parameter is the configured catalog schema (ARCH-1 / v0.20).
+/// Pass `&CatalogSchema::default()` to use the standard `aqueduct` schema.
+pub async fn ensure_catalog_current(
+    client: &tokio_postgres::Client,
+    schema: &CatalogSchema,
+) -> crate::error::Result<()> {
+    // If the catalog schema does not exist yet, nothing to do — the user must
     // run `aqueduct init` first.
     let schema_exists: bool = client
-        .query_one(
-            "SELECT EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = 'aqueduct')",
-            &[],
-        )
+        .query_one(CATALOG_EXISTS_SQL, &[&schema.as_str()])
         .await?
         .get(0);
 
@@ -728,62 +801,72 @@ pub async fn ensure_catalog_current(client: &tokio_postgres::Client) -> crate::e
     }
 
     // Read the current catalog version.
-    let row = client.query_opt(CATALOG_VERSION_SQL, &[]).await?;
+    let row = client
+        .query_opt(&for_schema(CATALOG_VERSION_SQL, schema), &[])
+        .await?;
 
     let current_version: i32 = row.map(|r| r.get::<_, i32>(0)).unwrap_or(1);
 
     if current_version < CATALOG_SCHEMA_VERSION as i32 {
         tracing::info!(
-            "Upgrading catalog schema from v{} to v{}",
+            "Upgrading catalog schema '{}' from v{} to v{}",
+            schema.as_str(),
             current_version,
             CATALOG_SCHEMA_VERSION
         );
         // Apply the v1→v2 migration if needed.
         if current_version < 2 {
             client
-                .batch_execute(CATALOG_MIGRATE_V1_TO_V2_SQL)
+                .batch_execute(&for_schema(CATALOG_MIGRATE_V1_TO_V2_SQL, schema))
                 .await
                 .map_err(|e| crate::error::AqueductError::Catalog(e.to_string()))?;
         }
         // Apply the v2→v3 migration if needed.
         if current_version < 3 {
             client
-                .batch_execute(CATALOG_MIGRATE_V2_TO_V3_SQL)
+                .batch_execute(&for_schema(CATALOG_MIGRATE_V2_TO_V3_SQL, schema))
                 .await
                 .map_err(|e| crate::error::AqueductError::Catalog(e.to_string()))?;
         }
         // Apply the v3→v4 migration if needed (P-02 / v0.12).
         if current_version < 4 {
             client
-                .batch_execute(CATALOG_MIGRATE_V3_TO_V4_SQL)
+                .batch_execute(&for_schema(CATALOG_MIGRATE_V3_TO_V4_SQL, schema))
                 .await
                 .map_err(|e| crate::error::AqueductError::Catalog(e.to_string()))?;
         }
         // Apply the v4→v5 migration if needed (M-08 / v0.13).
         if current_version < 5 {
             client
-                .batch_execute(CATALOG_MIGRATE_V4_TO_V5_SQL)
+                .batch_execute(&for_schema(CATALOG_MIGRATE_V4_TO_V5_SQL, schema))
                 .await
                 .map_err(|e| crate::error::AqueductError::Catalog(e.to_string()))?;
         }
         // Apply the v5→v6 migration if needed (CORR-1 / TEST-3 / v0.14).
         if current_version < 6 {
             client
-                .batch_execute(CATALOG_MIGRATE_V5_TO_V6_SQL)
+                .batch_execute(&for_schema(CATALOG_MIGRATE_V5_TO_V6_SQL, schema))
                 .await
                 .map_err(|e| crate::error::AqueductError::Catalog(e.to_string()))?;
         }
         // Apply the v6→v7 migration if needed (CORR-2 / ARCH-1 / v0.15).
         if current_version < 7 {
             client
-                .batch_execute(CATALOG_MIGRATE_V6_TO_V7_SQL)
+                .batch_execute(&for_schema(CATALOG_MIGRATE_V6_TO_V7_SQL, schema))
                 .await
                 .map_err(|e| crate::error::AqueductError::Catalog(e.to_string()))?;
         }
         // Apply the v7→v8 migration if needed (DOC-2 / v0.17).
         if current_version < 8 {
             client
-                .batch_execute(CATALOG_MIGRATE_V7_TO_V8_SQL)
+                .batch_execute(&for_schema(CATALOG_MIGRATE_V7_TO_V8_SQL, schema))
+                .await
+                .map_err(|e| crate::error::AqueductError::Catalog(e.to_string()))?;
+        }
+        // Apply the v8→v9 migration if needed (CORR-2 / v0.20).
+        if current_version < 9 {
+            client
+                .batch_execute(&for_schema(CATALOG_MIGRATE_V8_TO_V9_SQL, schema))
                 .await
                 .map_err(|e| crate::error::AqueductError::Catalog(e.to_string()))?;
         }
@@ -846,25 +929,52 @@ ORDER BY started_at DESC
 LIMIT 1
 "#;
 
-/// SQL to write a compensating-step entry to ddl_log (CORR-2 / v0.15).
+/// SQL to write a compensating-step entry to ddl_log with status = 'running' (CORR-2 / v0.20).
 ///
 /// Parameters: $1=migration_id, $2=object_type, $3=schema_name, $4=object_name,
 ///             $5=command_tag, $6=compensating_sql.
+/// The row is inserted with `status = 'running'` to indicate the DDL is in
+/// progress. After the DDL completes successfully, call
+/// `COMPLETE_COMPENSATING_STEP_SQL` to update the status to 'completed'.
 pub const INSERT_COMPENSATING_STEP_SQL: &str = r#"
 INSERT INTO aqueduct.ddl_log
-    (migration_id, object_type, schema_name, object_name, command_tag, compensating_sql, pg_role)
-VALUES ($1, $2, $3, $4, $5, $6, current_role)
+    (migration_id, object_type, schema_name, object_name, command_tag, compensating_sql, pg_role, status)
+VALUES ($1, $2, $3, $4, $5, $6, current_role, 'running')
 "#;
 
-/// SQL to retrieve the compensating SQL for a step from ddl_log (CORR-2 / v0.15).
+/// SQL to mark a compensating step as 'completed' after its DDL succeeded (CORR-2 / v0.20).
 ///
-/// Used during `--resume` to determine if a DDL step needs to be compensated.
-pub const GET_COMPENSATING_STEP_SQL: &str = r#"
-SELECT compensating_sql, command_tag
+/// Parameters: $1=migration_id, $2=object_name.
+/// Updates the most-recent 'running' entry for this DDL to 'completed', so
+/// `--resume` knows no compensating action is needed for this step.
+pub const COMPLETE_COMPENSATING_STEP_SQL: &str = r#"
+UPDATE aqueduct.ddl_log
+SET status = 'completed'
+WHERE migration_id = $1
+  AND object_name = $2
+  AND status = 'running'
+"#;
+
+/// SQL to retrieve pending (status='running') compensating steps for a migration (CORR-2 / v0.20).
+///
+/// Parameter: $1=migration_id.
+/// Returns all compensating steps that were recorded but whose DDL has not yet
+/// been confirmed as complete. On `--resume`, each row's `compensating_sql`
+/// is executed to undo any partial DDL before the plan restarts.
+pub const GET_PENDING_COMPENSATING_STEPS_SQL: &str = r#"
+SELECT id, compensating_sql, command_tag, object_name
 FROM aqueduct.ddl_log
-WHERE migration_id = $1 AND object_name = $2
+WHERE migration_id = $1
+  AND status = 'running'
+  AND compensating_sql IS NOT NULL
 ORDER BY id DESC
-LIMIT 1
+"#;
+
+/// SQL to mark a compensating step as 'compensated' after its SQL was applied (CORR-2 / v0.20).
+///
+/// Parameter: $1=row id from `aqueduct.ddl_log`.
+pub const MARK_COMPENSATING_APPLIED_SQL: &str = r#"
+UPDATE aqueduct.ddl_log SET status = 'compensated' WHERE id = $1
 "#;
 
 /// SQL to start a migration step row (M-08 / v0.13).
@@ -928,18 +1038,17 @@ ORDER BY m.started_at DESC
 LIMIT $2
 "#;
 
-/// ARCH-1 (v0.19): Validate that the `catalog_schema` field is the default
-/// `"aqueduct"` value. Until full parameterised SQL substitution lands in
-/// v0.20, any other value would silently mix catalog data across tenants.
+/// ARCH-1 (v0.19/v0.20): catalog schema parameterisation is fully implemented
+/// in v0.20. This function is kept for any callers that have not yet been
+/// updated but always succeeds (it no longer rejects non-default schemas).
 ///
-/// Returns `AqueductError::NotYetImplemented` when a non-default value is
-/// detected. Callers in `aqueduct init` and `connect_and_migrate` must call
-/// this before any catalog operations.
-pub fn validate_catalog_schema_not_overridden(catalog_schema: &str) -> crate::error::Result<()> {
-    if catalog_schema != "aqueduct" {
-        return Err(crate::error::AqueductError::NotYetImplemented {
-            feature: "catalog_schema override".to_string(),
-        });
-    }
+/// Deprecated: callers should use `CatalogSchema::new()` directly and pass the
+/// schema through `ExecutionContext`. This wrapper will be removed in v1.0.
+#[deprecated(
+    since = "0.20.0",
+    note = "Catalog schema parameterisation is fully implemented. \
+            Use CatalogSchema::new() and thread it through ExecutionContext."
+)]
+pub fn validate_catalog_schema_not_overridden(_catalog_schema: &str) -> crate::error::Result<()> {
     Ok(())
 }

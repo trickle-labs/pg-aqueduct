@@ -1,7 +1,8 @@
-use aqueduct_core::catalog::CATALOG_INIT_V4_SQL;
+use aqueduct_core::catalog::{for_schema, CatalogSchema, CATALOG_INIT_V9_SQL};
 use clap::Args;
 
 use super::connect;
+use crate::output::emitter;
 
 #[derive(Debug, Args)]
 pub struct InitArgs {
@@ -31,10 +32,7 @@ pub struct InitArgs {
 }
 
 pub async fn run(args: InitArgs) -> anyhow::Result<()> {
-    // ARCH-1 (v0.19): Reject non-default catalog schema until full
-    // parameterised SQL substitution is implemented in v0.20.
-    aqueduct_core::catalog::validate_catalog_schema_not_overridden(&args.schema)
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let catalog_schema = CatalogSchema::new(&args.schema).map_err(|e| anyhow::anyhow!("{}", e))?;
 
     let dsn = super::resolve_dsn_with_opts(
         args.dsn.as_deref(),
@@ -55,8 +53,10 @@ pub async fn run(args: InitArgs) -> anyhow::Result<()> {
         anyhow::bail!("Cannot initialise aqueduct catalog on a hot standby.");
     }
 
-    // Create the catalog schema (v4 — includes all tables and performance indexes).
-    client.batch_execute(CATALOG_INIT_V4_SQL).await?;
+    // Create the catalog schema (v9 — includes all tables and performance indexes).
+    client
+        .batch_execute(&for_schema(CATALOG_INIT_V9_SQL, &catalog_schema))
+        .await?;
 
     let pg_version: String = client.query_one("SELECT version()", &[]).await?.get(0);
 
@@ -77,21 +77,24 @@ pub async fn run(args: InitArgs) -> anyhow::Result<()> {
         None
     };
 
-    println!("✓ Aqueduct catalog initialised successfully.");
-    println!(
+    emitter().info("✓ Aqueduct catalog initialised successfully.");
+    emitter().info(&format!(
         "  PostgreSQL: {}",
         pg_version.lines().next().unwrap_or(&pg_version)
-    );
+    ));
     if let Some(v) = pgtrickle_version {
-        println!("  pg_trickle: {}", v);
+        emitter().info(&format!("  pg_trickle: {}", v));
     } else {
-        println!("  pg_trickle: not installed");
+        emitter().info("  pg_trickle: not installed");
     }
 
     // Scaffold project files if requested.
     if args.scaffold {
         scaffold_project(&args.project_dir)?;
-        println!("  Project scaffolded at {}", args.project_dir.display());
+        emitter().info(&format!(
+            "  Project scaffolded at {}",
+            args.project_dir.display()
+        ));
     }
 
     Ok(())

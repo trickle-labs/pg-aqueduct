@@ -47,16 +47,17 @@ pub async fn compute_promotion_plan(
     client: &tokio_postgres::Client,
     files: &[MigrationFile],
     options: &PromoteOptions,
+    catalog_schema: &crate::catalog::CatalogSchema,
 ) -> Result<Plan> {
     // Build the desired DAG state from the migration files.
     let desired = build_dag_state(files, true)?;
 
     // Read the live state from the destination environment, filtered by project
     // so tables owned by other projects are never diffed (CORR-4 / v0.14).
-    let actual = read_live_state(client, Some(&options.project)).await?;
+    let actual = read_live_state(client, Some(&options.project), catalog_schema).await?;
 
     // Get the current DAG version from the destination.
-    let current_version = get_latest_dag_version(client, &options.project).await?;
+    let current_version = get_latest_dag_version(client, &options.project, catalog_schema).await?;
     let next_version = current_version.map(|v| v + 1).unwrap_or(1);
 
     // Compute the diff.
@@ -82,10 +83,11 @@ pub async fn validate_source_clean(
     source_client: &tokio_postgres::Client,
     files: &[MigrationFile],
     project: &str,
+    catalog_schema: &crate::catalog::CatalogSchema,
 ) -> Result<()> {
     let desired = build_dag_state(files, false)?;
     // CORR-4: filter by project so tables from other projects are not included.
-    let actual = read_live_state(source_client, Some(project)).await?;
+    let actual = read_live_state(source_client, Some(project), catalog_schema).await?;
     let diff = compute_diff(&desired, &actual);
 
     if !diff.is_empty() {
@@ -97,7 +99,7 @@ pub async fn validate_source_clean(
     }
 
     // Ensure the source catalog is initialised.
-    let version = get_latest_dag_version(source_client, project).await?;
+    let version = get_latest_dag_version(source_client, project, catalog_schema).await?;
     if version.is_none() {
         return Err(AqueductError::Other(
             "Source environment catalog is not initialised. \

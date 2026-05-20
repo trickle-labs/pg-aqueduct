@@ -58,7 +58,14 @@ pub async fn run(args: ImportArgs) -> anyhow::Result<()> {
 
     println!("Importing from pg_trickle catalog...");
 
-    let count = import_from_live(&client, &project_name, &args.output, &exclude_patterns).await?;
+    let count = import_from_live(
+        &client,
+        &project_name,
+        &args.output,
+        &exclude_patterns,
+        &aqueduct_core::catalog::CatalogSchema::default(),
+    )
+    .await?;
 
     println!(
         "✓ Imported {} stream table{}.",

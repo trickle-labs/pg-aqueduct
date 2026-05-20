@@ -10,7 +10,7 @@ use commands::{
     apply, audit, destroy, diff, fmt, import, ingest, init, lint, plan, preview, promote, rollback,
     status, unlock, validate,
 };
-use output::{OutputEmitter, OutputMode};
+use output::OutputMode;
 
 /// Declarative schema evolution and migration for stream-table DAGs.
 #[derive(Debug, Parser)]
@@ -139,7 +139,9 @@ async fn main() {
         OutputMode::Human
     };
     // The emitter is available for use by command handlers that opt in.
-    let _emitter = OutputEmitter::new(output_mode);
+    // M-1 (v0.20): store as process-wide singleton so handlers can call
+    // `output::emitter()` without threading it through arguments.
+    output::init_emitter(output_mode);
 
     // ERG-1: set the process-wide quiet flag so command handlers that use
     // `commands::is_quiet()` can suppress decorative output.

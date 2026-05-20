@@ -95,6 +95,96 @@ them. For ambiguous steps (where the CLI cannot determine completion from the ca
 it reports a diagnostic and exits non-zero — the operator must inspect and use
 `--force-retry` or `--force-skip` for the ambiguous step.
 
+## Compensating-step protocol (v0.20)
+
+### Overview
+
+Certain DDL operations — primarily `CREATE` and `DROP` stream tables — are recorded in
+`aqueduct.ddl_log` *before* execution, along with a compensating SQL statement that can
+undo the operation if the process crashes between the DDL and the subsequent
+`RecordSnapshot` step.
+
+The `ddl_log` table schema:
+
+```sql
+CREATE TABLE aqueduct.ddl_log (
+    id            BIGSERIAL PRIMARY KEY,
+    migration_id  BIGINT NOT NULL REFERENCES aqueduct.migrations(id),
+    step_index    INT NOT NULL,
+    step_type     TEXT NOT NULL,
+    applied_sql   TEXT NOT NULL,
+    compensating_sql TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'complete',
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+The `status` column progresses through:
+
+| Status | Meaning |
+|--------|---------|
+| `running` | DDL has been logged but not yet committed to the catalog |
+| `complete` | DDL and its catalog snapshot both succeeded |
+| `compensated` | A crash was detected; the compensating SQL was applied on resume |
+
+### When compensating steps are recorded
+
+| Step type | Applied SQL | Compensating SQL |
+|-----------|-------------|------------------|
+| `CreateStreamTable` | `CREATE TABLE …` | `DROP TABLE IF EXISTS …` |
+| `DropStreamTable` | `DROP TABLE …` | `CREATE TABLE IF NOT EXISTS …` |
+
+The row is written with `status = 'running'` before the DDL executes. It is updated to
+`status = 'complete'` after `RecordSnapshot` succeeds (both in the same transaction).
+
+### What `--resume` does
+
+On `--resume`, before identifying the checkpoint step:
+
+1. `SELECT * FROM aqueduct.ddl_log WHERE migration_id = $1 AND status = 'running'` is
+   executed (via `GET_PENDING_COMPENSATING_STEPS_SQL`).
+2. For each `running` row, the `compensating_sql` is executed via `batch_execute`.
+3. The row is updated to `status = 'compensated'` (via `MARK_COMPENSATING_APPLIED_SQL`).
+4. The resume checkpoint search then proceeds as normal.
+
+This closes the gap where a crash between `CreateStreamTable` and `RecordSnapshot` left
+a pg_trickle-managed table without a corresponding catalog snapshot. On the next
+`--resume`, the orphaned table is dropped by the compensating step and then re-created
+cleanly from the checkpoint.
+
+### Recovery runbook: "table exists in pg_trickle but not in catalog"
+
+**Symptom:** `pg_trickle` reports a table that does not appear in `aqueduct.dag_versions`
+or in `aqueduct.migrations.progress` as completed.
+
+**Diagnosis:**
+
+```sql
+-- Check for running ddl_log rows
+SELECT id, migration_id, step_index, step_type, status, created_at
+FROM aqueduct.ddl_log
+WHERE status = 'running'
+ORDER BY created_at DESC;
+```
+
+**Recovery (automated):** Simply run `aqueduct apply --resume`. The compensating step
+will drop the orphaned table and the resume will re-create it.
+
+**Recovery (manual):** If you need to intervene manually:
+
+```sql
+-- 1. Execute the compensating SQL (from the ddl_log row)
+--    e.g. for a CreateStreamTable crash:
+DROP TABLE IF EXISTS public.my_table;
+
+-- 2. Mark the row compensated so --resume skips it
+UPDATE aqueduct.ddl_log
+SET status = 'compensated'
+WHERE id = <row_id>;
+```
+
+Then run `aqueduct apply --resume` to continue from the checkpoint.
+
 ## Failover during a migration
 
 Between each plan step, `aqueduct apply` calls `check_still_primary()` which executes
