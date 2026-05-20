@@ -3153,7 +3153,7 @@ SELECT customer_id, SUM(amount) AS total FROM raw_orders GROUP BY customer_id;
     // First normal apply to record progress.
     let executor = PlanExecutor::new(&db.client, "resume-test", "0.8.0", false)
         .with_desired_state(desired.clone())
-        .with_connection_string(db.connection_string.clone());
+        .with_connection_string(db.connection_string().to_string());
     let exec_result = executor.execute(&plan).await.expect("apply plan");
     assert_eq!(exec_result.dag_version, 1);
 
@@ -3200,7 +3200,7 @@ SELECT customer_id, SUM(amount) AS total FROM raw_orders GROUP BY customer_id;
 
     let executor = PlanExecutor::new(&db.client, "rollback-spec-test", "0.8.0", false)
         .with_desired_state(desired_v1.clone())
-        .with_connection_string(db.connection_string.clone());
+        .with_connection_string(db.connection_string().to_string());
     executor.execute(&plan_v1).await.expect("apply v1");
 
     // Verify spec_jsonb was recorded.
@@ -3266,7 +3266,7 @@ async fn test_alter_stream_table_query_update() {
 
     let executor = PlanExecutor::new(&db.client, "h1-test", "0.8.0", false)
         .with_desired_state(desired_v1)
-        .with_connection_string(db.connection_string.clone());
+        .with_connection_string(db.connection_string().to_string());
     executor.execute(&plan_v1).await.expect("apply v1");
 
     // V2: add a trailing column (in-place).
@@ -3294,7 +3294,7 @@ async fn test_alter_stream_table_query_update() {
 
     let executor = PlanExecutor::new(&db.client, "h1-test", "0.8.0", false)
         .with_desired_state(desired_v2)
-        .with_connection_string(db.connection_string.clone());
+        .with_connection_string(db.connection_string().to_string());
     executor.execute(&plan_v2).await.expect("apply v2 in-place");
 
     // Verify the mock pgt_stream_tables.query was updated to v2 query.
@@ -4597,7 +4597,7 @@ SELECT COUNT(*) AS cnt FROM public.resume_events;
     // Apply once successfully.
     let exec = PlanExecutor::new(&db.client, "resume-skip-test", "0.14.0", false)
         .with_desired_state(desired.clone())
-        .with_connection_string(db.connection_string.clone());
+        .with_connection_string(db.connection_string().to_string());
     exec.execute(&plan).await.expect("first apply");
 
     // Verify version was recorded.
@@ -4680,7 +4680,7 @@ SELECT id FROM public.proj_b_src;
     let plan_b = build_plan("project-b", None, 1, &diff_b, &topo_b).expect("plan b");
     PlanExecutor::for_apply(&db.client, "project-b", "0.14.0")
         .with_desired_state(desired_b)
-        .with_connection_string(db.connection_string.clone())
+        .with_connection_string(db.connection_string().to_string())
         .execute(&plan_b)
         .await
         .expect("apply project-b");
@@ -4750,7 +4750,7 @@ SELECT id FROM public.spec_src;
     // Apply with desired_state and connection_string (the CORR-5 path).
     let exec = PlanExecutor::new(&db.client, "spec-test", "0.14.0", false)
         .with_desired_state(desired)
-        .with_connection_string(db.connection_string.clone());
+        .with_connection_string(db.connection_string().to_string());
     let result = exec.execute(&plan).await.expect("apply");
     assert_eq!(result.dag_version, 1);
 
@@ -5361,7 +5361,7 @@ SELECT 1 AS id;
 
     PlanExecutor::new(&db.client, "rls-rebuild-proj", "0.15.0", false)
         .with_desired_state(desired_v1.clone())
-        .with_connection_string(db.connection_string.clone())
+        .with_connection_string(db.connection_string().to_string())
         .execute(&plan_v1)
         .await
         .expect("apply v1");
@@ -5428,7 +5428,7 @@ SELECT 1 AS renamed_id;
 
     PlanExecutor::new(&db.client, "rls-rebuild-proj", "0.15.0", false)
         .with_desired_state(desired_v2.clone())
-        .with_connection_string(db.connection_string.clone())
+        .with_connection_string(db.connection_string().to_string())
         .execute(&plan_v2)
         .await
         .expect("apply v2 rebuild");
@@ -5557,7 +5557,7 @@ SELECT 1 AS x
     // Apply the full blue/green plan.
     PlanExecutor::new(&db.client, "bg-lifecycle-proj", "0.15.0", false)
         .with_desired_state(desired.clone())
-        .with_connection_string(db.connection_string.clone())
+        .with_connection_string(db.connection_string().to_string())
         .execute(&plan)
         .await
         .expect("apply blue/green plan");

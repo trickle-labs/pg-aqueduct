@@ -67,16 +67,18 @@ pub async fn run(args: ValidateArgs) -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&output)?);
         }
         _ => {
-            println!(
-                "Validated {} migration file{}.",
-                total_files,
-                if total_files == 1 { "" } else { "s" }
-            );
-            for d in &diagnostics.diagnostics {
-                println!("  {}", d.render());
-            }
-            if errors.is_empty() && (!args.strict || warnings.is_empty()) {
-                println!("✓ All checks passed.");
+            if !super::is_quiet() {
+                println!(
+                    "Validated {} migration file{}.",
+                    total_files,
+                    if total_files == 1 { "" } else { "s" }
+                );
+                for d in &diagnostics.diagnostics {
+                    println!("  {}", d.render());
+                }
+                if errors.is_empty() && (!args.strict || warnings.is_empty()) {
+                    println!("✓ All checks passed.");
+                }
             }
         }
     }

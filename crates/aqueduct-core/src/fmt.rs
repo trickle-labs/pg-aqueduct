@@ -8,8 +8,11 @@
 
 use crate::parser::MigrationFile;
 
-/// Canonical order for front-matter keys.
-const CANONICAL_KEY_ORDER: &[&str] = &[
+/// Known front-matter keys used to filter out unknown/unsupported directives.
+///
+/// This list does **not** imply a canonical ordering; it is used by callers
+/// to distinguish known keys from unknown ones when parsing migration files.
+const KNOWN_FRONTMATTER_KEYS: &[&str] = &[
     "kind",
     "owned",
     "schema",
@@ -110,21 +113,31 @@ const SQL_KEYWORDS: &[&str] = &[
 /// Format a migration file's content according to canonical style.
 ///
 /// Returns the formatted content as a string, or `None` if the content is already
-/// canonical (no changes needed).
-pub fn format_migration(file: &MigrationFile) -> Option<String> {
+/// canonical (no changes needed).  Returns an `Err` if the file cannot be read.
+pub fn format_migration(file: &MigrationFile) -> crate::Result<Option<String>> {
     let formatted = render_migration(file);
-    let original = read_original_content(file);
+    let original = read_original_content(file)?;
 
     if formatted == original {
-        None
+        Ok(None)
     } else {
-        Some(formatted)
+        Ok(Some(formatted))
     }
 }
 
 /// Read the original content of a migration file from disk.
-fn read_original_content(file: &MigrationFile) -> String {
-    std::fs::read_to_string(&file.path).unwrap_or_default()
+///
+/// Returns an error (L2) rather than silently using an empty string when the
+/// file cannot be read. This ensures `aqueduct fmt` always surfaces IO
+/// problems instead of producing misleading "everything changed" output.
+fn read_original_content(file: &MigrationFile) -> crate::Result<String> {
+    std::fs::read_to_string(&file.path).map_err(|e| {
+        crate::AqueductError::Config(format!(
+            "cannot read migration file '{}': {}",
+            file.path.display(),
+            e
+        ))
+    })
 }
 
 /// Render a MigrationFile to its canonical string representation.
@@ -205,7 +218,7 @@ pub fn render_migration(file: &MigrationFile) -> String {
     extra_keys.sort();
     for key in &extra_keys {
         // Skip keys already emitted above.
-        if CANONICAL_KEY_ORDER.contains(&key.as_str()) {
+        if KNOWN_FRONTMATTER_KEYS.contains(&key.as_str()) {
             continue;
         }
         if let Some(val) = fm.unknown_keys.get(key) {
@@ -326,10 +339,16 @@ pub fn format_migrations(files: &[MigrationFile], check_only: bool) -> FmtResult
 
     for file in files {
         match format_migration(file) {
-            None => {
+            Err(e) => {
+                // L2: surface read errors instead of silently skipping.
+                result
+                    .errors
+                    .push((file.path.clone(), format!("read error: {}", e)));
+            }
+            Ok(None) => {
                 result.unchanged.push(file.path.clone());
             }
-            Some(formatted) => {
+            Ok(Some(formatted)) => {
                 if !check_only {
                     if let Err(e) = std::fs::write(&file.path, &formatted) {
                         result

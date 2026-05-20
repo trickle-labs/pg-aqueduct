@@ -197,32 +197,37 @@ pub async fn run(args: PlanArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Minimal YAML renderer for plan output (avoids adding a serde_yaml dependency).
+/// YAML renderer for plan output using serde_yaml (ERG-3).
+///
+/// Serialises the `Plan` struct directly so that special characters in project
+/// names (quotes, colons, newlines) are correctly escaped.
 fn render_plan_yaml(plan: &aqueduct_core::plan::Plan) -> String {
-    let mut out = String::new();
-    out.push_str(&format!("project: \"{}\"\n", plan.project));
-    out.push_str(&format!(
-        "from_version: {}\n",
-        plan.from_version
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "null".to_string())
-    ));
-    out.push_str(&format!("to_version: {}\n", plan.to_version));
-    out.push_str(&format!("is_empty: {}\n", plan.summary.is_empty()));
-    out.push_str(&format!("creates: {}\n", plan.summary.creates));
-    out.push_str(&format!("drops: {}\n", plan.summary.drops));
-    out.push_str(&format!("alters: {}\n", plan.summary.alters));
-    if plan.summary.changes.is_empty() {
-        out.push_str("changes: []\n");
-    } else {
-        out.push_str("changes:\n");
-        for ch in &plan.summary.changes {
-            out.push_str(&format!("  - name: \"{}\"\n", ch.name));
-            out.push_str(&format!("    class: \"{}\"\n", ch.class));
-            out.push_str(&format!("    description: \"{}\"\n", ch.description));
-        }
+    // Build a lightweight summary struct so the YAML output is stable and
+    // doesn't include internal executor-only fields.
+    #[derive(serde::Serialize)]
+    struct PlanYaml<'a> {
+        project: &'a str,
+        from_version: Option<u64>,
+        to_version: u64,
+        is_empty: bool,
+        creates: usize,
+        drops: usize,
+        alters: usize,
+        changes: &'a Vec<aqueduct_core::plan::PlanChange>,
     }
-    out
+
+    let doc = PlanYaml {
+        project: &plan.project,
+        from_version: plan.from_version,
+        to_version: plan.to_version,
+        is_empty: plan.summary.is_empty(),
+        creates: plan.summary.creates,
+        drops: plan.summary.drops,
+        alters: plan.summary.alters,
+        changes: &plan.summary.changes,
+    };
+
+    serde_yaml::to_string(&doc).unwrap_or_else(|e| format!("# YAML serialization error: {}\n", e))
 }
 
 fn load_config_and_vars(

@@ -9,6 +9,57 @@ For planned future versions, see [ROADMAP.md](ROADMAP.md).
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-05-20
+
+### Added
+
+- `OutputMode` enum (`Human`, `Json`, `Yaml`, `Quiet`, `Porcelain`) and
+  `OutputEmitter` struct in `aqueduct-cli::output`; global `--quiet` and
+  `--porcelain` flags are now routed through the emitter (ERG-1, M11).
+- `serde_yaml` workspace dependency; YAML output in `plan`, `status`, and `diff`
+  subcommands now uses `serde_yaml::to_string` instead of hand-rolled format strings,
+  correctly escaping quotes, colons, and newlines (ERG-3).
+- `just gen-docs` recipe that regenerates `docs/api-reference.md` from
+  `aqueduct --help` output; stale references to `--patroni-endpoint`, `--timeout`,
+  `--lock-timeout`, and `--no-cost` removed (ERG-4, M3).
+- Binary CLI tests (`assert_cmd`) for every subcommand's exit codes and `--help`
+  output: `quiet_suppresses_decorative_output`, `porcelain_outputs_key_value_only`,
+  `yaml_escapes_quotes_and_newlines`, `plan_help_documents_fail_if_changed`,
+  `apply_help_documents_dry_run`, `status_help_documents_fail_on_drift`,
+  `diff_help_documents_fail_on_drift`, `destroy_help_documents_dry_run`,
+  `rollback_help_documents_dry_run`, `plan_missing_dsn_exits_2`,
+  `validate_exits_0_on_valid_files`, `validate_differential_ivm_unsupportable_fails`,
+  `validate_format_json_produces_valid_json`, `version_flag_outputs_semver` (TEST-2).
+- `--poll-interval` flag on `aqueduct status` (PERF-2).
+- Spec-hash caching in `status --watch`: migration files are only reloaded when any
+  `.sql` mtime changes; live state always polled fresh (PERF-2).
+- `postgres_version_matrix_min_supported` integration test verifying the full
+  create/apply/status cycle on PostgreSQL 18+ (H10).
+- `CONTRIBUTING.md` documenting Docker/Testcontainers prerequisites, `just` recipes,
+  integration test environment variables, PG version matrix, coding standards, and
+  a step-by-step guide for adding cookbook recipes.
+
+### Changed
+
+- `fmt::format_migration` now returns `Result<Option<String>>` and propagates IO
+  errors; `aqueduct fmt` prints a diagnostic when a file cannot be read instead of
+  silently treating it as empty (L2).
+- `CANONICAL_KEY_ORDER` constant in `aqueduct-core::fmt` renamed to
+  `KNOWN_FRONTMATTER_KEYS` to reflect its actual role (L3).
+- `TestDb::connection_string` field visibility narrowed from `pub` to `pub(crate)`
+  to prevent external crates from depending on the internal representation (L14).
+- `docs/security.md`: AWS, GCP, and Vault secret backend rows updated from
+  "Planned (v0.12)" to "Implemented"; injected SQL trust-boundary note updated to
+  describe the `CatalogSchema` newtype introduced in v0.14.
+- `docs/api-reference.md` regenerated from `aqueduct --help` output.
+
+### Fixed
+
+- `aqueduct status --format yaml` now produces valid YAML that passes
+  `serde_yaml::from_str` round-trip including special characters.
+- `aqueduct plan --format yaml` correctly escapes project names containing
+  quotes, colons, and newlines.
+
 ## [0.15.0] - 2026-05-20
 
 ### Added

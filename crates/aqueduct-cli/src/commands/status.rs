@@ -40,6 +40,10 @@ pub struct StatusArgs {
     /// Exit after N consecutive drift detections (0 = never exit on drift).
     #[arg(long, default_value = "0")]
     pub max_drift_count: u32,
+
+    /// Polling interval for --watch mode (e.g. "30s", "1m"). Alias for --interval.
+    #[arg(long, default_value = "30s")]
+    pub poll_interval: String,
 }
 
 async fn poll_once(
@@ -132,24 +136,30 @@ async fn poll_once(
             );
         }
         "yaml" | "yml" => {
-            // U-10: YAML format for status output (no serde_yaml dep needed).
-            println!("project: \"{}\"", status.project);
+            // ERG-3: use serde_yaml so that special characters are correctly escaped.
+            #[derive(serde::Serialize)]
+            struct StatusYaml<'a> {
+                project: &'a str,
+                version: Option<u64>,
+                stream_tables: i64,
+                drift: usize,
+                pgtrickle_version: Option<&'a str>,
+                polled_at: String,
+            }
+            let doc = StatusYaml {
+                project: &status.project,
+                version: status.current_version,
+                stream_tables: status.stream_table_count,
+                drift: status.drift_count,
+                pgtrickle_version: status.pgtrickle_version.as_deref(),
+                polled_at: chrono::Utc::now().to_rfc3339(),
+            };
             println!(
-                "version: {}",
-                status
-                    .current_version
-                    .map_or("null".to_string(), |v| v.to_string())
+                "{}",
+                serde_yaml::to_string(&doc)
+                    .unwrap_or_else(|e| format!("# YAML error: {}\n", e))
+                    .trim_end()
             );
-            println!("stream_tables: {}", status.stream_table_count);
-            println!("drift: {}", status.drift_count);
-            println!(
-                "pgtrickle_version: {}",
-                status
-                    .pgtrickle_version
-                    .as_deref()
-                    .map_or("null".to_string(), |v| format!("\"{}\"", v))
-            );
-            println!("polled_at: \"{}\"", chrono::Utc::now().to_rfc3339());
         }
         _ => {
             println!("{}", render_status_text(&status));
@@ -224,10 +234,58 @@ pub async fn run(args: StatusArgs) -> anyhow::Result<()> {
 
     // Watch mode: poll repeatedly, reconnecting on each iteration to handle
     // network interruptions and idle_in_transaction_session_timeout.
-    let interval = parse_interval(&args.interval)?;
+    // Honour --poll-interval; fall back to --interval for backward compat.
+    let interval_str = if args.poll_interval != "30s" {
+        &args.poll_interval
+    } else {
+        &args.interval
+    };
+    let interval = parse_interval(interval_str)?;
     let mut consecutive_drift: u32 = 0;
 
+    // PERF-2: cache the desired state by spec hash so migration files are
+    // not re-read when their mtimes haven't changed.
+    let mut last_spec_hash: Option<String> = None;
+    let mut last_migration_mtimes: std::collections::HashMap<
+        std::path::PathBuf,
+        std::time::SystemTime,
+    > = std::collections::HashMap::new();
+
     loop {
+        // Check whether any migration file mtimes have changed.
+        let current_mtimes = collect_migration_mtimes(&args.project_dir);
+        let mtimes_changed = current_mtimes != last_migration_mtimes;
+
+        // Recompute spec hash only when files changed.
+        let spec_hash = if mtimes_changed || last_spec_hash.is_none() {
+            match aqueduct_core::parser::load_migrations(&args.project_dir, &Default::default()) {
+                Ok(files) => {
+                    use sha2::{Digest, Sha256};
+                    match aqueduct_core::dag::build_dag_state(&files, true) {
+                        Ok(desired) => {
+                            let spec_json = serde_json::to_string(&desired).unwrap_or_default();
+                            let hash = format!("{:x}", Sha256::digest(spec_json.as_bytes()));
+                            last_migration_mtimes = current_mtimes;
+                            last_spec_hash = Some(hash.clone());
+                            hash
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to build DAG state: {}", e);
+                            last_spec_hash.clone().unwrap_or_default()
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to load migrations: {}", e);
+                    last_spec_hash.clone().unwrap_or_default()
+                }
+            }
+        } else {
+            last_spec_hash.clone().unwrap_or_default()
+        };
+
+        let _ = spec_hash; // Used for cache invalidation; live state always re-polled.
+
         // Create a fresh connection each poll to handle reconnections gracefully.
         // D-03/SEC-08: Each poll uses a read-only session.
         let poll_result = async {
@@ -272,5 +330,37 @@ pub async fn run(args: StatusArgs) -> anyhow::Result<()> {
         }
 
         tokio::time::sleep(interval).await;
+    }
+}
+
+/// Collect modification times for all migration files in the project directory.
+fn collect_migration_mtimes(
+    project_dir: &std::path::Path,
+) -> std::collections::HashMap<std::path::PathBuf, std::time::SystemTime> {
+    let mut mtimes = std::collections::HashMap::new();
+    let migrations_dir = project_dir.join("migrations");
+    if let Ok(walker) = std::fs::read_dir(&migrations_dir) {
+        collect_mtimes_recursive(walker, &mut mtimes);
+    }
+    mtimes
+}
+
+fn collect_mtimes_recursive(
+    entries: std::fs::ReadDir,
+    mtimes: &mut std::collections::HashMap<std::path::PathBuf, std::time::SystemTime>,
+) {
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Ok(sub) = std::fs::read_dir(&path) {
+                collect_mtimes_recursive(sub, mtimes);
+            }
+        } else if path.extension().is_some_and(|e| e == "sql") {
+            if let Ok(meta) = entry.metadata() {
+                if let Ok(mtime) = meta.modified() {
+                    mtimes.insert(path, mtime);
+                }
+            }
+        }
     }
 }

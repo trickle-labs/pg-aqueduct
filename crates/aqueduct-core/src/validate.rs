@@ -231,6 +231,25 @@ pub fn validate_migration_files_diagnostic(files: &[MigrationFile]) -> Diagnosti
             }
         }
 
+        // Check IVM supportability for DIFFERENTIAL refresh mode files (TEST-2 / v0.16).
+        let is_differential = file
+            .front_matter
+            .refresh_mode
+            .as_deref()
+            .map(|m| m.eq_ignore_ascii_case("differential"))
+            .unwrap_or(false);
+        if is_differential && !file.sql_body.is_empty() {
+            if let Err(e) = validate_ivm_supportability(&file.sql_body, &file.name) {
+                set.push(
+                    Diagnostic::error("E102", e.to_string())
+                        .with_file(&file.path)
+                        .with_hint(
+                            "Use FULL refresh mode, or rewrite the query to be IVM-compatible",
+                        ),
+                );
+            }
+        }
+
         // Warn about unknown keys (U-09: include file path).
         for key in &file.unknown_keys {
             set.push(

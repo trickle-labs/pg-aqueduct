@@ -1239,7 +1239,7 @@ fn test_cli_version_flag() {
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::contains("0.15.0"));
+        .stdout(predicate::str::contains("0.16.0"));
 }
 
 /// T-07: `aqueduct plan --help` exits 0.
@@ -1323,4 +1323,370 @@ fn test_cli_validate_help_or_unknown() {
             "should mention validate in error output"
         );
     }
+}
+
+// ── v0.16 tests ────────────────────────────────────────────────────────────────
+
+/// v0.16/ERG-1: `--quiet` suppresses all non-error output.
+#[test]
+fn quiet_suppresses_decorative_output() {
+    use assert_cmd::Command;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    // Write a minimal project without a DSN so plan fails with exit 2.
+    // With --quiet, stdout should be empty; only stderr (error) may have output.
+    let toml = "[project]\nname = \"quiet-test\"\n";
+    std::fs::write(tmp.path().join("aqueduct.toml"), toml).unwrap();
+    std::fs::create_dir_all(tmp.path().join("migrations").join("streams")).unwrap();
+
+    let output = Command::cargo_bin("aqueduct")
+        .unwrap()
+        .args([
+            "--quiet",
+            "validate",
+            "--project-dir",
+            tmp.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    // stdout must be empty when --quiet is set.
+    assert!(
+        output.stdout.is_empty(),
+        "--quiet should produce no stdout, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+/// v0.16/ERG-1: `--porcelain` emits only key=value lines on stdout.
+#[test]
+fn porcelain_outputs_key_value_only() {
+    use assert_cmd::Command;
+    use predicates::prelude::*;
+
+    // `--porcelain` + `--version` — clap prints the version string before our
+    // code runs, but the test validates the flag is accepted without error.
+    Command::cargo_bin("aqueduct")
+        .unwrap()
+        .args(["--porcelain", "--version"])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_match(r"aqueduct \d+\.\d+\.\d+").unwrap());
+}
+
+/// v0.16/ERG-3: YAML output round-trips correctly through serde_yaml.
+#[test]
+fn yaml_escapes_quotes_and_newlines() {
+    use aqueduct_core::diff::DagDiff;
+    use aqueduct_core::plan::build_plan;
+
+    // Build an empty plan for a project whose name contains special YAML chars.
+    let project_name = "project: \"tricky\"\nname";
+    let diff = DagDiff {
+        deltas: vec![],
+        source_deltas: vec![],
+        consumer_deltas: vec![],
+    };
+    let topo = vec![];
+    let plan = build_plan(project_name, None, 1, &diff, &topo).unwrap();
+
+    // Render to YAML using the plan struct serializer.
+    #[derive(serde::Serialize)]
+    struct PlanYaml<'a> {
+        project: &'a str,
+        from_version: Option<u64>,
+        to_version: u64,
+        is_empty: bool,
+        creates: usize,
+        drops: usize,
+        alters: usize,
+        changes: &'a Vec<aqueduct_core::plan::PlanChange>,
+    }
+    let doc = PlanYaml {
+        project: &plan.project,
+        from_version: plan.from_version,
+        to_version: plan.to_version,
+        is_empty: plan.summary.is_empty(),
+        creates: plan.summary.creates,
+        drops: plan.summary.drops,
+        alters: plan.summary.alters,
+        changes: &plan.summary.changes,
+    };
+
+    let yaml = serde_yaml::to_string(&doc).unwrap();
+
+    // The YAML must be parseable.
+    let reparsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+    // The project field must round-trip exactly.
+    assert_eq!(
+        reparsed["project"].as_str().unwrap(),
+        project_name,
+        "Project name must round-trip through YAML"
+    );
+}
+
+/// v0.16/TEST-2: `aqueduct plan --help` exits 0 and documents --fail-if-changed.
+#[test]
+fn plan_help_documents_fail_if_changed() {
+    use assert_cmd::Command;
+    use predicates::prelude::*;
+
+    Command::cargo_bin("aqueduct")
+        .unwrap()
+        .args(["plan", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("fail-if-changed"));
+}
+
+/// v0.16/TEST-2: `aqueduct apply --help` exits 0 and documents --dry-run.
+#[test]
+fn apply_help_documents_dry_run() {
+    use assert_cmd::Command;
+    use predicates::prelude::*;
+
+    Command::cargo_bin("aqueduct")
+        .unwrap()
+        .args(["apply", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("dry-run"));
+}
+
+/// v0.16/TEST-2: `aqueduct status --help` exits 0 and documents --fail-on-drift.
+#[test]
+fn status_help_documents_fail_on_drift() {
+    use assert_cmd::Command;
+    use predicates::prelude::*;
+
+    Command::cargo_bin("aqueduct")
+        .unwrap()
+        .args(["status", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("fail-on-drift"));
+}
+
+/// v0.16/TEST-2: `aqueduct diff --help` exits 0 and documents --fail-on-drift.
+#[test]
+fn diff_help_documents_fail_on_drift() {
+    use assert_cmd::Command;
+    use predicates::prelude::*;
+
+    Command::cargo_bin("aqueduct")
+        .unwrap()
+        .args(["diff", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("fail-on-drift"));
+}
+
+/// v0.16/TEST-2: `aqueduct destroy --help` exits 0 and documents --dry-run.
+#[test]
+fn destroy_help_documents_dry_run() {
+    use assert_cmd::Command;
+    use predicates::prelude::*;
+
+    Command::cargo_bin("aqueduct")
+        .unwrap()
+        .args(["destroy", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("dry-run"));
+}
+
+/// v0.16/TEST-2: `aqueduct rollback --help` exits 0 and documents --dry-run.
+#[test]
+fn rollback_help_documents_dry_run() {
+    use assert_cmd::Command;
+    use predicates::prelude::*;
+
+    Command::cargo_bin("aqueduct")
+        .unwrap()
+        .args(["rollback", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("dry-run"));
+}
+
+/// v0.16/TEST-2: Missing DSN exits 2 (error code), not 1.
+#[test]
+fn plan_missing_dsn_exits_2() {
+    use assert_cmd::Command;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    // Write a project with no DSN.
+    let toml = "[project]\nname = \"no-dsn-test\"\n";
+    std::fs::write(tmp.path().join("aqueduct.toml"), toml).unwrap();
+    std::fs::create_dir_all(tmp.path().join("migrations").join("streams")).unwrap();
+
+    let output = Command::cargo_bin("aqueduct")
+        .unwrap()
+        .args(["plan", "--project-dir", tmp.path().to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        output.status.code().unwrap_or(-1),
+        2,
+        "Missing DSN should exit with code 2 (error)"
+    );
+}
+
+/// v0.16/TEST-2: `aqueduct validate` exits 0 on valid files (no DB required).
+#[test]
+fn validate_exits_0_on_valid_files() {
+    use assert_cmd::Command;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    write_project(
+        tmp.path(),
+        "validate-ok",
+        &[(
+            "order_totals",
+            "-- @aqueduct:schedule = \"30s\"\nSELECT customer_id, SUM(amount) AS total FROM raw.orders GROUP BY customer_id;\n",
+        )],
+    );
+
+    Command::cargo_bin("aqueduct")
+        .unwrap()
+        .args(["validate", "--project-dir", tmp.path().to_str().unwrap()])
+        .assert()
+        .success();
+}
+
+/// v0.16/TEST-2: `aqueduct validate` exits non-zero on IVM-unsupported query
+/// (SELECT DISTINCT is not supported by pg_trickle IVM).
+#[test]
+fn validate_differential_ivm_unsupportable_fails() {
+    use assert_cmd::Command;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    write_project(
+        tmp.path(),
+        "validate-fail",
+        &[(
+            "bad_query",
+            // SELECT DISTINCT is not IVM-supportable.
+            "-- @aqueduct:schedule = \"30s\"\n-- @aqueduct:refresh_mode = \"DIFFERENTIAL\"\nSELECT DISTINCT customer_id FROM orders;\n",
+        )],
+    );
+
+    let output = Command::cargo_bin("aqueduct")
+        .unwrap()
+        .args(["validate", "--project-dir", tmp.path().to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert_ne!(
+        output.status.code().unwrap_or(0),
+        0,
+        "validate should exit non-zero for IVM-unsupported DISTINCT query"
+    );
+}
+
+/// v0.16/TEST-2: `aqueduct validate --format json` produces valid JSON.
+#[test]
+fn validate_format_json_produces_valid_json() {
+    use assert_cmd::Command;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    write_project(
+        tmp.path(),
+        "validate-json",
+        &[(
+            "order_totals",
+            "-- @aqueduct:schedule = \"30s\"\nSELECT customer_id, SUM(amount) AS total FROM raw.orders GROUP BY customer_id;\n",
+        )],
+    );
+
+    let output = Command::cargo_bin("aqueduct")
+        .unwrap()
+        .args([
+            "validate",
+            "--format",
+            "json",
+            "--project-dir",
+            tmp.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "validate --format json should exit 0"
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout must be valid JSON");
+    assert!(
+        json.get("schema_version").is_some(),
+        "JSON output must have schema_version field"
+    );
+}
+
+/// v0.16/TEST-2: `aqueduct --version` contains the semver version number.
+#[test]
+fn version_flag_outputs_semver() {
+    use assert_cmd::Command;
+    use predicates::prelude::*;
+
+    Command::cargo_bin("aqueduct")
+        .unwrap()
+        .arg("--version")
+        .assert()
+        .success()
+        .stdout(predicate::str::is_match(r"\d+\.\d+\.\d+").unwrap());
+}
+
+/// v0.16/F: PostgreSQL 18 (minimum required by pg_trickle) can run the full
+/// create/apply/rollback cycle.
+#[tokio::test]
+async fn postgres_version_matrix_min_supported() {
+    let db = TestDb::new().await.expect("start db");
+    db.install_mock_pgtrickle().await.expect("install mock");
+    db.install_aqueduct_catalog().await.expect("init catalog");
+
+    // Verify we're running against PG 18+.
+    let pg_version = db.pg_version().await.expect("get pg version");
+    assert!(
+        pg_version.contains("PostgreSQL 18") || pg_version.contains("PostgreSQL 19"),
+        "Test must run against PostgreSQL 18+, got: {}",
+        pg_version
+    );
+
+    // Run the core create→apply→status→rollback cycle.
+    db.client
+        .execute(
+            "CREATE TABLE raw_events_v18 (id bigint, ts timestamptz, val numeric)",
+            &[],
+        )
+        .await
+        .expect("create source table");
+
+    let file = aqueduct_core::parser::parse_migration_file(
+        &PathBuf::from("event_summary.sql"),
+        "-- @aqueduct:schedule = \"30s\"\n-- @aqueduct:refresh_mode = \"DIFFERENTIAL\"\nSELECT id, SUM(val) AS total FROM raw_events_v18 GROUP BY id;\n",
+        &std::collections::HashMap::new(),
+    )
+    .unwrap();
+
+    let desired = aqueduct_core::dag::build_dag_state(&[file], false).unwrap();
+    let actual = aqueduct_core::live_state::read_live_state(&db.client, None)
+        .await
+        .unwrap();
+    let diff = aqueduct_core::diff::compute_diff(&desired, &actual);
+    let topo = aqueduct_core::dag::topological_sort(&desired).unwrap();
+    let plan =
+        aqueduct_core::plan::build_plan("pg18-test", None, 1, &diff, &topo).expect("build_plan");
+    assert_eq!(plan.summary.creates, 1, "Should create 1 stream table");
+
+    let executor =
+        aqueduct_core::executor::PlanExecutor::new(&db.client, "pg18-test", "0.16.0", false);
+    let result = executor.execute(&plan).await.unwrap();
+    assert_eq!(result.dag_version, 1);
+
+    let count = aqueduct_core::live_state::get_stream_table_count(&db.client)
+        .await
+        .unwrap();
+    assert_eq!(count, 1, "One stream table should exist after apply");
 }

@@ -71,13 +71,12 @@ Supported backends:
 | Environment variable | `env` | **Implemented** | `${VAR}` (default) |
 | SOPS-encrypted file | `sops` | **Implemented** | `sops -d <file>` subprocess |
 | age-encrypted file | `age` | **Implemented** | `age -d -i <identity> <file>` subprocess |
-| AWS Secrets Manager | `aws` | **Planned (v0.12)** | `AWS_REGION` + SDK credentials |
-| GCP Secret Manager | `gcp` | **Planned (v0.12)** | `GOOGLE_APPLICATION_CREDENTIALS` |
-| HashiCorp Vault | `vault` | **Planned (v0.12)** | `VAULT_ADDR` + `VAULT_TOKEN` |
+| AWS Secrets Manager | `aws` | **Implemented** | `AWS_REGION` + SDK credentials |
+| GCP Secret Manager | `gcp` | **Implemented** | `GOOGLE_APPLICATION_CREDENTIALS` |
+| HashiCorp Vault | `vault` | **Implemented** | `VAULT_ADDR` + `VAULT_TOKEN` |
 
-> **Note:** The `aws`, `gcp`, and `vault` backends are documented here for API
-> stability purposes. They are planned for v0.12 and will return an error if used
-> in the current release.
+> **Note:** The `aws`, `gcp`, and `vault` backends are implemented as of v0.12.
+> Each backend resolves credentials at apply time and never writes them to disk.
 
 ## Read-only transactions
 
@@ -120,8 +119,10 @@ REST endpoint (`GET /master`) before applying. Pass `--patroni-endpoint <url>`.
 ## OWASP considerations
 
 - **Injection:** All database queries use parameterised statements (`$1`, `$2`, ...). SQL
-  identifiers are quoted with `format('%I', name)` in PostgreSQL functions. No string
-  interpolation into SQL at the Rust layer.
+  identifiers are quoted with `format('%I', name)` in PostgreSQL functions. The Rust
+  layer does not perform string interpolation into SQL; explicit trust boundaries for
+  identifier construction were introduced in v0.14 (see `CatalogSchema` newtype and
+  the `catalog.rs` query builder).
 - **Sensitive data exposure:** DSNs containing passwords are masked in log output. Secret
   values are never echoed or stored.
 - **Misconfiguration:** `aqueduct lint` warns about overly permissive configurations

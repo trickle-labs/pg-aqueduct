@@ -17,7 +17,10 @@ pub struct TestDb {
     /// Keep the container alive for the lifetime of this struct.
     _container: ContainerAsync<Postgres>,
     pub client: tokio_postgres::Client,
-    pub connection_string: String,
+    /// Internal connection string.  Not part of the public API; use
+    /// [`TestDb::client`] for database access.
+    #[allow(dead_code)]
+    pub(crate) connection_string: String,
 }
 
 impl TestDb {
@@ -92,5 +95,12 @@ impl TestDb {
     pub async fn pg_version(&self) -> anyhow::Result<String> {
         let row = self.client.query_one("SELECT version()", &[]).await?;
         Ok(row.get(0))
+    }
+
+    /// Return the connection string for this test database.
+    ///
+    /// L14 (v0.16): The raw field is `pub(crate)`; external callers use this accessor.
+    pub fn connection_string(&self) -> &str {
+        &self.connection_string
     }
 }
