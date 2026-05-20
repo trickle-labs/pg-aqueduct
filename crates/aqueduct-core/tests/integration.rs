@@ -759,7 +759,7 @@ async fn test_catalog_v2_tables_exist() {
         assert!(exists, "Table aqueduct.{} should exist", table);
     }
 
-    // CATALOG_INIT_V2_SQL now aliases CATALOG_INIT_V4_SQL; version is 4.
+    // CATALOG_INIT_V2_SQL now aliases CATALOG_INIT_V5_SQL; version is 5.
     let version_row = db
         .client
         .query_one(
@@ -770,7 +770,7 @@ async fn test_catalog_v2_tables_exist() {
         .await
         .expect("query version");
     let version: serde_json::Value = version_row.get(0);
-    assert_eq!(version.as_i64().unwrap(), 4);
+    assert_eq!(version.as_i64().unwrap(), 5);
 }
 
 /// P-02: Catalog v4 creates performance indexes.
