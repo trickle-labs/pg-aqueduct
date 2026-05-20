@@ -112,6 +112,15 @@ pub enum AqueductError {
     )]
     UntrustedSqlBody { view: String, reason: String },
 
+    /// Returned for features that are not yet fully implemented (ARCH-1 / v0.19).
+    /// Used as a stop-gap until the full implementation lands in a later version.
+    #[error(
+        "Feature not yet implemented: {feature}. \
+         Catalog schema isolation is not yet fully implemented. \
+         Set `catalog_schema = \"aqueduct\"` or omit the field to use the default."
+    )]
+    NotYetImplemented { feature: String },
+
     #[error("{0}")]
     Other(String),
 }
@@ -155,6 +164,7 @@ impl AqueductError {
             AqueductError::StalePlanArtifact => 1305,
             AqueductError::ImmediateDowngradeRejected { .. } => 1306,
             AqueductError::UntrustedSqlBody { .. } => 1307,
+            AqueductError::NotYetImplemented { .. } => 1308,
             AqueductError::Catalog(_) => 1400,
             AqueductError::Io(_) => 1500,
             AqueductError::Json(_) => 1501,

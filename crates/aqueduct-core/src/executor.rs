@@ -500,7 +500,25 @@ impl<'a> PlanExecutor<'a> {
             let dsn = dsn.clone();
             let project = self.project.to_string();
             let holder = lock_holder.clone();
-            tokio::spawn(run_heartbeat(dsn, project, holder, rx, lock_lost_tx));
+            // CORR-3 (v0.19): Clone lock_lost_tx so the panic supervisor can
+            // signal lock loss independently of the heartbeat task itself.
+            let lock_lost_for_supervisor = lock_lost_tx.clone();
+            let heartbeat_handle =
+                tokio::spawn(run_heartbeat(dsn, project, holder, rx, lock_lost_tx));
+            // CORR-3 (v0.19): Supervisor task catches panics in the heartbeat.
+            // If the heartbeat task panics (JoinError::is_panic() == true),
+            // the supervisor signals LockLost so the main executor loop aborts
+            // at the next step boundary rather than continuing with a dead heartbeat.
+            tokio::spawn(async move {
+                if let Err(join_err) = heartbeat_handle.await {
+                    if join_err.is_panic() {
+                        tracing::error!(
+                            "Heartbeat task panicked — signalling LockLost to abort executor"
+                        );
+                        let _ = lock_lost_for_supervisor.send(true);
+                    }
+                }
+            });
             Some(tx)
         } else {
             None
@@ -897,37 +915,66 @@ impl<'a> PlanExecutor<'a> {
                         );
                         // PERF-1 / v0.15: Replace per-node polling with a single
                         // ANY($2) batch query, comparing in memory.
+                        // M-9 (v0.19): Wrap the poll query in a statement_timeout so
+                        // a hung pg_trickle query cannot hold the loop open past the
+                        // configured deadline. The deadline check is AFTER the sleep
+                        // to avoid the zero-deadline race.
                         if pgtrickle_caps.installed && pgtrickle_caps.has_refresh_status && !node_names.is_empty() {
                             let deadline = std::time::Instant::now()
                                 + std::time::Duration::from_secs(*max_wait_secs);
                             let poll_ms = *poll_interval_ms;
+                            // Per-query timeout: poll_interval + 50% headroom, minimum 500ms.
+                            let query_timeout_ms = poll_ms.saturating_add(poll_ms / 2).max(500);
                             loop {
-                                let rows = self
+                                // M-9: Run poll query inside a read-only transaction with
+                                // statement_timeout so a slow pg_trickle query cannot stall
+                                // the loop past the configured deadline.
+                                let setup = self
                                     .client
-                                    .query(
-                                        "SELECT table_name, refresh_status \
-                                         FROM pgtrickle.pgt_stream_tables \
-                                         WHERE schema_name = $1 AND table_name = ANY($2)",
-                                        &[green_schema, node_names],
-                                    )
-                                    .await?;
-                                // Check if any node is still running.
-                                let still_running = rows.iter().any(|r| {
-                                    let status: Option<String> = r.try_get(1).ok().flatten();
-                                    status.as_deref() == Some("running")
-                                });
+                                    .batch_execute(&format!(
+                                        "BEGIN READ ONLY; \
+                                         SET LOCAL statement_timeout = '{query_timeout_ms}ms'"
+                                    ))
+                                    .await;
+                                let still_running = if setup.is_err() {
+                                    // Cannot set up read-only transaction — treat as running.
+                                    true
+                                } else {
+                                    let rows = self
+                                        .client
+                                        .query(
+                                            "SELECT table_name, refresh_status \
+                                             FROM pgtrickle.pgt_stream_tables \
+                                             WHERE schema_name = $1 AND table_name = ANY($2)",
+                                            &[green_schema, node_names],
+                                        )
+                                        .await;
+                                    let _ = self.client.batch_execute("COMMIT").await;
+                                    match rows {
+                                        Ok(rows) => rows.iter().any(|r| {
+                                            let status: Option<String> =
+                                                r.try_get(1).ok().flatten();
+                                            status.as_deref() == Some("running")
+                                        }),
+                                        // On statement_timeout or error, treat as still running.
+                                        Err(_) => true,
+                                    }
+                                };
                                 if !still_running {
                                     break;
                                 }
+                                // M-9: Sleep first, then check deadline — avoids the
+                                // zero-deadline race where a 0s deadline would pass
+                                // immediately without ever polling.
+                                tokio::time::sleep(
+                                    std::time::Duration::from_millis(poll_ms)
+                                ).await;
                                 if std::time::Instant::now() >= deadline {
                                     return Err(AqueductError::Other(format!(
                                         "WaitForConvergence: green schema '{}' did not converge within {}s",
                                         green_schema, max_wait_secs
                                     )));
                                 }
-                                tokio::time::sleep(
-                                    std::time::Duration::from_millis(poll_ms)
-                                ).await;
                             }
                         }
                     }
@@ -980,23 +1027,27 @@ impl<'a> PlanExecutor<'a> {
                                     )
                                     .await?;
                             }
+                            // ARCH-3 (v0.19): Write 'swapped' status to deployment row
+                            // INSIDE the transaction so the view swap and the status
+                            // update are atomic. Previously this was after COMMIT, which
+                            // created a window where views pointed to green but the
+                            // deployment row still showed 'active'.
+                            if let Some(deploy_id) = active_bg_deployment_id {
+                                let retain = 3600i64;
+                                let _ = self
+                                    .client
+                                    .execute(
+                                        SWAP_BLUE_GREEN_SQL,
+                                        &[&deploy_id, &Option::<i64>::None, &retain.to_string()],
+                                    )
+                                    .await;
+                            }
                             Ok(())
                         }
                         .await;
                         match swap_result {
                             Ok(()) => {
                                 self.client.execute("COMMIT", &[]).await?;
-                                // ARCH-3: Write 'swapped' status to deployment row.
-                                if let Some(deploy_id) = active_bg_deployment_id {
-                                    let retain = 3600i64;
-                                    let _ = self
-                                        .client
-                                        .execute(
-                                            SWAP_BLUE_GREEN_SQL,
-                                            &[&deploy_id, &Option::<i64>::None, &retain.to_string()],
-                                        )
-                                        .await;
-                                }
                             }
                             Err(e) => {
                                 self.client.execute("ROLLBACK", &[]).await.ok();

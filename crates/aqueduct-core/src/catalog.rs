@@ -927,3 +927,19 @@ GROUP BY m.id, m.project, m.status, m.started_at, m.finished_at, m.to_version, m
 ORDER BY m.started_at DESC
 LIMIT $2
 "#;
+
+/// ARCH-1 (v0.19): Validate that the `catalog_schema` field is the default
+/// `"aqueduct"` value. Until full parameterised SQL substitution lands in
+/// v0.20, any other value would silently mix catalog data across tenants.
+///
+/// Returns `AqueductError::NotYetImplemented` when a non-default value is
+/// detected. Callers in `aqueduct init` and `connect_and_migrate` must call
+/// this before any catalog operations.
+pub fn validate_catalog_schema_not_overridden(catalog_schema: &str) -> crate::error::Result<()> {
+    if catalog_schema != "aqueduct" {
+        return Err(crate::error::AqueductError::NotYetImplemented {
+            feature: "catalog_schema override".to_string(),
+        });
+    }
+    Ok(())
+}

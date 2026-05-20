@@ -26,6 +26,13 @@ CREATE TABLE IF NOT EXISTS pgtrickle_mock.scheduler_state (
     paused_at   timestamptz NOT NULL DEFAULT now()
 );
 
+-- TEST-3 (v0.19): canonical pgtrickle.paused_nodes table mirrors what production
+-- pg_trickle exposes. This is the authoritative observable state for tests.
+CREATE TABLE IF NOT EXISTS pgtrickle.paused_nodes (
+    node_name   text PRIMARY KEY,
+    paused_at   timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE OR REPLACE FUNCTION pgtrickle.pgt_extension_version()
 RETURNS text LANGUAGE SQL AS $$
     SELECT '0.1.0-mock'::text;
@@ -99,6 +106,7 @@ END;
 $$;
 
 -- TEST-3 (v0.14): pause_scheduler inserts the node name into scheduler_state.
+-- TEST-3 (v0.19): also inserts into pgtrickle.paused_nodes (canonical table).
 CREATE OR REPLACE FUNCTION pgtrickle.pause_scheduler(nodes text[] DEFAULT NULL)
 RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
@@ -106,19 +114,26 @@ BEGIN
         INSERT INTO pgtrickle_mock.scheduler_state (node_name)
         SELECT unnest(nodes)
         ON CONFLICT (node_name) DO NOTHING;
+        INSERT INTO pgtrickle.paused_nodes (node_name)
+        SELECT unnest(nodes)
+        ON CONFLICT (node_name) DO NOTHING;
     END IF;
 END;
 $$;
 
 -- TEST-3 (v0.14): resume_scheduler removes node names from scheduler_state.
+-- TEST-3 (v0.19): also removes from pgtrickle.paused_nodes (canonical table).
 CREATE OR REPLACE FUNCTION pgtrickle.resume_scheduler(nodes text[] DEFAULT NULL)
 RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
     IF nodes IS NOT NULL THEN
         DELETE FROM pgtrickle_mock.scheduler_state
         WHERE node_name = ANY(nodes);
+        DELETE FROM pgtrickle.paused_nodes
+        WHERE node_name = ANY(nodes);
     ELSE
         DELETE FROM pgtrickle_mock.scheduler_state;
+        DELETE FROM pgtrickle.paused_nodes;
     END IF;
 END;
 $$;

@@ -104,6 +104,14 @@ pub async fn run(args: ApplyArgs) -> anyhow::Result<()> {
 
     // Load config.
     let config = AqueductConfig::load(&args.project_dir).ok();
+
+    // ARCH-1 (v0.19): Reject non-default catalog schema until full
+    // parameterised SQL substitution is implemented in v0.20.
+    if let Some(ref cfg) = config {
+        aqueduct_core::catalog::validate_catalog_schema_not_overridden(&cfg.project.catalog_schema)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+    }
+
     let vars = config
         .as_ref()
         .and_then(|c| {
