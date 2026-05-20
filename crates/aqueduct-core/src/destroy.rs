@@ -257,6 +257,16 @@ pub async fn destroy_project(
         .unwrap_or(0);
     catalog_deleted += lock_del as usize;
 
+    // Delete migration_steps rows first (FK: migration_steps.migration_id -> migrations.id).
+    client
+        .execute(
+            "DELETE FROM aqueduct.migration_steps \
+             WHERE migration_id IN (SELECT id FROM aqueduct.migrations WHERE project = $1)",
+            &[&options.project],
+        )
+        .await
+        .ok();
+
     // Delete migration records (must come before dag_versions due to FK).
     let mig_del = client
         .execute(

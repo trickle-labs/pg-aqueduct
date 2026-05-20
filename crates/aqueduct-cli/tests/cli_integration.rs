@@ -1239,7 +1239,7 @@ fn test_cli_version_flag() {
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::contains("0.12.0"));
+        .stdout(predicate::str::contains("0.13.0"));
 }
 
 /// T-07: `aqueduct plan --help` exits 0.

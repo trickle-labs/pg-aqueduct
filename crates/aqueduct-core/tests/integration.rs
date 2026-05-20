@@ -4417,9 +4417,7 @@ async fn test_migration_steps_rows_written() {
     db.install_mock_pgtrickle().await.expect("install mock");
 
     // Bootstrap catalog v5 (includes migration_steps table).
-    aqueduct_core::catalog::ensure_catalog_current(&db.client)
-        .await
-        .expect("ensure catalog");
+    db.install_aqueduct_catalog().await.expect("init catalog");
 
     let node = parse_file(
         "orders",
@@ -4461,9 +4459,7 @@ async fn test_import_records_baseline_version() {
     db.install_mock_pgtrickle().await.expect("install mock");
 
     // Bootstrap catalog.
-    aqueduct_core::catalog::ensure_catalog_current(&db.client)
-        .await
-        .expect("ensure catalog");
+    db.install_aqueduct_catalog().await.expect("init catalog");
 
     // Create a stream table via mock pg_trickle so import finds something.
     db.client
