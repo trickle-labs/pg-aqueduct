@@ -169,8 +169,8 @@ jobs:
         run: mdbook build
 
       - name: Test mdBook code blocks
+        # CI-3 (v0.14): mdbook test is now blocking — remove continue-on-error.
         run: mdbook test
-        continue-on-error: true
 
   # ── CLI reference check (U-01/D-02) ─────────────────────────────────────────
   docs-lint:
@@ -190,14 +190,22 @@ jobs:
         run: cargo build --bin aqueduct --release
 
       - name: Check all subcommands have --help
+        # CI-3 (v0.14): fail the job if any documented subcommand is missing.
+        # 'export' is removed — it does not exist as a CLI subcommand.
         run: |
-          for cmd in plan apply diff status validate lint import export rollback promote destroy unlock init preview ingest fmt; do
+          FAILED=0
+          for cmd in plan apply diff status validate lint import rollback promote destroy unlock init preview ingest fmt; do
             if ./target/release/aqueduct "$cmd" --help &>/dev/null; then
               echo "✓ $cmd --help"
             else
-              echo "✗ $cmd --help failed (exit $?)"
+              echo "✗ $cmd --help FAILED (exit $?)" >&2
+              FAILED=1
             fi
           done
+          if [ "$FAILED" = "1" ]; then
+            echo "ERROR: one or more documented subcommands are missing from the binary" >&2
+            exit 1
+          fi
 
       - name: Verify --version output matches Cargo.toml
         run: |

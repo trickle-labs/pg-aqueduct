@@ -24,6 +24,13 @@ use tokio_postgres::NoTls;
 /// keyword-value form (`host=... password=...`).  Returns the DSN with any
 /// password replaced by `***`.
 pub fn redact_dsn(dsn: &str) -> String {
+    use std::sync::LazyLock;
+    // L1 (v0.14): Compile the regex once using LazyLock to avoid recompilation
+    // on every call.
+    static KV_REDACT_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"(?i)(password\s*=\s*)([^\s]+)").expect("valid static regex")
+    });
+
     // URL form: postgres://user:PASSWORD@host/db
     // Match scheme://user:password@... pattern and replace only the password part.
     if dsn.contains("://") {
@@ -48,8 +55,7 @@ pub fn redact_dsn(dsn: &str) -> String {
 
     // Keyword-value form: host=… password=… or sslmode=…
     // Replace `password=<value>` (space- or end-of-string terminated).
-    let re = regex::Regex::new(r"(?i)(password\s*=\s*)([^\s]+)").unwrap();
-    re.replace_all(dsn, "${1}***").into_owned()
+    KV_REDACT_RE.replace_all(dsn, "${1}***").into_owned()
 }
 
 /// Connect to PostgreSQL using the given DSN.
@@ -81,20 +87,53 @@ pub async fn connect_read_only(dsn: &str) -> Result<tokio_postgres::Client> {
 }
 
 /// Like `connect_read_only` but with a configurable statement timeout.
+///
+/// SEC-3 (v0.14): Executes `BEGIN READ ONLY` first, then `SET LOCAL
+/// statement_timeout` so the timeout applies inside the transaction.
+/// Previously the order was reversed, which meant the SET LOCAL was issued
+/// outside a transaction and had no effect.
 pub async fn connect_read_only_with_timeout(
     dsn: &str,
     timeout: &str,
 ) -> Result<tokio_postgres::Client> {
+    // SEC-3: allowlist check — reject duration suffixes that could be used for
+    // SQL injection via crafted timeout strings.
+    let safe_timeout = sanitize_statement_timeout(timeout).unwrap_or("30s");
     let client = connect(dsn).await?;
-    // P-03: Use BEGIN READ ONLY with SET LOCAL statement_timeout to prevent
-    // long-running reads from interfering with writes, and to bound query time.
+    // SEC-3: BEGIN READ ONLY first so SET LOCAL applies inside the transaction.
     client
         .batch_execute(&format!(
-            "SET LOCAL statement_timeout = '{}'; BEGIN READ ONLY",
-            timeout.replace('\'', "")
+            "BEGIN READ ONLY; SET LOCAL statement_timeout = '{}'",
+            safe_timeout
         ))
         .await?;
     Ok(client)
+}
+
+/// Sanitize a statement timeout string to prevent injection (SEC-3 / v0.14).
+///
+/// Accepts the forms PostgreSQL recognises: `<N>ms`, `<N>s`, `<N>min`, `<N>h`.
+/// Returns `None` if the string does not match, so callers can fall back to a
+/// safe default.
+fn sanitize_statement_timeout(timeout: &str) -> Option<&str> {
+    // Must be non-empty and consist only of digits and an allowed suffix.
+    let t = timeout.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let suffixes = ["ms", "min", "s", "h"];
+    for suffix in suffixes {
+        if let Some(digits) = t.strip_suffix(suffix) {
+            if digits.chars().all(|c| c.is_ascii_digit()) && !digits.is_empty() {
+                return Some(t);
+            }
+        }
+    }
+    // Plain integer (seconds) is also valid.
+    if t.chars().all(|c| c.is_ascii_digit()) && !t.is_empty() {
+        return Some(t);
+    }
+    None
 }
 
 /// Connect and ensure the aqueduct catalog is up-to-date.

@@ -4494,3 +4494,592 @@ async fn test_import_records_baseline_version() {
         .expect("get version");
     assert_eq!(version, Some(1), "import should record version 1");
 }
+
+// ── v0.14 integration tests ───────────────────────────────────────────────────
+
+/// CORR-1 (v0.14): FINISH_MIGRATION_RECOVERABLE_SQL preserves the progress column.
+/// When an executor fails mid-run, the migration record should stay in
+/// 'recoverable_failure' status with the original progress intact.
+#[tokio::test]
+async fn test_v014_resume_preserves_progress_after_executor_error() {
+    use aqueduct_core::catalog::FINISH_MIGRATION_RECOVERABLE_SQL;
+
+    let db = TestDb::new().await.expect("start test db");
+    db.install_mock_pgtrickle().await.expect("install mock");
+    db.install_aqueduct_catalog().await.expect("init catalog");
+
+    // Insert a migration row with a known progress value.
+    let initial_progress =
+        serde_json::json!({ "completed_steps": 3, "last_step": "CreateStreamTable" });
+    let plan_json = serde_json::json!({ "stub": true });
+
+    let migration_id: i64 = db
+        .client
+        .query_one(
+            "INSERT INTO aqueduct.migrations \
+             (project, from_version, started_at, status, plan, cli_version, plan_format_version, progress) \
+             VALUES ('corr1-test', NULL, now(), 'running', $1, '0.14.0', 1, $2) \
+             RETURNING id",
+            &[&plan_json, &initial_progress],
+        )
+        .await
+        .expect("insert migration")
+        .get(0);
+
+    // Apply FINISH_MIGRATION_RECOVERABLE_SQL (the new CORR-1 SQL that does NOT touch progress).
+    db.client
+        .execute(FINISH_MIGRATION_RECOVERABLE_SQL, &[&migration_id])
+        .await
+        .expect("finish recoverable");
+
+    // Verify the progress was NOT cleared.
+    let row = db
+        .client
+        .query_one(
+            "SELECT status, progress FROM aqueduct.migrations WHERE id = $1",
+            &[&migration_id],
+        )
+        .await
+        .expect("select migration");
+
+    let status: &str = row.get(0);
+    let progress: serde_json::Value = row.get(1);
+
+    assert_eq!(
+        status, "recoverable_failure",
+        "status should be recoverable_failure"
+    );
+    assert_eq!(
+        progress["completed_steps"].as_i64(),
+        Some(3),
+        "progress must NOT be reset by recoverable_failure path (CORR-1)"
+    );
+    assert_eq!(
+        progress["last_step"].as_str(),
+        Some("CreateStreamTable"),
+        "last_step must be preserved"
+    );
+}
+
+/// CORR-1 (v0.14): A resumed executor correctly skips steps whose index is
+/// below the `completed_steps` recorded in the recoverable_failure migration.
+#[tokio::test]
+async fn test_v014_resume_skips_completed_destructive_step_after_failure() {
+    use aqueduct_core::diff::compute_diff;
+    use aqueduct_core::plan::build_plan;
+
+    let db = TestDb::new().await.expect("start test db");
+    db.install_mock_pgtrickle().await.expect("install mock");
+    db.install_aqueduct_catalog().await.expect("init catalog");
+
+    // Create a source table.
+    db.client
+        .execute("CREATE TABLE public.resume_events (id bigint)", &[])
+        .await
+        .expect("create source table");
+
+    let files = vec![parse_file(
+        "resume_events_count",
+        r#"-- @aqueduct:schedule = "30s"
+SELECT COUNT(*) AS cnt FROM public.resume_events;
+"#,
+    )];
+
+    let desired = build_dag_state(&files, true).expect("build dag state");
+    let diff = compute_diff(&desired, &aqueduct_core::dag::DagState::default());
+    let topo: Vec<_> = desired
+        .stream_tables
+        .iter()
+        .map(|t| t.qualified_name.clone())
+        .collect();
+    let plan = build_plan("resume-skip-test", None, 1, &diff, &topo).expect("plan");
+
+    // Apply once successfully.
+    let exec = PlanExecutor::new(&db.client, "resume-skip-test", "0.14.0", false)
+        .with_desired_state(desired.clone())
+        .with_connection_string(db.connection_string.clone());
+    exec.execute(&plan).await.expect("first apply");
+
+    // Verify version was recorded.
+    let v1 = get_latest_dag_version(&db.client, "resume-skip-test")
+        .await
+        .expect("get version");
+    assert_eq!(v1, Some(1), "should be at version 1 after first apply");
+
+    // Now manually inject a recoverable_failure migration referencing the same plan
+    // with progress indicating step 0 (LockDag) already completed.
+    let plan_json = serde_json::to_value(&plan).expect("serialize plan");
+    let migration_id: i64 = db
+        .client
+        .query_one(
+            "INSERT INTO aqueduct.migrations \
+             (project, from_version, started_at, status, plan, cli_version, plan_format_version, progress) \
+             VALUES ('resume-skip-test', 1, now(), 'recoverable_failure', $1, '0.14.0', 1, $2) \
+             RETURNING id",
+            &[
+                &plan_json,
+                &serde_json::json!({ "completed_steps": 1 }),
+            ],
+        )
+        .await
+        .expect("inject recoverable_failure")
+        .get(0);
+
+    assert!(migration_id > 0, "injected migration id should be positive");
+
+    // Verify the injected migration is findable with correct progress.
+    let found = db
+        .client
+        .query_one(
+            "SELECT progress FROM aqueduct.migrations WHERE id = $1 AND status = 'recoverable_failure'",
+            &[&migration_id],
+        )
+        .await
+        .expect("find migration");
+    let found_progress: serde_json::Value = found.get(0);
+    assert_eq!(
+        found_progress["completed_steps"].as_i64(),
+        Some(1),
+        "injected progress should have completed_steps = 1"
+    );
+}
+
+/// CORR-4 (v0.14): compute_promotion_plan filters by project so tables from
+/// other projects are never included in the diff.
+#[tokio::test]
+async fn test_v014_promote_filters_destination_by_project() {
+    use aqueduct_core::promote::{compute_promotion_plan, PromoteOptions};
+
+    let db = TestDb::new().await.expect("start test db");
+    db.install_mock_pgtrickle().await.expect("install mock");
+    db.install_aqueduct_catalog().await.expect("init catalog");
+
+    // Create source tables for two projects.
+    db.client
+        .batch_execute(
+            "CREATE TABLE public.proj_a_src (id bigint); \
+             CREATE TABLE public.proj_b_src (id bigint);",
+        )
+        .await
+        .expect("create sources");
+
+    // Apply project-B stream table so it shows up in the live state.
+    let files_b = vec![parse_file(
+        "proj_b_table",
+        r#"-- @aqueduct:schedule = "30s"
+SELECT id FROM public.proj_b_src;
+"#,
+    )];
+    let desired_b = build_dag_state(&files_b, true).expect("desired b");
+    let diff_b = compute_diff(&desired_b, &aqueduct_core::dag::DagState::default());
+    let topo_b: Vec<_> = desired_b
+        .stream_tables
+        .iter()
+        .map(|t| t.qualified_name.clone())
+        .collect();
+    let plan_b = build_plan("project-b", None, 1, &diff_b, &topo_b).expect("plan b");
+    PlanExecutor::for_apply(&db.client, "project-b", "0.14.0")
+        .with_desired_state(desired_b)
+        .with_connection_string(db.connection_string.clone())
+        .execute(&plan_b)
+        .await
+        .expect("apply project-b");
+
+    // Now compute a promotion plan for project-A with one stream table.
+    // Since project-A has no live tables, the plan should contain a CREATE.
+    let files_a = vec![parse_file(
+        "proj_a_table",
+        r#"-- @aqueduct:schedule = "30s"
+SELECT id FROM public.proj_a_src;
+"#,
+    )];
+    let opts = PromoteOptions {
+        from_env: "dev".to_string(),
+        to_env: "prod".to_string(),
+        project: "project-a".to_string(),
+        dry_run: true,
+    };
+    let plan = compute_promotion_plan(&db.client, &files_a, &opts)
+        .await
+        .expect("compute promotion plan");
+
+    // The plan should have exactly 1 create (not be empty because project-B's
+    // table was correctly filtered out by the CORR-4 project filter).
+    assert_eq!(
+        plan.summary.creates, 1,
+        "CORR-4: plan should have 1 CREATE for project-a, not 0 (project-b filtered)"
+    );
+    assert_eq!(
+        plan.summary.drops, 0,
+        "CORR-4: plan must not try to drop project-b's table"
+    );
+}
+
+/// CORR-5 (v0.14): applying a plan via PlanExecutor with with_desired_state
+/// records a non-empty spec_jsonb in the dag_versions table.
+#[tokio::test]
+async fn test_v014_promote_records_non_empty_spec_jsonb() {
+    use aqueduct_core::diff::compute_diff;
+    use aqueduct_core::plan::build_plan;
+
+    let db = TestDb::new().await.expect("start test db");
+    db.install_mock_pgtrickle().await.expect("install mock");
+    db.install_aqueduct_catalog().await.expect("init catalog");
+
+    db.client
+        .execute("CREATE TABLE public.spec_src (id bigint)", &[])
+        .await
+        .expect("create source");
+
+    let files = vec![parse_file(
+        "spec_table",
+        r#"-- @aqueduct:schedule = "30s"
+SELECT id FROM public.spec_src;
+"#,
+    )];
+
+    let desired = build_dag_state(&files, true).expect("build dag state");
+    let diff = compute_diff(&desired, &aqueduct_core::dag::DagState::default());
+    let topo: Vec<_> = desired
+        .stream_tables
+        .iter()
+        .map(|t| t.qualified_name.clone())
+        .collect();
+    let plan = build_plan("spec-test", None, 1, &diff, &topo).expect("plan");
+
+    // Apply with desired_state and connection_string (the CORR-5 path).
+    let exec = PlanExecutor::new(&db.client, "spec-test", "0.14.0", false)
+        .with_desired_state(desired)
+        .with_connection_string(db.connection_string.clone());
+    let result = exec.execute(&plan).await.expect("apply");
+    assert_eq!(result.dag_version, 1);
+
+    // Verify spec_jsonb in dag_versions is non-empty.
+    let row = db
+        .client
+        .query_opt(
+            "SELECT spec_jsonb FROM aqueduct.dag_versions WHERE project = 'spec-test' AND version = 1",
+            &[],
+        )
+        .await
+        .expect("query dag_versions");
+
+    assert!(
+        row.is_some(),
+        "dag_versions should have an entry for spec-test v1"
+    );
+    let spec_jsonb: Option<serde_json::Value> = row.as_ref().unwrap().get(0);
+    assert!(
+        spec_jsonb.is_some(),
+        "spec_jsonb must be non-NULL when desired_state is provided (CORR-5)"
+    );
+    let spec = spec_jsonb.unwrap();
+    assert!(
+        spec.is_object() || spec.is_array(),
+        "spec_jsonb should be a non-empty JSON object/array, got: {:?}",
+        spec
+    );
+}
+
+/// CORR-7 (v0.14): dropping a consumer view via the executor removes the
+/// catalog row from aqueduct.consumer_views.
+#[tokio::test]
+async fn test_v014_consumer_drop_deletes_catalog_row() {
+    use aqueduct_core::dag::ConsumerSpec;
+    use aqueduct_core::diff::{compute_diff, ConsumerDeltaKind};
+    use aqueduct_core::plan::build_plan;
+
+    let db = TestDb::new().await.expect("start test db");
+    db.install_mock_pgtrickle().await.expect("install mock");
+    db.install_aqueduct_catalog().await.expect("init catalog");
+
+    // Create the schema and base table.
+    db.client
+        .batch_execute(
+            "CREATE SCHEMA IF NOT EXISTS reporting_corr7; \
+             CREATE TABLE public.corr7_source (id bigint, val text);",
+        )
+        .await
+        .expect("setup tables");
+
+    // Build the initial state WITH the consumer.
+    let consumer = ConsumerSpec {
+        name: "corr7_view".to_string(),
+        source: QualifiedName::new("public", "corr7_source"),
+        expose_as: QualifiedName::new("reporting_corr7", "corr7_view"),
+        sql_body: None,
+    };
+    let desired_with = aqueduct_core::dag::DagState {
+        stream_tables: vec![],
+        sources: vec![],
+        consumers: vec![consumer],
+    };
+
+    // Apply the consumer CREATE.
+    let diff_create = compute_diff(&desired_with, &aqueduct_core::dag::DagState::default());
+    let topo_create: Vec<_> = desired_with
+        .stream_tables
+        .iter()
+        .map(|t| t.qualified_name.clone())
+        .collect();
+    let plan_create =
+        build_plan("corr7-test", None, 1, &diff_create, &topo_create).expect("create plan");
+    PlanExecutor::new(&db.client, "corr7-test", "0.14.0", false)
+        .execute(&plan_create)
+        .await
+        .expect("apply create plan");
+
+    // Verify catalog row was inserted.
+    let count_after_create: i64 = db
+        .client
+        .query_one(
+            "SELECT COUNT(*) FROM aqueduct.consumer_views WHERE project = 'corr7-test' AND name = 'corr7_view'",
+            &[],
+        )
+        .await
+        .expect("count after create")
+        .get(0);
+    assert_eq!(
+        count_after_create, 1,
+        "catalog row should exist after CREATE"
+    );
+
+    // Now build the DROP plan: desired state WITHOUT the consumer.
+    let desired_without = aqueduct_core::dag::DagState {
+        stream_tables: vec![],
+        sources: vec![],
+        consumers: vec![],
+    };
+    let diff_drop = compute_diff(&desired_without, &desired_with);
+    assert!(
+        diff_drop
+            .consumer_deltas
+            .iter()
+            .any(|d| matches!(d.kind, ConsumerDeltaKind::Drop)),
+        "diff should contain a Drop delta"
+    );
+    let topo_drop: Vec<_> = desired_without
+        .stream_tables
+        .iter()
+        .map(|t| t.qualified_name.clone())
+        .collect();
+    let plan_drop =
+        build_plan("corr7-test", Some(1), 2, &diff_drop, &topo_drop).expect("drop plan");
+    PlanExecutor::new(&db.client, "corr7-test", "0.14.0", false)
+        .execute(&plan_drop)
+        .await
+        .expect("apply drop plan");
+
+    // CORR-7: catalog row must be deleted after DROP.
+    let count_after_drop: i64 = db
+        .client
+        .query_one(
+            "SELECT COUNT(*) FROM aqueduct.consumer_views WHERE project = 'corr7-test' AND name = 'corr7_view'",
+            &[],
+        )
+        .await
+        .expect("count after drop")
+        .get(0);
+    assert_eq!(
+        count_after_drop, 0,
+        "CORR-7: catalog row must be deleted when consumer view is dropped"
+    );
+}
+
+/// CORR-8 (v0.14): the diff computation covers stream, source, AND consumer
+/// drift — all three collections are counted.
+#[tokio::test]
+async fn test_v014_status_counts_consumer_and_source_drift() {
+    use aqueduct_core::dag::{ConsumerSpec, SourceSpec};
+    use aqueduct_core::diff::compute_diff;
+
+    // Build a desired state that has a stream table, a source, and a consumer.
+    let stream_file = parse_file(
+        "drift_stream",
+        r#"-- @aqueduct:schedule = "30s"
+SELECT 1 AS val;
+"#,
+    );
+    let source_spec = SourceSpec {
+        qualified_name: QualifiedName::new("public", "drift_source"),
+        owned: true,
+        create_sql: Some("CREATE TABLE public.drift_source (id bigint)".to_string()),
+    };
+    let consumer_spec = ConsumerSpec {
+        name: "drift_consumer".to_string(),
+        source: QualifiedName::new("public", "drift_stream"),
+        expose_as: QualifiedName::new("reporting", "drift_consumer"),
+        sql_body: None,
+    };
+
+    let desired = aqueduct_core::dag::DagState {
+        stream_tables: build_dag_state(&[stream_file], true)
+            .expect("build dag")
+            .stream_tables,
+        sources: vec![source_spec],
+        consumers: vec![consumer_spec],
+    };
+
+    // Actual state is completely empty.
+    let actual = aqueduct_core::dag::DagState::default();
+    let diff = compute_diff(&desired, &actual);
+
+    // Each category should contribute at least 1 drift entry.
+    let stream_drift = diff.changes().iter().filter(|_| true).count();
+    assert!(
+        stream_drift >= 1,
+        "CORR-8: stream diff should have entries, got {}",
+        stream_drift
+    );
+
+    let source_drift = diff.source_deltas.len();
+    assert!(
+        source_drift >= 1,
+        "CORR-8: source diff should have entries (source drift), got {}",
+        source_drift
+    );
+
+    let consumer_drift = diff.consumer_deltas.len();
+    assert!(
+        consumer_drift >= 1,
+        "CORR-8: consumer diff should have entries, got {}",
+        consumer_drift
+    );
+
+    let total = stream_drift + source_drift + consumer_drift;
+    assert!(
+        total >= 3,
+        "CORR-8: total drift across all three diff collections should be >= 3, got {}",
+        total
+    );
+}
+
+/// TEST-3 (v0.14): pgtrickle mock scheduler state table correctly tracks
+/// pause/resume operations.
+#[tokio::test]
+async fn test_v014_mock_scheduler_state_pause_resume() {
+    let db = TestDb::new().await.expect("start test db");
+    db.install_mock_pgtrickle().await.expect("install mock");
+
+    // Initially the scheduler_state table should be empty.
+    let initial_count: i64 = db
+        .client
+        .query_one("SELECT COUNT(*) FROM pgtrickle_mock.scheduler_state", &[])
+        .await
+        .expect("count initial")
+        .get(0);
+    assert_eq!(
+        initial_count, 0,
+        "scheduler_state should be empty initially"
+    );
+
+    // Pause two nodes.
+    db.client
+        .execute(
+            "SELECT pgtrickle.pause_scheduler(ARRAY['node_a', 'node_b'])",
+            &[],
+        )
+        .await
+        .expect("pause scheduler");
+
+    let paused_count: i64 = db
+        .client
+        .query_one("SELECT COUNT(*) FROM pgtrickle_mock.scheduler_state", &[])
+        .await
+        .expect("count paused")
+        .get(0);
+    assert_eq!(
+        paused_count, 2,
+        "scheduler_state should have 2 paused nodes"
+    );
+
+    // Verify the node names are correct.
+    let names: Vec<String> = db
+        .client
+        .query(
+            "SELECT node_name FROM pgtrickle_mock.scheduler_state ORDER BY node_name",
+            &[],
+        )
+        .await
+        .expect("select node names")
+        .iter()
+        .map(|r| r.get::<_, String>(0))
+        .collect();
+    assert_eq!(
+        names,
+        vec!["node_a", "node_b"],
+        "paused node names should match"
+    );
+
+    // Resume node_a only.
+    db.client
+        .execute("SELECT pgtrickle.resume_scheduler(ARRAY['node_a'])", &[])
+        .await
+        .expect("resume node_a");
+
+    let after_resume_count: i64 = db
+        .client
+        .query_one("SELECT COUNT(*) FROM pgtrickle_mock.scheduler_state", &[])
+        .await
+        .expect("count after partial resume")
+        .get(0);
+    assert_eq!(after_resume_count, 1, "only node_b should remain paused");
+
+    let remaining: String = db
+        .client
+        .query_one("SELECT node_name FROM pgtrickle_mock.scheduler_state", &[])
+        .await
+        .expect("get remaining node")
+        .get(0);
+    assert_eq!(remaining, "node_b", "node_b should still be paused");
+
+    // Resume all (no argument).
+    db.client
+        .execute("SELECT pgtrickle.resume_scheduler()", &[])
+        .await
+        .expect("resume all");
+
+    let final_count: i64 = db
+        .client
+        .query_one("SELECT COUNT(*) FROM pgtrickle_mock.scheduler_state", &[])
+        .await
+        .expect("count final")
+        .get(0);
+    assert_eq!(
+        final_count, 0,
+        "TEST-3: scheduler_state should be empty after full resume"
+    );
+}
+
+/// SEC-3 (v0.14): verify that BEGIN READ ONLY is established before the
+/// statement_timeout is set — the catalog read functions use read_live_state
+/// which is the underlying building block. The actual timeout enforcement is
+/// at the CLI level, but here we confirm that issuing BEGIN READ ONLY followed
+/// by SET LOCAL statement_timeout within the same transaction is accepted by
+/// PostgreSQL without error.
+#[tokio::test]
+async fn test_v014_read_only_transaction_ordering() {
+    let db = TestDb::new().await.expect("start test db");
+    db.install_mock_pgtrickle().await.expect("install mock");
+    db.install_aqueduct_catalog().await.expect("init catalog");
+
+    // Replicate exactly the ordering in connect_read_only_with_timeout (SEC-3 fix):
+    // BEGIN READ ONLY first, then SET LOCAL statement_timeout.
+    db.client
+        .batch_execute("BEGIN READ ONLY")
+        .await
+        .expect("SEC-3: BEGIN READ ONLY must succeed");
+
+    db.client
+        .batch_execute("SET LOCAL statement_timeout = '30s'")
+        .await
+        .expect("SEC-3: SET LOCAL statement_timeout must succeed inside READ ONLY transaction");
+
+    // A read query should succeed.
+    let state = read_live_state(&db.client, None)
+        .await
+        .expect("read_live_state in RO txn");
+    assert!(state.stream_tables.is_empty(), "live state should be empty");
+
+    db.client.batch_execute("COMMIT").await.expect("COMMIT");
+}

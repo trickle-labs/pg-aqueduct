@@ -51,8 +51,9 @@ pub async fn compute_promotion_plan(
     // Build the desired DAG state from the migration files.
     let desired = build_dag_state(files, true)?;
 
-    // Read the live state from the destination environment.
-    let actual = read_live_state(client, None).await?;
+    // Read the live state from the destination environment, filtered by project
+    // so tables owned by other projects are never diffed (CORR-4 / v0.14).
+    let actual = read_live_state(client, Some(&options.project)).await?;
 
     // Get the current DAG version from the destination.
     let current_version = get_latest_dag_version(client, &options.project).await?;
@@ -83,7 +84,8 @@ pub async fn validate_source_clean(
     project: &str,
 ) -> Result<()> {
     let desired = build_dag_state(files, false)?;
-    let actual = read_live_state(source_client, None).await?;
+    // CORR-4: filter by project so tables from other projects are not included.
+    let actual = read_live_state(source_client, Some(project)).await?;
     let diff = compute_diff(&desired, &actual);
 
     if !diff.is_empty() {

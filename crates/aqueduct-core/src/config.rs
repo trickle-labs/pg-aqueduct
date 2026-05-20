@@ -19,6 +19,12 @@ static TEMPLATE_VAR_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
 static PLAINTEXT_PASSWORD_RE: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"://[^:@/]+:[^@/]+@").expect("valid static regex"));
 
+/// Regex for detecting keyword-value DSN passwords (`password=...`) (SEC-1 / v0.14).
+/// Handles both unquoted and single-quoted values, case-insensitively.
+static KV_PASSWORD_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"(?i)(?:^|[\s;])password\s*=\s*'?([^'\s;]+)'?").expect("valid static regex")
+});
+
 /// Top-level `aqueduct.toml` configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AqueductConfig {
@@ -255,12 +261,20 @@ pub fn resolve_env_vars(s: &str) -> Result<String> {
 /// Check a DSN string for embedded plaintext passwords.
 ///
 /// Returns `Err(AqueductError::PlaintextPassword)` if the DSN contains a
-/// URL-embedded password and `allow_plaintext_password` is false.
+/// URL-embedded or keyword-value password and `allow_plaintext_password` is false.
+///
+/// SEC-1 (v0.14): Also scans keyword-value DSNs (`password=...`) in addition
+/// to the URL-form (`postgres://user:pass@host/db`).
 pub fn check_plaintext_password(dsn: &str, allow_plaintext_password: bool) -> Result<()> {
     if allow_plaintext_password {
         return Ok(());
     }
+    // URL-form: postgres://user:PASSWORD@host/db
     if PLAINTEXT_PASSWORD_RE.is_match(dsn) {
+        return Err(AqueductError::PlaintextPassword);
+    }
+    // Keyword-value form: host=... password=VALUE ... (SEC-1 / v0.14)
+    if KV_PASSWORD_RE.is_match(dsn) {
         return Err(AqueductError::PlaintextPassword);
     }
     Ok(())
@@ -405,5 +419,46 @@ name = "x"
         // Same DSN is accepted when allow=true.
         let result = check_plaintext_password("postgresql://user:secret@localhost/db", true);
         assert!(result.is_ok());
+    }
+
+    // SEC-1 / v0.14: keyword-value DSN password tests.
+
+    #[test]
+    fn keyword_dsn_plaintext_password_rejected() {
+        let result = check_plaintext_password(
+            "host=localhost dbname=test password=secret user=admin",
+            false,
+        );
+        assert!(
+            result.is_err(),
+            "keyword-value DSN with password should be rejected"
+        );
+    }
+
+    #[test]
+    fn keyword_dsn_with_allow_override() {
+        let result = check_plaintext_password(
+            "host=localhost dbname=test password=secret user=admin",
+            true,
+        );
+        assert!(
+            result.is_ok(),
+            "keyword-value DSN password should be accepted with allow=true"
+        );
+    }
+
+    #[test]
+    fn keyword_dsn_no_password_ok() {
+        let result = check_plaintext_password("host=localhost dbname=test user=admin", false);
+        assert!(
+            result.is_ok(),
+            "keyword-value DSN without password is always fine"
+        );
+    }
+
+    #[test]
+    fn keyword_dsn_password_case_insensitive() {
+        let result = check_plaintext_password("host=localhost PASSWORD=secret user=admin", false);
+        assert!(result.is_err(), "keyword check must be case-insensitive");
     }
 }

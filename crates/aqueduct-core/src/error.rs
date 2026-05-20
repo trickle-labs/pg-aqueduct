@@ -104,6 +104,14 @@ pub enum AqueductError {
     )]
     ImmediateDowngradeRejected { table: String },
 
+    /// Returned when a consumer view `sql_body` fails the single-SELECT trust
+    /// boundary check (SEC-2 / v0.14).
+    #[error(
+        "Untrusted SQL body for consumer view '{view}': {reason}. \
+         Consumer view bodies must be a single non-DDL SELECT statement."
+    )]
+    UntrustedSqlBody { view: String, reason: String },
+
     #[error("{0}")]
     Other(String),
 }
@@ -146,6 +154,7 @@ impl AqueductError {
             AqueductError::PgtrickleApiMismatch { .. } => 1005,
             AqueductError::StalePlanArtifact => 1305,
             AqueductError::ImmediateDowngradeRejected { .. } => 1306,
+            AqueductError::UntrustedSqlBody { .. } => 1307,
             AqueductError::Catalog(_) => 1400,
             AqueductError::Io(_) => 1500,
             AqueductError::Json(_) => 1501,

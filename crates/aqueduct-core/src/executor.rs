@@ -1,9 +1,10 @@
 use sha2::{Digest, Sha256};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use tokio_postgres::NoTls;
 
 use crate::catalog::{
-    ACQUIRE_LOCK_SQL, DEREGISTER_OWNERSHIP_SQL, FINISH_MIGRATION_SQL, FINISH_MIGRATION_STEP_SQL,
+    ACQUIRE_LOCK_SQL, DELETE_CONSUMER_VIEW_SQL, DEREGISTER_OWNERSHIP_SQL,
+    FINISH_MIGRATION_RECOVERABLE_SQL, FINISH_MIGRATION_SQL, FINISH_MIGRATION_STEP_SQL,
     GET_RUNNING_OR_RECOVERABLE_MIGRATION_SQL, HEARTBEAT_LOCK_SQL, INSERT_DAG_VERSION_SQL,
     REGISTER_OWNERSHIP_SQL, RELEASE_LOCK_SQL, START_MIGRATION_SQL, START_MIGRATION_STEP_SQL,
     UPDATE_MIGRATION_PROGRESS_SQL,
@@ -304,25 +305,49 @@ impl<'a> PlanExecutor<'a> {
         let result = self.run_steps(plan, migration_id, resume_from).await;
 
         // Finish migration record.
-        // On failure, write `recoverable_failure` so `--resume` can pick it
-        // up later (S-01/S-02).  On success, write `committed`.
-        let (status, new_dag_version) = match &result {
-            Ok(v) => ("committed", Some(*v as i64)),
-            Err(_) => ("recoverable_failure", None),
-        };
-
-        self.client
-            .execute(
-                FINISH_MIGRATION_SQL,
-                &[
-                    &migration_id,
-                    &status,
-                    &new_dag_version,
-                    &serde_json::json!({}),
-                ],
-            )
-            .await
-            .ok();
+        // On failure, write `recoverable_failure` WITHOUT resetting progress so that
+        // `--resume` can re-use the completed_steps checkpoint (CORR-1 / v0.14).
+        // On success, write `committed` and clear progress.
+        match &result {
+            Ok(v) => {
+                if let Err(e) = self
+                    .client
+                    .execute(
+                        FINISH_MIGRATION_SQL,
+                        &[
+                            &migration_id,
+                            &"committed",
+                            &Some(*v as i64),
+                            &serde_json::json!({}),
+                        ],
+                    )
+                    .await
+                {
+                    // Non-silenceable: a failed status update means the catalog
+                    // may be stale. Log as error so operators see it (CORR-1).
+                    tracing::error!(
+                        migration_id = migration_id,
+                        "CRITICAL: failed to mark migration as committed in catalog: {}. \
+                         The migration completed successfully but the catalog state may be stale.",
+                        e
+                    );
+                }
+            }
+            Err(_) => {
+                // Preserve progress — do NOT clear it (CORR-1 / v0.14).
+                if let Err(e) = self
+                    .client
+                    .execute(FINISH_MIGRATION_RECOVERABLE_SQL, &[&migration_id])
+                    .await
+                {
+                    tracing::error!(
+                        migration_id = migration_id,
+                        "Failed to mark migration as recoverable_failure: {}",
+                        e
+                    );
+                }
+            }
+        }
 
         // U-05: Return both migration_id and dag_version separately.
         result.map(|dag_version| ExecutionResult {
@@ -363,16 +388,18 @@ impl<'a> PlanExecutor<'a> {
         let mut locked = false;
         let mut new_version: u64 = plan.to_version;
 
-        // ── Heartbeat setup (S-04) ───────────────────────────────────────────
+        // ── Heartbeat setup (S-04 / CORR-3) ─────────────────────────────────
         // A holder-bound background task renews the lock row every ~10 s.
-        // If renewal fails (lock stolen/expired), the task signals via a
-        // shared atomic so the main loop can abort with LockLost.
+        // CORR-3: A `watch` channel carries a lock-lost signal from the
+        // heartbeat to the main executor loop so it can abort with LockLost
+        // instead of silently continuing after a stolen lock.
+        let (lock_lost_tx, lock_lost_rx) = watch::channel(false);
         let heartbeat_cancel = if let Some(dsn) = &self.connection_string {
             let (tx, rx) = oneshot::channel::<()>();
             let dsn = dsn.clone();
             let project = self.project.to_string();
             let holder = lock_holder.clone();
-            tokio::spawn(run_heartbeat(dsn, project, holder, rx));
+            tokio::spawn(run_heartbeat(dsn, project, holder, rx, lock_lost_tx));
             Some(tx)
         } else {
             None
@@ -408,6 +435,12 @@ impl<'a> PlanExecutor<'a> {
                 if !is_lock_dag && step_idx < resume_from {
                     tracing::debug!("Resume: skipping step {} (already completed)", step_idx);
                     continue;
+                }
+
+                // CORR-3: Check if the heartbeat has detected lock loss before
+                // executing each step. Abort immediately if the lock is gone.
+                if *lock_lost_rx.borrow() {
+                    return Err(AqueductError::LockLost);
                 }
 
                 tracing::debug!("Executing step {}: {}", step_idx, step.description());
@@ -773,6 +806,14 @@ impl<'a> PlanExecutor<'a> {
                                         &[],
                                     )
                                     .await?;
+                                // CORR-7: Delete catalog row so status drift counts are accurate.
+                                let _ = self
+                                    .client
+                                    .execute(
+                                        DELETE_CONSUMER_VIEW_SQL,
+                                        &[&self.project, &spec.name],
+                                    )
+                                    .await;
                             }
                             "create" | "alter" => {
                                 tracing::info!(
@@ -1048,6 +1089,11 @@ impl<'a> PlanExecutor<'a> {
                         ],
                     )
                     .await?;
+
+                // CORR-3: Check lock-loss again after the step completes.
+                if *lock_lost_rx.borrow() {
+                    return Err(AqueductError::LockLost);
+                }
             }
 
             // S-05: Ensure lock is released on the success path too.
@@ -1087,6 +1133,8 @@ impl<'a> PlanExecutor<'a> {
         }
         let _ = scheduler_paused; // suppress unused warning
         drop(heartbeat_cancel);
+        // Suppress unused warning for lock_lost_rx when no heartbeat was started.
+        drop(lock_lost_rx);
 
         result
     }
@@ -1140,13 +1188,15 @@ impl<'a> PlanExecutor<'a> {
 }
 
 /// Background task that renews the advisory lock every `interval` until cancelled.
-/// If the lock row disappears (rows_affected == 0), the task logs a warning —
-/// the main loop will detect the lost lock on the next DB operation (S-04).
+/// CORR-3: When the lock row disappears (rows_affected == 0), the task sets
+/// `lock_lost_tx` to `true` so the main executor loop can abort with LockLost
+/// at the next step boundary instead of silently continuing.
 async fn run_heartbeat(
     dsn: String,
     project: String,
     holder: String,
     mut cancel_rx: oneshot::Receiver<()>,
+    lock_lost_tx: watch::Sender<bool>,
 ) {
     // Parse TTL from environment or use a sensible default (10 seconds).
     let interval = tokio::time::Duration::from_secs(10);
@@ -1169,13 +1219,14 @@ async fn run_heartbeat(
                         tracing::warn!("Heartbeat: lock renewal failed: {}", e);
                     }
                     Ok(0) => {
-                        // Lock row is gone — stolen or expired.  The main
-                        // connection will surface this as LockLost on the next
-                        // catalog operation (S-04).
+                        // Lock row is gone — stolen or expired. Signal the main
+                        // executor loop to abort with LockLost (CORR-3 / v0.14).
                         tracing::warn!(
-                            "Heartbeat: lock for project '{}' no longer held by '{}' — lock may have been stolen or expired",
+                            "Heartbeat: lock for project '{}' no longer held by '{}' — signalling LockLost",
                             project, holder
                         );
+                        let _ = lock_lost_tx.send(true);
+                        return;
                     }
                     Ok(_) => {
                         tracing::debug!("Heartbeat: renewed lock for project '{}'", project);

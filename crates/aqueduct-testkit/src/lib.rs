@@ -80,8 +80,8 @@ impl TestDb {
     /// Install the aqueduct catalog schema.
     pub async fn install_aqueduct_catalog(&self) -> anyhow::Result<()> {
         self.client
-            // Use the canonical v4 catalog SQL from aqueduct-core to stay in sync.
-            .batch_execute(aqueduct_core::catalog::CATALOG_INIT_V4_SQL)
+            // Use the canonical v5 catalog SQL from aqueduct-core to stay in sync.
+            .batch_execute(aqueduct_core::catalog::CATALOG_INIT_V5_SQL)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to install aqueduct catalog: {}", e))?;
         Ok(())

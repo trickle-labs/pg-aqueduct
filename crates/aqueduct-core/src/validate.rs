@@ -164,6 +164,55 @@ impl ValidationResult {
     }
 }
 
+/// Validate that a consumer view's `sql_body` is exactly one non-DDL SELECT statement.
+///
+/// SEC-2 (v0.14): Consumer view bodies are treated as a trust boundary. Only a
+/// single SELECT statement is permitted; multi-statement bodies and bare DDL
+/// (`CREATE`, `DROP`, `ALTER`, `TRUNCATE`, `INSERT`, `UPDATE`, `DELETE`) are
+/// rejected with `AqueductError::UntrustedSqlBody`.
+pub fn validate_consumer_sql_is_single_select(sql_body: &str, view_name: &str) -> Result<()> {
+    use sqlparser::ast::Statement;
+    use sqlparser::dialect::PostgreSqlDialect;
+    use sqlparser::parser::Parser;
+
+    let dialect = PostgreSqlDialect {};
+    let stmts =
+        Parser::parse_sql(&dialect, sql_body).map_err(|e| AqueductError::UntrustedSqlBody {
+            view: view_name.to_string(),
+            reason: format!("SQL parse error: {}", e),
+        })?;
+
+    if stmts.len() != 1 {
+        return Err(AqueductError::UntrustedSqlBody {
+            view: view_name.to_string(),
+            reason: format!(
+                "expected exactly one SELECT statement, found {}",
+                stmts.len()
+            ),
+        });
+    }
+
+    match &stmts[0] {
+        Statement::Query(_) => Ok(()),
+        other => {
+            let kind = match other {
+                Statement::CreateTable { .. } | Statement::CreateView { .. } => "CREATE",
+                Statement::Drop { .. } => "DROP",
+                Statement::AlterTable { .. } => "ALTER",
+                Statement::Truncate { .. } => "TRUNCATE",
+                Statement::Insert(_) => "INSERT",
+                Statement::Update { .. } => "UPDATE",
+                Statement::Delete(_) => "DELETE",
+                _ => "non-SELECT",
+            };
+            Err(AqueductError::UntrustedSqlBody {
+                view: view_name.to_string(),
+                reason: format!("{} statement is not allowed in consumer view bodies", kind),
+            })
+        }
+    }
+}
+
 /// Run all offline validation checks and return a unified `DiagnosticSet` (Q-08 / U-09).
 ///
 /// Diagnostics include file paths and line numbers where available.
@@ -302,6 +351,41 @@ mod tests {
     #[test]
     fn test_non_select_not_allowed() {
         let result = validate_ivm_supportability("INSERT INTO t VALUES (1)", "test_table");
+        assert!(result.is_err());
+    }
+
+    // SEC-2 / v0.14: consumer view SQL body validation tests.
+
+    #[test]
+    fn validate_consumer_sql_is_single_select_valid() {
+        let result = validate_consumer_sql_is_single_select(
+            "SELECT id, amount FROM orders WHERE status = 'active'",
+            "active_orders",
+        );
+        assert!(result.is_ok(), "valid SELECT should pass: {:?}", result);
+    }
+
+    #[test]
+    fn validate_consumer_sql_is_single_select_rejects_ddl_create() {
+        let result =
+            validate_consumer_sql_is_single_select("CREATE TABLE foo (id bigint)", "bad_view");
+        assert!(result.is_err(), "CREATE DDL should be rejected");
+        if let Err(AqueductError::UntrustedSqlBody { reason, .. }) = result {
+            assert!(reason.contains("CREATE"));
+        } else {
+            panic!("expected UntrustedSqlBody error");
+        }
+    }
+
+    #[test]
+    fn validate_consumer_sql_is_single_select_rejects_multi_statement() {
+        let result = validate_consumer_sql_is_single_select("SELECT 1; SELECT 2", "multi_stmt");
+        assert!(result.is_err(), "multi-statement body should be rejected");
+    }
+
+    #[test]
+    fn validate_consumer_sql_is_single_select_rejects_truncate() {
+        let result = validate_consumer_sql_is_single_select("TRUNCATE orders", "bad_view");
         assert!(result.is_err());
     }
 }

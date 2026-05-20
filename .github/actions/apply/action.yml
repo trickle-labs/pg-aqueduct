@@ -45,6 +45,19 @@ inputs:
     required: false
     default: ''
 
+  local-archive:
+    description: >
+      Path to a locally-packaged aqueduct archive (CI-2 / v0.14).
+      When set, the composite action uses this archive instead of downloading
+      from GitHub releases. Intended for smoke tests that build from source.
+    required: false
+    default: ''
+
+  allow-plaintext-password:
+    description: 'Pass --allow-plaintext-password to aqueduct (only for dev/smoke environments)'
+    required: false
+    default: 'false'
+
   aws-role-arn:
     description: 'AWS IAM role ARN for OIDC-based credential injection'
     required: false
@@ -81,14 +94,18 @@ runs:
       run: |
         set -euo pipefail
         VERSION="${{ inputs.version }}"
+        # CI-1 (v0.14): Use the same platform-to-suffix mapping as release.yml
+        # to ensure downloaded archive names match what was published.
         OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
-        ARCH="$(uname -m)"
-        case "$ARCH" in
-          x86_64)  ARCH="x86_64" ;;
-          aarch64) ARCH="aarch64" ;;
-          arm64)   ARCH="aarch64" ;;
+        MACHINE="$(uname -m)"
+        case "${OS}-${MACHINE}" in
+          linux-x86_64)    PLATFORM="linux-amd64" ;;
+          linux-aarch64)   PLATFORM="linux-arm64" ;;
+          darwin-arm64)    PLATFORM="macos-arm64" ;;
+          darwin-x86_64)   PLATFORM="macos-amd64" ;;
+          mingw*-x86_64|msys*-x86_64|cygwin*-x86_64) PLATFORM="windows-amd64" ;;
           *)
-            echo "Unsupported architecture: $ARCH" >&2
+            echo "Unsupported platform: ${OS}-${MACHINE}" >&2
             exit 1
             ;;
         esac
@@ -97,14 +114,21 @@ runs:
           VERSION="$(curl -fsSL https://api.github.com/repos/trickle-labs/pg-aqueduct/releases/latest | grep '"tag_name"' | sed 's/.*"v\([^"]*\)".*/\1/')"
         fi
 
-        BINARY_NAME="aqueduct-${VERSION}-${OS}-${ARCH}"
+        BINARY_NAME="aqueduct-${VERSION}-${PLATFORM}"
         DOWNLOAD_URL="https://github.com/trickle-labs/pg-aqueduct/releases/download/v${VERSION}/${BINARY_NAME}.tar.gz"
         INSTALL_DIR="${RUNNER_TOOL_CACHE:-$HOME/.local/bin}"
         mkdir -p "$INSTALL_DIR"
 
-        echo "Downloading aqueduct v${VERSION} for ${OS}/${ARCH}..."
+        echo "Downloading aqueduct v${VERSION} for ${PLATFORM}..."
         TMP_DIR="$(mktemp -d)"
-        curl -fsSL -o "${TMP_DIR}/${BINARY_NAME}.tar.gz" "$DOWNLOAD_URL"
+
+        # CI-2 (v0.14): use local-archive if provided (for smoke tests).
+        if [ -n "${{ inputs.local-archive }}" ]; then
+          echo "Using local archive: ${{ inputs.local-archive }}"
+          cp "${{ inputs.local-archive }}" "${TMP_DIR}/${BINARY_NAME}.tar.gz"
+        else
+          curl -fsSL -o "${TMP_DIR}/${BINARY_NAME}.tar.gz" "$DOWNLOAD_URL"
+        fi
 
         if [ -n "${{ inputs.checksum }}" ]; then
           echo "${{ inputs.checksum }}  ${TMP_DIR}/${BINARY_NAME}.tar.gz" | sha256sum --check
@@ -144,6 +168,9 @@ runs:
         fi
         if [ "${{ inputs.dry-run }}" = "true" ]; then
           EXTRA_FLAGS="$EXTRA_FLAGS --dry-run"
+        fi
+        if [ "${{ inputs.allow-plaintext-password }}" = "true" ]; then
+          EXTRA_FLAGS="$EXTRA_FLAGS --allow-plaintext-password"
         fi
         # D-04: blue-green strategy is planned (v0.13) — accepted but no-op until then.
         # if [ "${{ inputs.strategy }}" = "blue-green" ]; then
