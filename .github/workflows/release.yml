@@ -60,6 +60,11 @@ jobs:
         env:
           RUST_LOG: debug
 
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
       - name: Regenerate docs/api-reference.md
         run: |
           cargo build --bin aqueduct --release
