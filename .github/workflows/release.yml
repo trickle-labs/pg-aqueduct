@@ -8,7 +8,6 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   # ── 1. Full test suite (same checks as CI) ──────────────────────────────────
@@ -60,6 +59,11 @@ jobs:
         run: cargo test --test cli_integration --package aqueduct-cli -- --nocapture
         env:
           RUST_LOG: debug
+
+      - name: Regenerate docs/api-reference.md
+        run: |
+          cargo build --bin aqueduct --release
+          just gen-docs
 
   # ── 2. Build release artifacts (all platforms, parallel) ────────────────────
   build-artifacts:

@@ -9,6 +9,71 @@ For planned future versions, see [ROADMAP.md](ROADMAP.md).
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-05-20
+
+This release closes every open security finding from the Phase 4 engineering assessment, bringing `pg_aqueduct` to zero open CVEs and zero open critical or high security issues. The headline change is that consumer view bodies are now validated as a single `SELECT` statement before any database call is made — meaning a misconfigured or maliciously crafted migration file containing DDL like `CREATE TABLE` or `DROP TABLE` can never reach the database, even if it somehow made it into your migrations directory. This is an important defence-in-depth layer for teams running Aqueduct in automated CI/CD pipelines.
+
+Two additional critical security fixes ship in this version: the CloudNativePG preview client now validates TLS certificates by default (previously it silently accepted any certificate), and the `age` secret backend now validates the identity file path for both path traversal and flag injection before passing it to the `age` subprocess. Together with the consumer SQL validation, these three fixes mean `pg_aqueduct` meets the full OWASP A03 (Injection) and A02 (Cryptographic Failures) controls relevant to its operation.
+
+Beyond security, this version improves day-to-day operational quality: `aqueduct plan --fail-on-drift` now correctly detects drift in consumer views and source tables (not just stream tables), `aqueduct destroy` auto-migrates a stale catalog before querying it, and several documentation files and CI template files that had stale version pins are updated to match the current release. A new `.github/SECURITY.md` establishes the project's vulnerability reporting policy.
+
+### Added
+
+- `validate_consumer_sql_is_single_select()` is now called immediately before every
+  `CREATE OR REPLACE VIEW` in the executor (`ManageConsumerView` and `SwapConsumerViews`
+  arms). A migration file containing injected DDL is rejected with
+  `AqueductError::UntrustedSqlBody` before any database call is made (SEC-1).
+- Integration test `consumer_sql_injection_rejected_at_apply` confirms that a consumer
+  migration with a `CREATE TABLE` body is rejected at the executor level (SEC-1).
+- CNPG preview HTTP client now validates TLS certificates by default. Set
+  `CNPG_INSECURE_SKIP_VERIFY` to skip verification in development environments only.
+  Emits a `warn!` when the env var is set (SEC-2).
+- Unit test `cnpg_tls_default_does_not_skip_verification` confirms the env-var gate
+  logic (SEC-2).
+- `age` secret backend now validates the identity file path (from `SOPS_AGE_KEY_FILE` /
+  `AGE_KEY_FILE`) via `validate_secret_path()` and rejects paths starting with `-`
+  (flag-injection guard). Unit tests `age_identity_file_traversal_rejected` and
+  `age_identity_file_flag_injection_rejected` cover both rejection cases (SEC-3).
+- `.github/SECURITY.md`: security policy with contact address, response SLA, supported
+  version matrix, and a summary of implemented controls (L-5).
+- `docs/security.md`: new sections covering consumer SQL injection protection,
+  CNPG TLS configuration, and `age` identity file security (SEC-1, SEC-2, SEC-3).
+
+### Changed
+
+- `aqueduct plan --fail-on-drift`: drift count now includes `source_deltas` and
+  `consumer_deltas` in addition to `deltas`, matching the already-correct `status`
+  implementation. Previously, consumer-layer and source-layer drift was silently
+  ignored (M-2).
+- `aqueduct destroy`: changed from `connect()` to `connect_and_migrate()` so a stale
+  catalog schema is auto-migrated before destroy queries it (M-5).
+- `release.yml`: removed global `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` env var — all
+  actions in the workflow use modern Node.js runtimes that do not require this
+  workaround (M-6). Added `just gen-docs` step to regenerate `docs/api-reference.md`
+  on every release tag.
+- `ingest.rs` test helpers: `fs::write(...).unwrap()` replaced with descriptive
+  `.expect("...")` calls so a failing CI write produces a clear error message (M-7).
+- `fmt.rs`: renamed `KNOWN_FRONTMATTER_KEYS` to `KNOWN_DIRECTIVE_KEYS` with updated
+  doc comment explaining it is used to skip already-emitted keys, not enforce ordering
+  (L-1).
+- `main.rs`: replaced stale `// L7 (v0.14)` tracking comment with descriptive
+  per-platform CI env var documentation (L-3).
+- `Cargo.toml`: replaced stale `# DEP-1 (v0.14): pre-declare serde_yaml` comment with
+  `# YAML serialization for plan/status/diff --format yaml output.` (L-4).
+- Six user-facing integration files updated to reference version `0.18.0`:
+  `.github/workflows/aqueduct-plan.yml`, `.github/workflows/aqueduct-apply.yml`,
+  `ci/gitlab/aqueduct.gitlab-ci.yml` (also fixes archive name pattern to match
+  the release pipeline: `aqueduct-{version}-{os}-{arch}.tar.gz`),
+  `.pre-commit-hooks.yaml`, `docs/api-reference.md`, `docs/introduction.md` (CI-1).
+- `version-lint` CI job extended to check nine files: `README.md`,
+  `docs/installation.md`, `docs/api-reference.md`, `docs/introduction.md`,
+  `ci/gitlab/aqueduct.gitlab-ci.yml`, `.pre-commit-hooks.yaml`,
+  `.github/workflows/aqueduct-plan.yml`, `.github/workflows/aqueduct-apply.yml`,
+  and `ROADMAP.md`. Fails if any disagrees with the workspace `Cargo.toml` version
+  (CI-1, L-6).
+- `ROADMAP.md` status line updated to `v0.18.0 released` (L-6).
+- Workspace version bumped to `0.18.0`.
+
 ## [0.17.0] - 2026-06-10
 
 This release is all about confidence and safety for teams running critical database infrastructure. When you're managing a high-availability PostgreSQL cluster using tools like Patroni, you can now tell Aqueduct exactly where to check that the database is still the primary leader between every migration step. If the database fails over to a replica mid-migration, Aqueduct detects this immediately, stops what it's doing, and marks the migration as interrupted — rather than blindly continuing and potentially corrupting data on a read-only standby. This dramatically reduces the risk of one of the most dangerous scenarios in database operations: a migration that half-completes during a failover event.

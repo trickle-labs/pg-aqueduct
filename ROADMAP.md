@@ -1,6 +1,6 @@
 # pg_aqueduct Roadmap
 
-> **Status:** v0.17.0 released. Versions v0.18–v0.20 address all findings from the
+> **Status:** v0.18.0 released. Versions v0.19–v0.20 address remaining findings from the
 > Phase 4 engineering assessment (`plans/overall-assessment-4.md`). v1.0 is the first
 > production-ready release.
 > This roadmap reflects the agreed design in `plans/pg-aqueduct-plan.md`.
@@ -2805,7 +2805,7 @@ in the API reference exist and behave as described.
 
 #### A. Critical Security Fixes (SEC-1, SEC-2, SEC-3)
 
-- [ ] **Call `validate_consumer_sql_is_single_select()` in `ManageConsumerView` arm
+- [x] **Call `validate_consumer_sql_is_single_select()` in `ManageConsumerView` arm
   (SEC-1 — Critical).** The function exists at `validate.rs:173` and is unit-tested, but
   is never invoked in `executor.rs`. Add a call immediately before the
   `CREATE OR REPLACE VIEW ... AS <body>` execution in both the `"create"`/`"alter"` arm
@@ -2814,7 +2814,7 @@ in the API reference exist and behave as described.
   `consumer_sql_injection_rejected_at_apply` that confirms a migration file containing
   injected DDL is rejected before any database call is made.
 
-- [ ] **Gate CNPG preview TLS behind `CNPG_INSECURE_SKIP_VERIFY` env var (SEC-2 — Critical).**
+- [x] **Gate CNPG preview TLS behind `CNPG_INSECURE_SKIP_VERIFY` env var (SEC-2 — Critical).**
   Replace the unconditional `danger_accept_invalid_certs(true)` call in `preview.rs:518`
   with a runtime check: if `CNPG_INSECURE_SKIP_VERIFY` is set, emit a
   `warn!("TLS certificate validation disabled by CNPG_INSECURE_SKIP_VERIFY")` and build
@@ -2822,7 +2822,7 @@ in the API reference exist and behave as described.
   var as a development-only escape hatch in `docs/security.md`. Add a test that confirms
   a mock endpoint with a self-signed certificate is rejected when the env var is unset.
 
-- [ ] **Validate Age `identity_file` via `validate_secret_path()` (SEC-3 — Critical).**
+- [x] **Validate Age `identity_file` via `validate_secret_path()` (SEC-3 — Critical).**
   In `secrets.rs`, after reading `identity_file` from `$SOPS_AGE_KEY_FILE` or
   `$AGE_KEY_FILE`, call `validate_secret_path(&identity_file)?` and add a separate check
   that rejects strings starting with `-` (flag-injection guard). Both the key argument
@@ -2835,73 +2835,73 @@ in the API reference exist and behave as described.
 All six user-facing example and template files that contain stale release version pins
 are updated to `v0.18.0` as part of this release and locked to the current version by CI.
 
-- [ ] **Update `.github/workflows/aqueduct-plan.yml`** — change action ref from
+- [x] **Update `.github/workflows/aqueduct-plan.yml`** — change action ref from
   `@v0.11.0` to `@v0.18.0` and `version: '0.4.0'` to `version: '0.18.0'`.
-- [ ] **Update `.github/workflows/aqueduct-apply.yml`** — same changes.
-- [ ] **Update `ci/gitlab/aqueduct.gitlab-ci.yml`** — change `AQUEDUCT_VERSION: "0.4.0"`
+- [x] **Update `.github/workflows/aqueduct-apply.yml`** — same changes.
+- [x] **Update `ci/gitlab/aqueduct.gitlab-ci.yml`** — change `AQUEDUCT_VERSION: "0.4.0"`
   to `AQUEDUCT_VERSION: "0.18.0"` and fix the archive name pattern from
   `aqueduct-linux-x86_64` to `aqueduct-linux-amd64` to match the release pipeline.
-- [ ] **Update `.pre-commit-hooks.yaml`** — change example comment `rev: v0.4.0` to
+- [x] **Update `.pre-commit-hooks.yaml`** — change example comment `rev: v0.4.0` to
   `rev: v0.18.0`.
-- [ ] **Update `docs/api-reference.md`** — update the binary version header line to
+- [x] **Update `docs/api-reference.md`** — update the binary version header line to
   `aqueduct 0.18.0`.
-- [ ] **Update `docs/introduction.md`** — replace the stale version reference on line 13.
-- [ ] **Extend the `version-lint` CI job** to check `docs/api-reference.md`,
+- [x] **Update `docs/introduction.md`** — replace the stale version reference on line 13.
+- [x] **Extend the `version-lint` CI job** to check `docs/api-reference.md`,
   `docs/introduction.md`, `ci/gitlab/aqueduct.gitlab-ci.yml`, `.pre-commit-hooks.yaml`,
   `.github/workflows/aqueduct-plan.yml`, and `.github/workflows/aqueduct-apply.yml` in
   addition to the existing `README.md` and `docs/installation.md` checks. Fail the build
   if any of these files disagree with the workspace `Cargo.toml` version.
-- [ ] **Add a `just gen-docs` step to `release.yml`** so `docs/api-reference.md` is
+- [x] **Add a `just gen-docs` step to `release.yml`** so `docs/api-reference.md` is
   regenerated automatically on every release tag.
 
 #### C. Operational Quality — Medium Fixes (M-2, M-5, M-6, M-7)
 
-- [ ] **Fix `--fail-on-drift` to count all three delta collections (M-2).** In
+- [x] **Fix `--fail-on-drift` to count all three delta collections (M-2).** In
   `plan.rs:148-159`, replace the `diff.deltas`-only count with a sum of
   `diff.deltas.len() + diff.source_deltas.len() + diff.consumer_deltas.len()` (excluding
   `DeltaKind::Unchanged`), matching the already-correct implementation in `status.rs`.
   Add a test `plan_fail_on_drift_counts_consumer_deltas` that manually drifts a consumer
   view and confirms `aqueduct plan --fail-on-drift` exits 1.
 
-- [ ] **Use `connect_and_migrate` in `destroy.rs` (M-5).** Change `connect(&dsn).await?`
+- [x] **Use `connect_and_migrate` in `destroy.rs` (M-5).** Change `connect(&dsn).await?`
   to `connect_and_migrate(&dsn).await?` so the destroy command auto-migrates a stale
   catalog before querying it. Add test `destroy_auto_migrates_catalog` that creates a
   pre-v8 schema and confirms destroy succeeds without a missing-column error.
 
-- [ ] **Remove `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` from `release.yml` (M-6).** Verify
+- [x] **Remove `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` from `release.yml` (M-6).** Verify
   that removing the workaround does not break any of the four platform builds. If any
   third-party action still requires it, replace the global env var with a
   per-step `env:` override scoped to only that action call.
 
-- [ ] **Fix `.unwrap()` in `ingest.rs` test helper (M-7).** Change
+- [x] **Fix `.unwrap()` in `ingest.rs` test helper (M-7).** Change
   `fs::write(...).unwrap()` at `ingest.rs:476` to propagate the error via `?` so
   a failing CI write produces a descriptive error instead of a panic.
 
 #### D. Code Hygiene — Low Priority (L-1 through L-6)
 
-- [ ] **Rename `CANONICAL_KEY_ORDER` to `KNOWN_DIRECTIVE_KEYS` in `fmt.rs` (L-1).**
+- [x] **Rename `CANONICAL_KEY_ORDER` to `KNOWN_DIRECTIVE_KEYS` in `fmt.rs` (L-1).**
   Update all references. Add a comment explaining that the constant is used to skip
   already-emitted keys, not to enforce ordering.
 
-- [ ] **Propagate IO errors from `read_original_content()` in `fmt.rs` (L-2).** Return
+- [x] **Propagate IO errors from `read_original_content()` in `fmt.rs` (L-2).** Return
   `Result<String, std::io::Error>` instead of calling `unwrap_or_default()`. Update all
   call sites to handle the error — the formatter should fail loudly if the migration file
   it is formatting cannot be read.
 
-- [ ] **Update stale comment in `main.rs:103` (L-3).** Replace the `"L7 (v0.14)"` comment
+- [x] **Update stale comment in `main.rs:103` (L-3).** Replace the `"L7 (v0.14)"` comment
   with a reference to the `GITHUB_ACTIONS == "true"` truthiness note, and add the
   `CIRCLECI` and `JENKINS_URL` branches to the comment.
 
-- [ ] **Remove stale tracking comment from `Cargo.toml:41-42` (L-4).** Replace the
+- [x] **Remove stale tracking comment from `Cargo.toml:41-42` (L-4).** Replace the
   `# DEP-1 (v0.14): pre-declare serde_yaml for v0.16 YAML work.` comment with a plain
   `# YAML serialization for plan/status/diff --format yaml output.` comment.
 
-- [ ] **Add `.github/SECURITY.md` (L-5).** Create a security policy file documenting
+- [x] **Add `.github/SECURITY.md` (L-5).** Create a security policy file documenting
   the vulnerability reporting process: the contact address, the expected response SLA,
   and whether coordinated disclosure is used. Reference `docs/security.md` for the
   implemented security controls.
 
-- [ ] **Update `ROADMAP.md` status line (L-6).** Replace `"v0.16.0 released"` in the
+- [x] **Update `ROADMAP.md` status line (L-6).** Replace `"v0.17.0 released"` in the
   roadmap header with `"v0.18.0 released"` on each new release going forward.
   Extend the `version-lint` CI job to check the roadmap status line.
 

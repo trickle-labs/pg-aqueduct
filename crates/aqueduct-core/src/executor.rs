@@ -13,6 +13,7 @@ use crate::catalog::{
 use crate::dag::DagState;
 use crate::error::{AqueductError, Result};
 use crate::plan::{Plan, PlanStep};
+use crate::validate::validate_consumer_sql_is_single_select;
 
 /// Capabilities detected in the live pg_trickle installation (M-07 / v0.12).
 ///
@@ -961,6 +962,12 @@ impl<'a> PlanExecutor<'a> {
                                     .sql_body
                                     .as_deref()
                                     .unwrap_or(default_body.as_str());
+                                // SEC-1 (v0.18): Validate sql_body is a single SELECT
+                                // before any database call is made.
+                                validate_consumer_sql_is_single_select(
+                                    sql_body,
+                                    &format!("{}.{}", view_schema, view_name),
+                                )?;
                                 self.client
                                     .execute(
                                         &format!(
@@ -1070,6 +1077,12 @@ impl<'a> PlanExecutor<'a> {
                                 );
                                 let body =
                                     spec.sql_body.as_deref().unwrap_or(default_body.as_str());
+                                // SEC-1 (v0.18): Validate sql_body is a single SELECT
+                                // before any database call is made.
+                                validate_consumer_sql_is_single_select(
+                                    body,
+                                    &format!("{}.{}", view_schema, view_name),
+                                )?;
                                 self.client
                                     .execute(
                                         &format!(

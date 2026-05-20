@@ -124,6 +124,15 @@ pub async fn resolve_secret(backend: &SecretBackend, key: &str) -> Result<String
         SecretBackend::Age { identity_file } => {
             // Validate that the key path does not escape via `../`.
             validate_secret_path(key)?;
+            // SEC-3 (v0.18): Validate identity_file path and guard against
+            // flag injection (strings starting with `-` would be passed as
+            // CLI flags to the `age` subprocess).
+            validate_secret_path(identity_file)?;
+            if identity_file.starts_with('-') {
+                return Err(AqueductError::InvalidSecretPath {
+                    path: identity_file.to_string(),
+                });
+            }
             tracing::info!(
                 backend = "age",
                 file = %key,
@@ -734,6 +743,38 @@ mod tests {
         assert!(err.to_string().contains("Invalid secret path"));
         let err2 = validate_secret_path("secrets/../../etc/passwd").unwrap_err();
         assert!(err2.to_string().contains("Invalid secret path"));
+    }
+
+    /// SEC-3 (v0.18): Age identity_file from AGE_KEY_FILE must be validated.
+    /// Path traversal in AGE_KEY_FILE should produce InvalidSecretPath.
+    #[tokio::test]
+    async fn age_identity_file_traversal_rejected() {
+        let _guard = ENV_VAR_LOCK.lock().await;
+        std::env::set_var("AGE_KEY_FILE", "../../etc/passwd");
+        // Build the backend — traversal is caught at resolve_secret time.
+        let backend = SecretBackend::from_str("age").unwrap();
+        let err = resolve_secret(&backend, "my-secret.enc").await.unwrap_err();
+        std::env::remove_var("AGE_KEY_FILE");
+        assert!(
+            err.to_string().contains("Invalid secret path"),
+            "expected InvalidSecretPath, got: {}",
+            err
+        );
+    }
+
+    /// SEC-3 (v0.18): Age identity_file starting with `-` is a flag-injection risk.
+    #[tokio::test]
+    async fn age_identity_file_flag_injection_rejected() {
+        let _guard = ENV_VAR_LOCK.lock().await;
+        std::env::set_var("AGE_KEY_FILE", "-d");
+        let backend = SecretBackend::from_str("age").unwrap();
+        let err = resolve_secret(&backend, "my-secret.enc").await.unwrap_err();
+        std::env::remove_var("AGE_KEY_FILE");
+        assert!(
+            err.to_string().contains("Invalid secret path"),
+            "expected InvalidSecretPath for flag-injection attempt, got: {}",
+            err
+        );
     }
 
     #[tokio::test]

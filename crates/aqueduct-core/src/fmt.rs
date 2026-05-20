@@ -8,11 +8,11 @@
 
 use crate::parser::MigrationFile;
 
-/// Known front-matter keys used to filter out unknown/unsupported directives.
+/// Keys that the formatter emits explicitly in the front-matter block.
 ///
-/// This list does **not** imply a canonical ordering; it is used by callers
-/// to distinguish known keys from unknown ones when parsing migration files.
-const KNOWN_FRONTMATTER_KEYS: &[&str] = &[
+/// Used to skip already-emitted keys when iterating `unknown_keys` at the end
+/// of rendering — this constant does **not** imply or enforce canonical ordering.
+const KNOWN_DIRECTIVE_KEYS: &[&str] = &[
     "kind",
     "owned",
     "schema",
@@ -218,7 +218,7 @@ pub fn render_migration(file: &MigrationFile) -> String {
     extra_keys.sort();
     for key in &extra_keys {
         // Skip keys already emitted above.
-        if KNOWN_FRONTMATTER_KEYS.contains(&key.as_str()) {
+        if KNOWN_DIRECTIVE_KEYS.contains(&key.as_str()) {
             continue;
         }
         if let Some(val) = fm.unknown_keys.get(key) {

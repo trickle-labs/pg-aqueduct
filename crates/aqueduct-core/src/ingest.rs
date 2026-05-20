@@ -467,13 +467,16 @@ mod tests {
     use tempfile::TempDir;
 
     fn write_manifest(dir: &Path, manifest_json: &str) {
-        fs::write(dir.join("manifest.json"), manifest_json).unwrap();
+        fs::write(dir.join("manifest.json"), manifest_json)
+            .expect("failed to write manifest.json in test helper");
     }
 
     fn write_compiled_sql(dir: &Path, project: &str, model: &str, sql: &str) {
         let compiled_dir = dir.join("compiled").join(project).join("models");
-        fs::create_dir_all(&compiled_dir).unwrap();
-        fs::write(compiled_dir.join(format!("{}.sql", model)), sql).unwrap();
+        fs::create_dir_all(&compiled_dir)
+            .expect("failed to create compiled directory in test helper");
+        fs::write(compiled_dir.join(format!("{}.sql", model)), sql)
+            .expect("failed to write compiled SQL in test helper");
     }
 
     fn minimal_manifest(model_name: &str, schedule: &str) -> String {

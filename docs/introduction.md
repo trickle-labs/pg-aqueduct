@@ -10,8 +10,7 @@ of a streaming, incrementally-maintained DAG of materialized views* over time �
 without losing differential state, without taking the pipeline offline, and
 without making the topology of your stream tables your problem to figure out by hand.
 
-> **Status:** v0.7.0 — Documentation & Cookbook release.  
-> 197 tests passing (101 unit + 63 integration + 33 CLI).
+> **Status:** v0.18.0 — Security Hardening, Documentation Correctness & Operational Quality.
 
 ---
 
