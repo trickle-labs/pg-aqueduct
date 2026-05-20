@@ -4,13 +4,13 @@
 #
 #   include:
 #     - project: 'trickle-labs/pg-aqueduct'
-#       ref: v0.18.0
+#       ref: v0.19.0
 #       file: 'ci/gitlab/aqueduct.gitlab-ci.yml'
 #
 # Then override the variables in your project's .gitlab-ci.yml as needed:
 #
 #   variables:
-#     AQUEDUCT_VERSION: "0.18.0"
+#     AQUEDUCT_VERSION: "0.19.0"
 #     AQUEDUCT_TARGET: "prod"
 #     AQUEDUCT_PROJECT_DIR: "."
 #
@@ -18,7 +18,7 @@
 # Configure it under Settings → CI/CD → Variables.
 
 variables:
-  AQUEDUCT_VERSION: "0.18.0"
+  AQUEDUCT_VERSION: "0.19.0"
   AQUEDUCT_TARGET: "prod"
   AQUEDUCT_PROJECT_DIR: "."
   # Set AQUEDUCT_FAIL_IF_CHANGED to "true" to block MR merges with pending migrations.

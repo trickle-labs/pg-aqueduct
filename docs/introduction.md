@@ -10,7 +10,7 @@ of a streaming, incrementally-maintained DAG of materialized views* over time �
 without losing differential state, without taking the pipeline offline, and
 without making the topology of your stream tables your problem to figure out by hand.
 
-> **Status:** v0.18.0 — Security Hardening, Documentation Correctness & Operational Quality.
+> **Status:** v0.19.0 — Correctness Hardening, Blue/Green Atomicity & Test Infrastructure.
 
 ---
 

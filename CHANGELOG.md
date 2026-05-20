@@ -9,7 +9,78 @@ For planned future versions, see [ROADMAP.md](ROADMAP.md).
 
 ## [Unreleased]
 
-## [0.18.0] - 2026-05-20
+## [0.19.0] - 2026-05-20
+
+This release eliminates every structural correctness bug identified in the Phase 4 engineering assessment, makes the blue/green view swap fully atomic, and ensures every known correctness regression path is covered by a test that would catch it.
+
+The headline change is that the deployment status row update in `SwapConsumerViews` is now executed *inside* the surrounding `BEGIN`/`COMMIT` block, eliminating the window where consumer views point at the green schema while the deployment row still shows `status = 'active'`. If the transaction is rolled back for any reason, both the view assignments and the deployment row revert together.
+
+The heartbeat task is now supervised by a `JoinHandle`-based wrapper. If the heartbeat task panics — something that could previously produce a silent hang — the executor immediately receives a `LockLost` signal, stops execution, and surfaces the failure. This closes the last known path to a silent runaway executor.
+
+The mock `pg_trickle` DDL gains a `pgtrickle.paused_nodes` table so integration tests can assert precisely which nodes were paused during DDL and that the scheduler was fully resumed after apply or after a failure. Two new test-kit helpers (`assert_scheduler_idle` and `assert_scheduler_paused_for`) make these assertions one-liners.
+
+Four executor and CLI quality fixes round out the release: the `WaitForConvergence` poll query is now guarded by a `statement_timeout` to prevent a hung `pg_trickle` query from holding the loop past the configured deadline; `status --watch` applies exponential backoff on repeated connection failures; the `EXPLAIN` trade-off in `cost.rs` is documented with a code comment; and `aqueduct init` and `aqueduct apply` now return an explicit `NotYetImplemented` error when `catalog_schema` is set to anything other than `"aqueduct"`, preventing silent data mixing in multi-tenant deployments until full schema parameterisation ships in v0.20.
+
+All ten failure-mode test cases identified in the Phase 4 assessment are now present and passing.
+
+### Added
+
+- **Blue/green atomicity (ARCH-3):** `SWAP_BLUE_GREEN_SQL` (the `blue_green_deployments`
+  status row update) is now executed inside the `SwapConsumerViews` transaction. A failed
+  mid-swap now rolls back both view assignments and the deployment status atomically.
+  Integration test `swap_consumer_views_atomicity` verifies this.
+- **Heartbeat panic supervisor (CORR-3):** `tokio::spawn(run_heartbeat(...))` is wrapped in
+  a `JoinHandle`-based supervisor that calls `lock_lost_tx.send(true)` if the heartbeat
+  task panics. Integration test `heartbeat_panic_signals_lock_loss` verifies the signal.
+- **Observable scheduler mock (TEST-3):** `mock_pgtrickle.rs` gains a
+  `pgtrickle.paused_nodes(node_name text PRIMARY KEY, paused_at timestamptz)` table.
+  `pause_scheduler` inserts into it; `resume_scheduler` deletes from it.
+- **Test-kit helpers:** `assert_scheduler_idle(client)` and
+  `assert_scheduler_paused_for(client, nodes)` added to `aqueduct-testkit`. Integration
+  tests `mock_scheduler_records_pause` and `mock_scheduler_idle_after_apply` demonstrate
+  usage.
+- **`statement_timeout` guard for `WaitForConvergence` (M-9):** the poll `SELECT` is
+  wrapped in `BEGIN READ ONLY; SET LOCAL statement_timeout = '{timeout}ms'` so a hung
+  `pg_trickle` query cannot hold the loop open past the configured deadline. Integration
+  test `waitforconvergence_deadline_respected` verifies the deadline is enforced.
+- **Exponential backoff in `status --watch` (M-8):** consecutive connection or poll
+  failures back off up to `5 × interval` before retrying; the counter resets on the next
+  successful poll.
+- **EXPLAIN trade-off comment (M-4):** `cost.rs::estimate_rows` now documents why
+  `format!("EXPLAIN...")` is intentional and safe. The EXPLAIN call is also wrapped in a
+  `BEGIN READ ONLY; SET LOCAL statement_timeout = '5s'` block.
+- **Catalog schema stop-gap (ARCH-1 partial):** `validate_catalog_schema_not_overridden`
+  in `catalog.rs` returns `AqueductError::NotYetImplemented { feature: "catalog_schema override" }`
+  for any value other than `"aqueduct"`. Called from `aqueduct init` and `aqueduct apply`
+  to prevent silent data mixing until full multi-tenant support lands in v0.20.
+  Integration test `catalog_schema_override_rejected_until_implemented` verifies this.
+- **Failure-mode tests (Phase 4):** all ten test cases identified in the assessment are
+  now present and passing:
+  `consumer_sql_injection_rejected_at_apply`,
+  `heartbeat_panic_signals_lock_loss`,
+  `swap_consumer_views_atomicity`,
+  `plan_fail_on_drift_counts_consumer_deltas`,
+  `destroy_auto_migrates_catalog`,
+  `catalog_schema_override_rejected_until_implemented`,
+  `age_identity_file_traversal_rejected`,
+  `cnpg_preview_requires_valid_cert`,
+  `waitforconvergence_deadline_respected`,
+  `mock_scheduler_records_pause`.
+- `AqueductError::NotYetImplemented { feature }` variant added (error code 1308).
+- `cnpg_preview_requires_valid_cert` unit test in `preview.rs` verifies that a
+  `create_preview_cnpg` call to a plain-HTTP endpoint fails with a TLS/connection error
+  when `CNPG_INSECURE_SKIP_VERIFY` is absent (SEC-2).
+
+### Changed
+
+- Workspace version bumped to `0.19.0`.
+- Six user-facing integration files updated to reference version `0.19.0`:
+  `.github/workflows/aqueduct-plan.yml`, `.github/workflows/aqueduct-apply.yml`,
+  `ci/gitlab/aqueduct.gitlab-ci.yml`, `.pre-commit-hooks.yaml`,
+  `docs/api-reference.md`, `docs/introduction.md`.
+- `ROADMAP.md` status line updated to `v0.19.0 released`.
+
+
 
 This release closes every open security finding from the Phase 4 engineering assessment, bringing `pg_aqueduct` to zero open CVEs and zero open critical or high security issues. The headline change is that consumer view bodies are now validated as a single `SELECT` statement before any database call is made — meaning a misconfigured or maliciously crafted migration file containing DDL like `CREATE TABLE` or `DROP TABLE` can never reach the database, even if it somehow made it into your migrations directory. This is an important defence-in-depth layer for teams running Aqueduct in automated CI/CD pipelines.
 

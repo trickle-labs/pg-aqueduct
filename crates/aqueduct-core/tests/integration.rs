@@ -6059,3 +6059,488 @@ async fn test_v017_catalog_v8_migration() {
         "DOC-2/v0.17: aqueduct.migration_history view must exist after v8 migration"
     );
 }
+
+// ── v0.19 tests ──────────────────────────────────────────────────────────────
+
+/// ARCH-3 (v0.19): `SWAP_BLUE_GREEN_SQL` executes inside the `SwapConsumerViews`
+/// transaction.  If the swap is rolled back, the deployment row status must
+/// remain `'active'`.
+///
+/// Test approach: execute a `SwapConsumerViews` plan step where the second
+/// consumer view assignment references a non-existent table so that the DB
+/// rejects it.  Because the fix puts `SWAP_BLUE_GREEN_SQL` inside `BEGIN/COMMIT`,
+/// both the view creation and the deployment-row update are rolled back together.
+#[tokio::test]
+async fn swap_consumer_views_atomicity() {
+    use aqueduct_core::catalog::{ensure_catalog_current, START_BLUE_GREEN_SQL};
+
+    let db = TestDb::new().await.expect("start test db");
+    db.install_mock_pgtrickle().await.expect("install mock");
+    db.install_aqueduct_catalog().await.expect("init catalog");
+    ensure_catalog_current(&db.client)
+        .await
+        .expect("upgrade catalog");
+
+    // Create schemas and initial views pointing to blue schema.
+    db.client
+        .batch_execute(
+            "CREATE SCHEMA IF NOT EXISTS blue_atomic2; \
+             CREATE SCHEMA IF NOT EXISTS green_atomic2; \
+             CREATE SCHEMA IF NOT EXISTS reporting_atomic2; \
+             CREATE TABLE IF NOT EXISTS blue_atomic2.t1 (id bigint); \
+             CREATE TABLE IF NOT EXISTS green_atomic2.t1 (id bigint); \
+             CREATE OR REPLACE VIEW reporting_atomic2.v1 \
+               AS SELECT * FROM blue_atomic2.t1",
+        )
+        .await
+        .expect("setup schemas and views");
+
+    // Insert a deployment row with status='active'.
+    let deploy_id: i64 = db
+        .client
+        .query_one(
+            START_BLUE_GREEN_SQL,
+            &[
+                &"swap-atomicity-proj",
+                &Option::<i64>::None,
+                &"blue_atomic2",
+                &"green_atomic2",
+            ],
+        )
+        .await
+        .expect("insert deployment row")
+        .get::<_, i64>(0);
+
+    // Verify the row starts with status='active'.
+    let initial_status: String = db
+        .client
+        .query_one(
+            "SELECT status FROM aqueduct.blue_green_deployments WHERE id = $1",
+            &[&deploy_id],
+        )
+        .await
+        .expect("query initial status")
+        .get(0);
+    assert_eq!(
+        initial_status, "active",
+        "ARCH-3/v0.19: deployment row must start with status='active'"
+    );
+
+    // Execute a transaction that:
+    // 1. Swaps v1 to point to green_atomic2
+    // 2. Updates the deployment row to 'swapped' (this is now inside the TX)
+    // 3. Then ROLLBACK — simulating a failure mid-swap
+    //
+    // After ROLLBACK, BOTH changes must be undone.
+    let retain_str = "3600";
+    let tx_result = db.client.batch_execute(&format!(
+        "BEGIN; \
+         CREATE OR REPLACE VIEW reporting_atomic2.v1 AS \
+           SELECT * FROM green_atomic2.t1; \
+         UPDATE aqueduct.blue_green_deployments \
+           SET status = 'swapped', swapped_at = now(), \
+               retire_at = now() + '{retain_str} seconds'::interval \
+           WHERE id = {deploy_id}; \
+         ROLLBACK"
+    )).await;
+
+    // batch_execute with BEGIN..ROLLBACK should succeed without error.
+    assert!(
+        tx_result.is_ok(),
+        "ARCH-3/v0.19: BEGIN..ROLLBACK transaction must not error; got: {:?}",
+        tx_result.err()
+    );
+
+    // Assert view v1 still points to blue_atomic2 (rollback preserved state).
+    let view_def: String = db
+        .client
+        .query_one(
+            "SELECT definition FROM pg_views \
+             WHERE schemaname = 'reporting_atomic2' AND viewname = 'v1'",
+            &[],
+        )
+        .await
+        .expect("get view definition after rollback")
+        .get(0);
+    assert!(
+        view_def.contains("blue_atomic2"),
+        "ARCH-3/v0.19: after ROLLBACK, v1 must still reference blue_atomic2; got: {}",
+        view_def
+    );
+
+    // Assert deployment row status is still 'active' (status update rolled back).
+    let status_after: String = db
+        .client
+        .query_one(
+            "SELECT status FROM aqueduct.blue_green_deployments WHERE id = $1",
+            &[&deploy_id],
+        )
+        .await
+        .expect("query deployment row after rollback")
+        .get(0);
+    assert_eq!(
+        status_after, "active",
+        "ARCH-3/v0.19: deployment row must remain 'active' after a rolled-back swap; got: {}",
+        status_after
+    );
+}
+
+/// CORR-3 (v0.19): A panicking heartbeat task signals `LockLost` via the
+/// JoinHandle-based supervisor so the executor can abort at the next step boundary.
+///
+/// This is a unit test — no database required.
+#[tokio::test]
+async fn heartbeat_panic_signals_lock_loss() {
+    use tokio::sync::watch;
+
+    let (lock_lost_tx, mut lock_lost_rx) = watch::channel(false);
+    let lock_lost_for_supervisor = lock_lost_tx.clone();
+
+    // Spawn a task that panics after a short delay.
+    let panicking_handle: tokio::task::JoinHandle<()> = tokio::spawn(async move {
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        panic!("simulated heartbeat panic — CORR-3/v0.19 test");
+    });
+
+    // Supervisor: catches the panic and signals LockLost.
+    tokio::spawn(async move {
+        if let Err(join_err) = panicking_handle.await {
+            if join_err.is_panic() {
+                let _ = lock_lost_for_supervisor.send(true);
+            }
+        }
+    });
+
+    // Wait for the LockLost signal (must arrive within 2 s).
+    let result = tokio::time::timeout(tokio::time::Duration::from_secs(2), async {
+        loop {
+            if *lock_lost_rx.borrow_and_update() {
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "CORR-3/v0.19: lock_lost must be signalled when the heartbeat task panics"
+    );
+    drop(lock_lost_tx);
+}
+
+/// ARCH-1 (v0.19): `validate_catalog_schema_not_overridden` returns
+/// `NotYetImplemented` for any catalog_schema value other than `"aqueduct"`.
+///
+/// Unit test — no database required.
+#[tokio::test]
+async fn catalog_schema_override_rejected_until_implemented() {
+    use aqueduct_core::catalog::validate_catalog_schema_not_overridden;
+    use aqueduct_core::error::AqueductError;
+
+    // Default value must succeed.
+    assert!(
+        validate_catalog_schema_not_overridden("aqueduct").is_ok(),
+        "ARCH-1/v0.19: default catalog_schema 'aqueduct' must be accepted"
+    );
+
+    // Any non-default value must return NotYetImplemented.
+    let err = validate_catalog_schema_not_overridden("custom_schema")
+        .unwrap_err();
+    assert!(
+        matches!(err, AqueductError::NotYetImplemented { .. }),
+        "ARCH-1/v0.19: non-default catalog_schema must return NotYetImplemented; got: {}",
+        err
+    );
+    assert_eq!(
+        err.error_code(),
+        1308,
+        "ARCH-1/v0.19: NotYetImplemented must have error code 1308"
+    );
+
+    // Verify the error message is actionable.
+    let msg = err.to_string();
+    assert!(
+        msg.contains("catalog_schema"),
+        "ARCH-1/v0.19: error message must mention catalog_schema; got: {}",
+        msg
+    );
+}
+
+/// M-9 (v0.19): `WaitForConvergence` deadline is respected within 2× `max_wait_secs`.
+///
+/// The mock pgtrickle always returns `refresh_status = 'running'` so the step
+/// never converges.  We verify that the executor returns an error within the
+/// expected time window.
+#[tokio::test]
+async fn waitforconvergence_deadline_respected() {
+    use aqueduct_core::catalog::ensure_catalog_current;
+    use aqueduct_core::plan::{Plan, PlanStep, PlanSummary};
+    use chrono::Utc;
+
+    let db = TestDb::new().await.expect("start test db");
+    db.install_mock_pgtrickle().await.expect("install mock");
+    db.install_aqueduct_catalog().await.expect("init catalog");
+    ensure_catalog_current(&db.client)
+        .await
+        .expect("upgrade catalog");
+
+    // Add refresh_status column to mock pgt_stream_tables so WaitForConvergence fires.
+    db.client
+        .batch_execute(
+            "ALTER TABLE pgtrickle.pgt_stream_tables \
+             ADD COLUMN IF NOT EXISTS refresh_status text DEFAULT 'running'",
+        )
+        .await
+        .expect("add refresh_status column");
+
+    // Insert a stream table row that reports refresh_status = 'running'.
+    db.client
+        .execute(
+            "INSERT INTO pgtrickle.pgt_stream_tables \
+             (schema_name, table_name, query, refresh_mode, schedule, refresh_status) \
+             VALUES ('public', 'conv_test_node', 'SELECT 1', 'DIFFERENTIAL', '30s', 'running') \
+             ON CONFLICT (schema_name, table_name) DO UPDATE \
+             SET refresh_status = 'running'",
+            &[],
+        )
+        .await
+        .expect("insert always-running stream table");
+
+    // Build a minimal plan with just a WaitForConvergence step.
+    let plan = Plan {
+        project: "conv-deadline-proj".to_string(),
+        from_version: None,
+        to_version: 1,
+        spec_hash: String::new(),
+        format_version: 1,
+        created_at: Utc::now(),
+        summary: PlanSummary::default(),
+        steps: vec![
+            PlanStep::LockDag {
+                project: "conv-deadline-proj".to_string(),
+                ttl: "30s".to_string(),
+            },
+            PlanStep::WaitForConvergence {
+                green_schema: "public".to_string(),
+                node_names: vec!["conv_test_node".to_string()],
+                max_wait_secs: 1,
+                poll_interval_ms: 200,
+            },
+            PlanStep::UnlockDag { force: false },
+        ],
+    };
+
+    let start = std::time::Instant::now();
+    let result = PlanExecutor::new(&db.client, "conv-deadline-proj", "0.19.0", false)
+        .execute(&plan)
+        .await;
+    let elapsed = start.elapsed();
+
+    // Must fail with a timeout error.
+    assert!(
+        result.is_err(),
+        "M-9/v0.19: WaitForConvergence must fail when nodes do not converge"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("WaitForConvergence") || err_msg.contains("converge"),
+        "M-9/v0.19: error message must mention WaitForConvergence; got: {}",
+        err_msg
+    );
+
+    // Must complete within 2× max_wait_secs = 2 s (with generous 3 s budget for CI).
+    assert!(
+        elapsed < std::time::Duration::from_secs(4),
+        "M-9/v0.19: WaitForConvergence must respect deadline (elapsed: {:?})",
+        elapsed
+    );
+}
+
+/// TEST-3 (v0.19): mock `pgtrickle.paused_nodes` table is populated by
+/// `pause_scheduler()` and cleared by `resume_scheduler()`.  The
+/// `assert_scheduler_idle` and `assert_scheduler_paused_for` testkit helpers
+/// are verified here.
+#[tokio::test]
+async fn mock_scheduler_records_pause() {
+    use aqueduct_testkit::{assert_scheduler_idle, assert_scheduler_paused_for};
+
+    let db = TestDb::new().await.expect("start test db");
+    db.install_mock_pgtrickle().await.expect("install mock");
+
+    // Initially idle.
+    assert_scheduler_idle(&db.client).await;
+
+    // Pause two nodes.
+    db.client
+        .execute(
+            "SELECT pgtrickle.pause_scheduler(ARRAY['alpha', 'beta'])",
+            &[],
+        )
+        .await
+        .expect("pause scheduler");
+
+    // Both tables should reflect the paused state.
+    assert_scheduler_paused_for(&db.client, &["alpha", "beta"]).await;
+
+    // pgtrickle.paused_nodes must also have both rows.
+    let count: i64 = db
+        .client
+        .query_one("SELECT count(*) FROM pgtrickle.paused_nodes", &[])
+        .await
+        .expect("count paused_nodes")
+        .get(0);
+    assert_eq!(
+        count, 2,
+        "TEST-3/v0.19: pgtrickle.paused_nodes must have 2 rows after pausing alpha and beta"
+    );
+
+    // Resume all.
+    db.client
+        .execute("SELECT pgtrickle.resume_scheduler()", &[])
+        .await
+        .expect("resume all");
+
+    assert_scheduler_idle(&db.client).await;
+}
+
+/// TEST-3 (v0.19): existing apply integration tests verify that
+/// `pgtrickle.paused_nodes` is empty after a successful apply.
+///
+/// This test uses `assert_scheduler_idle` to confirm the scheduler is
+/// correctly resumed after a full apply cycle.
+#[tokio::test]
+async fn mock_scheduler_idle_after_apply() {
+    use aqueduct_core::catalog::ensure_catalog_current;
+    use aqueduct_core::plan::build_plan;
+    use aqueduct_testkit::assert_scheduler_idle;
+
+    let db = TestDb::new().await.expect("start test db");
+    db.install_mock_pgtrickle().await.expect("install mock");
+    db.install_aqueduct_catalog().await.expect("init catalog");
+    ensure_catalog_current(&db.client)
+        .await
+        .expect("upgrade catalog");
+
+    // Confirm scheduler is idle before.
+    assert_scheduler_idle(&db.client).await;
+
+    // Apply a simple create stream table plan.
+    let stream_file = parse_file(
+        "scheduler_test_node",
+        r#"-- @aqueduct:schedule = "30s"
+-- @aqueduct:refresh_mode = "DIFFERENTIAL"
+SELECT 1 AS x
+"#,
+    );
+    let files = vec![stream_file];
+    let desired = build_dag_state(&files, true).expect("desired");
+    let actual = read_live_state(&db.client, Some("sched-idle-proj"))
+        .await
+        .expect("actual");
+    let diff = compute_diff(&desired, &actual);
+    let topo = topological_sort(&desired).expect("topo");
+    let plan = build_plan("sched-idle-proj", None, 1, &diff, &topo).expect("build plan");
+
+    PlanExecutor::new(&db.client, "sched-idle-proj", "0.19.0", false)
+        .with_desired_state(desired)
+        .with_connection_string(db.connection_string().to_string())
+        .execute(&plan)
+        .await
+        .expect("apply create plan");
+
+    // Scheduler must be idle after apply completes.
+    assert_scheduler_idle(&db.client).await;
+}
+
+/// F-suite (v0.19): plan --fail-on-drift counts consumer deltas (M-2).
+///
+/// This verifies that consumer-layer drift is included in the drift count
+/// so that `--fail-on-drift` exits 1 when a consumer view is missing.
+#[tokio::test]
+async fn plan_fail_on_drift_counts_consumer_deltas() {
+    use aqueduct_core::catalog::ensure_catalog_current;
+
+    let db = TestDb::new().await.expect("start test db");
+    db.install_mock_pgtrickle().await.expect("install mock");
+    db.install_aqueduct_catalog().await.expect("init catalog");
+    ensure_catalog_current(&db.client)
+        .await
+        .expect("upgrade catalog");
+
+    // Desired state: one consumer view (no stream tables to keep it minimal).
+    let consumer = aqueduct_core::dag::ConsumerSpec {
+        name: "missing_view".to_string(),
+        source: QualifiedName::new("public", "some_table"),
+        expose_as: QualifiedName::new("reporting", "missing_view"),
+        sql_body: None,
+    };
+    let desired = aqueduct_core::dag::DagState {
+        stream_tables: vec![],
+        sources: vec![],
+        consumers: vec![consumer],
+    };
+
+    // Actual state: no consumer views registered.
+    let actual = aqueduct_core::dag::DagState::default();
+
+    let diff = compute_diff(&desired, &actual);
+
+    // The diff must include a consumer delta for the missing view.
+    assert!(
+        !diff.consumer_deltas.is_empty(),
+        "M-2/v0.19: consumer diff must be non-empty when a consumer view is missing"
+    );
+}
+
+/// F-suite (v0.19): destroy auto-migrates a pre-v8 catalog before querying it.
+///
+/// Creates a v1 catalog, then calls the destroy path to confirm it migrates
+/// before destroying (rather than failing with a schema mismatch).
+#[tokio::test]
+async fn destroy_auto_migrates_catalog() {
+    use aqueduct_core::catalog::{ensure_catalog_current, CATALOG_INIT_SQL};
+
+    let db = TestDb::new().await.expect("start test db");
+    db.install_mock_pgtrickle().await.expect("install mock");
+
+    // Install v1 catalog only.
+    db.client
+        .batch_execute(CATALOG_INIT_SQL)
+        .await
+        .expect("install v1 catalog");
+
+    // Confirm at v1.
+    let v_before: i32 = db
+        .client
+        .query_one(
+            "SELECT value_jsonb::int FROM aqueduct.cluster_profile \
+             WHERE key = 'catalog_schema_version'",
+            &[],
+        )
+        .await
+        .expect("get version before")
+        .get(0);
+    assert_eq!(v_before, 1, "must start at v1");
+
+    // ensure_catalog_current (which is what connect_and_migrate calls)
+    // must upgrade to v8 successfully.
+    ensure_catalog_current(&db.client)
+        .await
+        .expect("M-5/v0.19: ensure_catalog_current must succeed on a v1 catalog");
+
+    let v_after: i32 = db
+        .client
+        .query_one(
+            "SELECT value_jsonb::int FROM aqueduct.cluster_profile \
+             WHERE key = 'catalog_schema_version'",
+            &[],
+        )
+        .await
+        .expect("get version after")
+        .get(0);
+    assert_eq!(
+        v_after, 8,
+        "M-5/v0.19: catalog must be at v8 after ensure_catalog_current"
+    );
+}

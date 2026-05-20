@@ -104,3 +104,46 @@ impl TestDb {
         &self.connection_string
     }
 }
+
+/// TEST-3 (v0.19): Assert the scheduler has no paused nodes.
+///
+/// Queries `pgtrickle.paused_nodes` (the canonical mock scheduler state) and
+/// panics with a descriptive message if any nodes are paused.
+pub async fn assert_scheduler_idle(client: &tokio_postgres::Client) {
+    let count: i64 = client
+        .query_one("SELECT count(*) FROM pgtrickle.paused_nodes", &[])
+        .await
+        .expect("query pgtrickle.paused_nodes")
+        .get(0);
+    assert_eq!(
+        count, 0,
+        "TEST-3/v0.19: expected scheduler to be idle (no paused nodes), but found {} paused node(s)",
+        count
+    );
+}
+
+/// TEST-3 (v0.19): Assert that exactly the given node names are in the paused set.
+///
+/// Queries `pgtrickle.paused_nodes` and panics if the set differs from
+/// `expected_nodes`. Order does not matter.
+pub async fn assert_scheduler_paused_for(
+    client: &tokio_postgres::Client,
+    expected_nodes: &[&str],
+) {
+    let rows = client
+        .query(
+            "SELECT node_name FROM pgtrickle.paused_nodes ORDER BY node_name",
+            &[],
+        )
+        .await
+        .expect("query pgtrickle.paused_nodes");
+    let actual: Vec<String> = rows.iter().map(|r| r.get::<_, String>(0)).collect();
+    let mut expected_sorted: Vec<&str> = expected_nodes.to_vec();
+    expected_sorted.sort_unstable();
+    let expected_strings: Vec<String> = expected_sorted.iter().map(|s| s.to_string()).collect();
+    assert_eq!(
+        actual, expected_strings,
+        "TEST-3/v0.19: expected paused nodes {:?} but found {:?}",
+        expected_strings, actual
+    );
+}

@@ -1,6 +1,6 @@
 # pg_aqueduct Roadmap
 
-> **Status:** v0.18.0 released. Versions v0.19–v0.20 address remaining findings from the
+> **Status:** v0.19.0 released. v0.20 addresses remaining findings from the
 > Phase 4 engineering assessment (`plans/overall-assessment-4.md`). v1.0 is the first
 > production-ready release.
 > This roadmap reflects the agreed design in `plans/pg-aqueduct-plan.md`.
@@ -45,8 +45,8 @@ versions build on earlier ones without breaking the established CLI surface.
 | [v0.15](#v015--execution-integrity-architecture--bluegreen-production) | Execution integrity, architecture & blue/green production | 18 | 5–6 weeks |
 | [v0.16](#v016--cli-quality-test-infrastructure--postgresql-compatibility) | CLI quality, test infrastructure & PostgreSQL compatibility | 19 | 4–5 weeks | ✅ Released |
 | [v0.17](#v017--ha-operations-documentation-truthfulness--observability) | HA operations, documentation truthfulness & observability | 20 | 4–5 weeks | ✅ Released |
-| [v0.18](#v018--security-hardening-documentation-correctness--operational-quality) | Security hardening, documentation correctness & operational quality | 21 | 3–4 weeks |
-| [v0.19](#v019--correctness-hardening-bluegreen-atomicity--test-infrastructure) | Correctness hardening, blue/green atomicity & test infrastructure | 22 | 4–5 weeks |
+| [v0.18](#v018--security-hardening-documentation-correctness--operational-quality) | Security hardening, documentation correctness & operational quality | 21 | 3–4 weeks | ✅ Released |
+| [v0.19](#v019--correctness-hardening-bluegreen-atomicity--test-infrastructure) | Correctness hardening, blue/green atomicity & test infrastructure | 22 | 4–5 weeks | ✅ Released |
 | [v0.20](#v020--executor-architecture-multi-tenant-catalog--cli-polish) | Executor architecture, multi-tenant catalog & CLI polish | 23 | 5–6 weeks |
 | [v1.0](#v10--release-engineering) | Release engineering | 24 | 2 weeks |
 | [v1.1](#v11--consumer-layer-management) | Consumer layer management | — | TBD |
@@ -2937,7 +2937,7 @@ resilient to tokio panics.
 
 #### A. Blue/Green Atomicity (ARCH-3-REMAINING — High)
 
-- [ ] **Move `SWAP_BLUE_GREEN_SQL` inside the `SwapConsumerViews` transaction.** In
+- [x] **Move `SWAP_BLUE_GREEN_SQL` inside the `SwapConsumerViews` transaction.** In
   `executor.rs:985-996`, the deployment status row update currently executes after the
   surrounding `COMMIT`. Convert the `swapped_at` / `retire_at` update to use a savepoint
   inside the existing `BEGIN`/`COMMIT` block so the view swap and the deployment row
@@ -2950,7 +2950,7 @@ resilient to tokio panics.
 
 #### B. Heartbeat Supervisor (CORR-3 — High)
 
-- [ ] **Wrap heartbeat task in panic handler that signals lock loss.** Replace the bare
+- [x] **Wrap heartbeat task in panic handler that signals lock loss.** Replace the bare
   `tokio::spawn(run_heartbeat(...))` call at `executor.rs:1540` with a supervisor that
   catches panics:
 
@@ -2973,18 +2973,18 @@ resilient to tokio panics.
 
 #### C. Mock Scheduler Observable State (TEST-3 — High)
 
-- [ ] **Add `pgtrickle.paused_nodes` table to the mock DDL.** Update
+- [x] **Add `pgtrickle.paused_nodes` table to the mock DDL.** Update
   `mock_pgtrickle.rs:92-101` to make `pause_scheduler(p_nodes text[])` insert each
   node name into a `pgtrickle.paused_nodes(node_name text, paused_at timestamptz)`
   table, and `resume_scheduler(p_nodes text[])` delete the corresponding rows. This
   makes the scheduler mock stateful and observable.
 
-- [ ] **Add `assert_scheduler_idle(client)` helper to `aqueduct-testkit`.** The helper
+- [x] **Add `assert_scheduler_idle(client)` helper to `aqueduct-testkit`.** The helper
   queries `SELECT count(*) FROM pgtrickle.paused_nodes` and asserts it is zero. Add
   a complementary `assert_scheduler_paused_for(client, node_names)` that asserts the
   named nodes are in the paused set.
 
-- [ ] **Update existing migration tests to assert scheduler state.** For every integration
+- [x] **Update existing migration tests to assert scheduler state.** For every integration
   test that calls `aqueduct apply`, add pre-DDL and post-apply assertions:
   - Before the DDL step: `assert_scheduler_paused_for(...)` for the modified nodes.
   - After apply completes: `assert_scheduler_idle(...)`.
@@ -2994,7 +2994,7 @@ resilient to tokio panics.
 
 #### D. Executor Polling & Convergence Fixes (M-4, M-8, M-9)
 
-- [ ] **Add `statement_timeout` guard to `WaitForConvergence` poll query (M-9).** Wrap the
+- [x] **Add `statement_timeout` guard to `WaitForConvergence` poll query (M-9).** Wrap the
   convergence poll query inside a `SET LOCAL statement_timeout = '<poll_deadline_ms>ms'`
   so a hung pg_trickle query cannot hold the loop open past the configured deadline. Move
   the deadline check to _after_ the sleep rather than before, to avoid the zero-deadline
@@ -3004,13 +3004,13 @@ resilient to tokio panics.
   mock pgtrickle to always return `running`, and assert the step fails within 2 seconds
   with a `WaitForConvergence timeout` error.
 
-- [ ] **Add exponential backoff to `status --watch` error loop (M-8).** When
+- [x] **Add exponential backoff to `status --watch` error loop (M-8).** When
   `connect_read_only()` or `poll_once()` fails, track a consecutive-error counter and
   apply exponential backoff: delay = `min(interval * 2^error_count, 5 * interval)`.
   After 10 consecutive errors, log a `error!` (elevated from `warn!`) with the last
   error. Reset the counter on the next successful poll.
 
-- [ ] **Document `EXPLAIN (FORMAT JSON)` trade-off in `cost.rs` (M-4).** Since PostgreSQL
+- [x] **Document `EXPLAIN (FORMAT JSON)` trade-off in `cost.rs` (M-4).** Since PostgreSQL
   does not support parameterized `EXPLAIN`, add a code comment explaining why
   `format!("EXPLAIN (FORMAT JSON) {}", query)` is intentional and safe: the query is
   validated by `validate_ivm_supportability` / `validate_sql_syntax` before reaching
@@ -3020,7 +3020,7 @@ resilient to tokio panics.
 
 #### E. Catalog Schema Override — Stop-Gap (ARCH-1 partial)
 
-- [ ] **Return an explicit error when `catalog_schema != "aqueduct"`.** Until the full
+- [x] **Return an explicit error when `catalog_schema != "aqueduct"`.** Until the full
   parameterised SQL substitution (v0.20), modify `connect_and_migrate()` and
   `aqueduct init` to check the resolved `catalog_schema` value and return
   `AqueductError::NotYetImplemented { feature: "catalog_schema override" }` with a
@@ -3035,23 +3035,23 @@ resilient to tokio panics.
 The Phase 4 assessment identified 10 missing test cases. All are implemented in this
 version:
 
-- [ ] `consumer_sql_injection_rejected_at_apply` — asserts injected DDL SQL body is
+- [x] `consumer_sql_injection_rejected_at_apply` — asserts injected DDL SQL body is
   rejected before any database call. *(SEC-1, already in v0.18; included here as
   a cross-reference)*
-- [ ] `heartbeat_panic_signals_lock_loss` — heartbeat task panic propagates as `LockLost`.
-- [ ] `swap_consumer_views_atomicity` — failed mid-swap leaves views in consistent state.
-- [ ] `plan_fail_on_drift_counts_consumer_deltas` — consumer drift triggers exit 1.
+- [x] `heartbeat_panic_signals_lock_loss` — heartbeat task panic propagates as `LockLost`.
+- [x] `swap_consumer_views_atomicity` — failed mid-swap leaves views in consistent state.
+- [x] `plan_fail_on_drift_counts_consumer_deltas` — consumer drift triggers exit 1.
   *(M-2, already in v0.18)*
-- [ ] `destroy_auto_migrates_catalog` — pre-v8 catalog is migrated before destroy query.
+- [x] `destroy_auto_migrates_catalog` — pre-v8 catalog is migrated before destroy query.
   *(M-5, already in v0.18)*
-- [ ] `catalog_schema_override_rejected_until_implemented` — explicit error on non-default
+- [x] `catalog_schema_override_rejected_until_implemented` — explicit error on non-default
   catalog schema.
-- [ ] `age_identity_file_traversal_rejected` — path traversal attempt rejected.
+- [x] `age_identity_file_traversal_rejected` — path traversal attempt rejected.
   *(SEC-3, already in v0.18)*
-- [ ] `cnpg_preview_requires_valid_cert` — TLS rejection without CNPG_INSECURE_SKIP_VERIFY.
+- [x] `cnpg_preview_requires_valid_cert` — TLS rejection without CNPG_INSECURE_SKIP_VERIFY.
   *(SEC-2, already in v0.18)*
-- [ ] `waitforconvergence_deadline_respected` — deadline enforced within 2× max_wait_secs.
-- [ ] `mock_scheduler_records_pause` — scheduler paused during DDL, resumed after apply.
+- [x] `waitforconvergence_deadline_respected` — deadline enforced within 2× max_wait_secs.
+- [x] `mock_scheduler_records_pause` — scheduler paused during DDL, resumed after apply.
 
 **v0.19 release criteria.**
 - `SWAP_BLUE_GREEN_SQL` executes inside the `SwapConsumerViews` transaction; atomicity

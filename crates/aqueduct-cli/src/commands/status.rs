@@ -242,6 +242,8 @@ pub async fn run(args: StatusArgs) -> anyhow::Result<()> {
     };
     let interval = parse_interval(interval_str)?;
     let mut consecutive_drift: u32 = 0;
+    // M-8 (v0.19): track consecutive connection/poll errors for exponential backoff.
+    let mut consecutive_errors: u32 = 0;
 
     // PERF-2: cache the desired state by spec hash so migration files are
     // not re-read when their mtimes haven't changed.
@@ -302,11 +304,38 @@ pub async fn run(args: StatusArgs) -> anyhow::Result<()> {
         .await;
 
         let drift = match poll_result {
-            Ok(d) => d,
+            Ok(d) => {
+                // Reset error counter on a successful poll.
+                consecutive_errors = 0;
+                d
+            }
             Err(e) => {
-                tracing::warn!("Status poll error (will retry): {}", e);
-                // Exponential back-off is handled by the sleep at the bottom of the loop.
-                0
+                consecutive_errors += 1;
+                // M-8 (v0.19): exponential backoff on repeated errors.
+                // delay = min(interval * 2^error_count, 5 * interval)
+                let backoff_factor = (1u64 << consecutive_errors.min(10)) as u32;
+                let backoff = std::cmp::min(
+                    interval.saturating_mul(backoff_factor),
+                    interval.saturating_mul(5),
+                );
+                if consecutive_errors >= 10 {
+                    tracing::error!(
+                        consecutive_errors,
+                        "Status poll: repeated connection failures (last: {}); \
+                         backing off {:?}",
+                        e,
+                        backoff
+                    );
+                } else {
+                    tracing::warn!(
+                        consecutive_errors,
+                        "Status poll error (will retry with backoff {:?}): {}",
+                        backoff,
+                        e
+                    );
+                }
+                tokio::time::sleep(backoff).await;
+                continue;
             }
         };
 

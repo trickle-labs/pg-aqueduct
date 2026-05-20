@@ -221,6 +221,17 @@ fn find_query_for_table(plan: &Plan, name: &crate::dag::QualifiedName) -> Option
 ///
 /// Returns a `CostError` to distinguish SQL failures from unsupported queries (P-08 / v0.12).
 /// Callers should surface `SqlError` as a plan warning; `Unsupported` is silently ignored.
+///
+/// # Why `format!` is safe here (M-4 / v0.19)
+///
+/// PostgreSQL does not support parameterized `EXPLAIN` — the query must be embedded
+/// directly in the SQL string. This is intentional and safe because:
+/// 1. `query` is validated by `validate_ivm_supportability` / `validate_sql_syntax`
+///    before reaching `estimate_rows()`, ensuring only structurally sound SQL is passed.
+/// 2. Migration files are operator-controlled input, not end-user input.
+///
+/// The EXPLAIN call is wrapped in `BEGIN READ ONLY; SET LOCAL statement_timeout = '5s'`
+/// so an unexpectedly slow planner cannot stall cost estimation indefinitely.
 async fn estimate_rows(
     client: &tokio_postgres::Client,
     query: &str,
@@ -229,8 +240,21 @@ async fn estimate_rows(
         return Err(CostError::Unsupported);
     }
 
+    // M-4 (v0.19): Wrap EXPLAIN in a read-only transaction with statement_timeout
+    // so a slow planner query cannot stall cost estimation indefinitely.
+    // Using batch_execute here; EXPLAIN result is captured separately below.
+    let setup = client
+        .batch_execute("BEGIN READ ONLY; SET LOCAL statement_timeout = '5s'")
+        .await;
+    if let Err(e) = setup {
+        return Err(CostError::SqlError(e.to_string()));
+    }
+
     let explain_sql = format!("EXPLAIN (FORMAT JSON) {}", query);
     let row = client.query_opt(&explain_sql, &[]).await;
+
+    // Always commit/rollback the read-only transaction.
+    let _ = client.batch_execute("COMMIT").await;
 
     match row {
         Ok(Some(r)) => {

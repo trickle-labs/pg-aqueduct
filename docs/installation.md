@@ -21,7 +21,7 @@ A `SHA256SUMS.txt` file is attached to each release so you can verify the downlo
 
 ```bash
 # Replace <version> and <platform> as appropriate
-VERSION=0.18.0
+VERSION=0.19.0
 PLATFORM=linux-amd64   # or: linux-arm64, macos-arm64
 
 curl -fsSL \

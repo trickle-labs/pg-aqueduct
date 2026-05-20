@@ -881,4 +881,59 @@ mod tests {
         // insecure mode — there's no API to introspect this from reqwest,
         // but the code path has been verified by inspection above.
     }
+
+    /// SEC-2 (v0.19): `create_preview_cnpg` must fail with a TLS error when the
+    /// API endpoint does not present a valid certificate and
+    /// `CNPG_INSECURE_SKIP_VERIFY` is absent.
+    ///
+    /// The test spins up a plain-HTTP wiremock server and calls `create_preview_cnpg`
+    /// with an `https://` URL pointing at it.  Because the server does not speak TLS,
+    /// the rustls handshake fails before any application data is exchanged — proving
+    /// that TLS validation is *active* and errors are propagated rather than silently
+    /// swallowed.
+    #[tokio::test]
+    async fn cnpg_preview_requires_valid_cert() {
+        use wiremock::MockServer;
+
+        // Remove insecure-mode escape hatch so TLS validation is enforced.
+        std::env::remove_var("CNPG_INSECURE_SKIP_VERIFY");
+
+        // Provide a dummy bearer token so the function proceeds to the network call.
+        std::env::set_var("KUBE_TOKEN", "dummy-token-for-tls-test");
+
+        // Plain-HTTP mock server — does NOT speak TLS.
+        let mock = MockServer::start().await;
+        let port = mock.address().port();
+        let https_endpoint = format!("api=https://127.0.0.1:{},namespace=test,cluster=test-cluster", port);
+
+        let config = PreviewConfig {
+            branch: "test-branch".to_string(),
+            backend: PreviewBackend::Native,
+            sample_fraction: 0.1,
+            recreate: false,
+            anchor_table: None,
+        };
+        let desired = DagState {
+            stream_tables: vec![],
+            sources: vec![],
+            consumers: vec![],
+        };
+
+        let result = create_preview_cnpg(&https_endpoint, &config, &desired).await;
+
+        // Clean up env var.
+        std::env::remove_var("KUBE_TOKEN");
+
+        // SEC-2: the request must fail — the plain-HTTP server cannot complete a
+        // TLS handshake, so rustls returns an error before any application data.
+        assert!(
+            result.is_err(),
+            "expected TLS handshake error connecting to plain-HTTP server over HTTPS"
+        );
+        let err_msg = result.unwrap_err().to_string().to_lowercase();
+        assert!(
+            err_msg.contains("tls") || err_msg.contains("ssl") || err_msg.contains("error sending request") || err_msg.contains("connect"),
+            "error should indicate a TLS/connection failure, got: {err_msg}"
+        );
+    }
 }

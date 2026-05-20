@@ -31,6 +31,11 @@ pub struct InitArgs {
 }
 
 pub async fn run(args: InitArgs) -> anyhow::Result<()> {
+    // ARCH-1 (v0.19): Reject non-default catalog schema until full
+    // parameterised SQL substitution is implemented in v0.20.
+    aqueduct_core::catalog::validate_catalog_schema_not_overridden(&args.schema)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
     let dsn = super::resolve_dsn_with_opts(
         args.dsn.as_deref(),
         args.to.as_deref(),
