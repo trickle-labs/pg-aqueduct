@@ -1,8 +1,6 @@
 # pg_aqueduct Roadmap
 
-> **Status:** v0.19.0 released. v0.20 addresses remaining findings from the
-> Phase 4 engineering assessment (`plans/overall-assessment-4.md`). v1.0 is the first
-> production-ready release.
+> **Status:** v0.20.0 released. v1.0 is the first production-ready release.
 > This roadmap reflects the agreed design in `plans/pg-aqueduct-plan.md`.
 > Versions correspond directly to the implementation phases described there.
 

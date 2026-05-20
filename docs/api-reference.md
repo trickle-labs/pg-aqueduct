@@ -3,7 +3,7 @@
 > **Auto-generated** from `aqueduct --help` output.
 > Do not edit by hand — run `just gen-docs` to regenerate.
 
-Binary version: `aqueduct 0.19.0`
+Binary version: `aqueduct 0.20.0`
 
 ## aqueduct plan
 
