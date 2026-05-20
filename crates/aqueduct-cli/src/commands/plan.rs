@@ -48,6 +48,10 @@ pub struct PlanArgs {
     #[arg(long)]
     pub explain_cost: bool,
 
+    /// Write the plan to a JSON file for use with `apply --plan`.
+    #[arg(long)]
+    pub out: Option<std::path::PathBuf>,
+
     /// Allow DSN with embedded plaintext password (not recommended outside CI/dev).
     #[arg(long)]
     pub allow_plaintext_password: bool,
@@ -129,13 +133,28 @@ pub async fn run(args: PlanArgs) -> anyhow::Result<()> {
     let topo_order = topological_sort(&desired)?;
 
     // Build plan.
-    let plan = build_plan(
+    let mut plan = build_plan(
         &project_name,
         current_version,
         next_version,
         &diff,
         &topo_order,
     )?;
+
+    // M-09: Stamp spec_hash for stale-plan detection in `apply --plan`.
+    plan.spec_hash = {
+        use sha2::{Digest, Sha256};
+        let spec_json = serde_json::to_string(&desired).unwrap_or_default();
+        format!("{:x}", Sha256::digest(spec_json.as_bytes()))
+    };
+
+    // --out: write plan JSON to file for `apply --plan`.
+    if let Some(ref out_path) = args.out {
+        let plan_json = serde_json::to_string_pretty(&plan)?;
+        std::fs::write(out_path, &plan_json)
+            .map_err(|e| anyhow::anyhow!("Cannot write plan to '{}': {}", out_path.display(), e))?;
+        eprintln!("Plan written to '{}'", out_path.display());
+    }
 
     // Get versions for the renderer.
     let pgtrickle_version = check_pgtrickle_version(&client).await?;

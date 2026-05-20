@@ -11,6 +11,10 @@ pub enum RefreshMode {
     #[default]
     Differential,
     Full,
+    /// IMMEDIATE mode: the stream table is refreshed synchronously within the
+    /// triggering transaction (M-03 / v0.13). Rebuild-class migrations on
+    /// IMMEDIATE tables must pause to DIFFERENTIAL first and resume after.
+    Immediate,
 }
 
 impl std::fmt::Display for RefreshMode {
@@ -18,6 +22,7 @@ impl std::fmt::Display for RefreshMode {
         match self {
             RefreshMode::Differential => write!(f, "DIFFERENTIAL"),
             RefreshMode::Full => write!(f, "FULL"),
+            RefreshMode::Immediate => write!(f, "IMMEDIATE"),
         }
     }
 }
@@ -28,12 +33,26 @@ impl std::str::FromStr for RefreshMode {
         match s.to_uppercase().as_str() {
             "DIFFERENTIAL" => Ok(RefreshMode::Differential),
             "FULL" => Ok(RefreshMode::Full),
+            "IMMEDIATE" => Ok(RefreshMode::Immediate),
             other => Err(AqueductError::Config(format!(
                 "unknown refresh_mode: '{}'",
                 other
             ))),
         }
     }
+}
+
+/// Migration strategy for a plan (M-01 / v0.13).
+///
+/// Controls how the planner approaches structural DAG changes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum MigrationStrategy {
+    /// Default in-place strategy: Free, In-place, or Rebuild as classified.
+    #[default]
+    Default,
+    /// Blue/green strategy: structural changes are applied via a parallel green
+    /// schema and an atomic consumer-view swap.
+    BlueGreen,
 }
 
 /// Fully-qualified table name.

@@ -1,7 +1,7 @@
 /// SQL statements for bootstrapping the aqueduct catalog schema.
 /// These are embedded directly in the binary via include_str!() in a real deployment;
 /// for v0.1 we keep them as a constant in this module.
-pub const CATALOG_SCHEMA_VERSION: u32 = 4;
+pub const CATALOG_SCHEMA_VERSION: u32 = 5;
 
 /// The SQL to create the aqueduct catalog schema (v1, baseline).
 pub const CATALOG_INIT_SQL: &str = r#"
@@ -162,16 +162,46 @@ SET value_jsonb = '4'::jsonb, measured_at = now()
 WHERE key = 'catalog_schema_version';
 "#;
 
+/// Catalog migration from v4 to v5: adds migration_steps table for per-step
+/// observability (M-08 / v0.13).
+pub const CATALOG_MIGRATE_V4_TO_V5_SQL: &str = r#"
+-- Per-step execution tracking for advanced observability (M-08 / v0.13).
+CREATE TABLE IF NOT EXISTS aqueduct.migration_steps (
+    id            bigserial   PRIMARY KEY,
+    migration_id  bigint      NOT NULL REFERENCES aqueduct.migrations(id),
+    step_index    int         NOT NULL,
+    step_type     text        NOT NULL,
+    step_hash     text        NOT NULL,
+    status        text        NOT NULL DEFAULT 'pending',
+    started_at    timestamptz,
+    finished_at   timestamptz,
+    error_message text,
+    UNIQUE (migration_id, step_index)
+);
+
+CREATE INDEX IF NOT EXISTS aqueduct_migration_steps_migration
+    ON aqueduct.migration_steps (migration_id, step_index);
+
+-- Bump catalog version to 5.
+UPDATE aqueduct.cluster_profile
+SET value_jsonb = '5'::jsonb, measured_at = now()
+WHERE key = 'catalog_schema_version';
+"#;
+
 /// Combined init SQL for fresh installations (creates v2 schema directly).
-/// Kept for backward-compatibility; new code should use CATALOG_INIT_V4_SQL.
-pub const CATALOG_INIT_V2_SQL: &str = CATALOG_INIT_V4_SQL;
+/// Kept for backward-compatibility; new code should use CATALOG_INIT_V5_SQL.
+pub const CATALOG_INIT_V2_SQL: &str = CATALOG_INIT_V5_SQL;
 
 /// Combined init SQL for fresh installations (creates v3 schema directly).
-/// Kept for backward-compatibility; new code should use CATALOG_INIT_V4_SQL.
-pub const CATALOG_INIT_V3_SQL: &str = CATALOG_INIT_V4_SQL;
+/// Kept for backward-compatibility; new code should use CATALOG_INIT_V5_SQL.
+pub const CATALOG_INIT_V3_SQL: &str = CATALOG_INIT_V5_SQL;
 
 /// Combined init SQL for fresh installations at v4 (includes performance indexes).
-pub const CATALOG_INIT_V4_SQL: &str = r#"
+/// Kept for backward-compatibility; new code should use CATALOG_INIT_V5_SQL.
+pub const CATALOG_INIT_V4_SQL: &str = CATALOG_INIT_V5_SQL;
+
+/// Combined init SQL for fresh installations at v5 (includes migration_steps table).
+pub const CATALOG_INIT_V5_SQL: &str = r#"
 CREATE SCHEMA IF NOT EXISTS aqueduct;
 
 -- Records a full snapshot of the DAG spec at each successful apply.
@@ -199,6 +229,20 @@ CREATE TABLE IF NOT EXISTS aqueduct.migrations (
     cli_version     text,
     plan_format_version int NOT NULL DEFAULT 1,
     CONSTRAINT status_check CHECK (status IN ('running', 'committed', 'failed', 'rolled_back', 'recoverable_failure'))
+);
+
+-- Per-step execution tracking for advanced observability (M-08 / v0.13).
+CREATE TABLE IF NOT EXISTS aqueduct.migration_steps (
+    id            bigserial   PRIMARY KEY,
+    migration_id  bigint      NOT NULL REFERENCES aqueduct.migrations(id),
+    step_index    int         NOT NULL,
+    step_type     text        NOT NULL,
+    step_hash     text        NOT NULL,
+    status        text        NOT NULL DEFAULT 'pending',
+    started_at    timestamptz,
+    finished_at   timestamptz,
+    error_message text,
+    UNIQUE (migration_id, step_index)
 );
 
 -- Serialises concurrent apply runs per project.
@@ -281,9 +325,12 @@ CREATE INDEX IF NOT EXISTS aqueduct_migrations_project_started
 CREATE INDEX IF NOT EXISTS aqueduct_locks_project
     ON aqueduct.locks (project);
 
+CREATE INDEX IF NOT EXISTS aqueduct_migration_steps_migration
+    ON aqueduct.migration_steps (migration_id, step_index);
+
 -- Record the catalog schema version.
 INSERT INTO aqueduct.cluster_profile (key, value_jsonb, measured_at)
-VALUES ('catalog_schema_version', '4'::jsonb, now())
+VALUES ('catalog_schema_version', '5'::jsonb, now())
 ON CONFLICT (key) DO NOTHING;
 "#;
 
@@ -493,6 +540,13 @@ pub async fn ensure_catalog_current(client: &tokio_postgres::Client) -> crate::e
                 .await
                 .map_err(|e| crate::error::AqueductError::Catalog(e.to_string()))?;
         }
+        // Apply the v4→v5 migration if needed (M-08 / v0.13).
+        if current_version < 5 {
+            client
+                .batch_execute(CATALOG_MIGRATE_V4_TO_V5_SQL)
+                .await
+                .map_err(|e| crate::error::AqueductError::Catalog(e.to_string()))?;
+        }
     }
 
     Ok(())
@@ -534,4 +588,35 @@ pub const RETIRE_BLUE_GREEN_SQL: &str = r#"
 UPDATE aqueduct.blue_green_deployments
 SET status = 'retired', retired_at = now()
 WHERE id = $1
+"#;
+
+/// SQL to start a migration step row (M-08 / v0.13).
+pub const START_MIGRATION_STEP_SQL: &str = r#"
+INSERT INTO aqueduct.migration_steps
+    (migration_id, step_index, step_type, step_hash, status, started_at)
+VALUES ($1, $2, $3, $4, 'running', now())
+ON CONFLICT (migration_id, step_index) DO UPDATE
+    SET status = 'running', started_at = now(), error_message = NULL
+"#;
+
+/// SQL to finish a migration step row successfully (M-08 / v0.13).
+pub const FINISH_MIGRATION_STEP_SQL: &str = r#"
+UPDATE aqueduct.migration_steps
+SET status = 'done', finished_at = now()
+WHERE migration_id = $1 AND step_index = $2
+"#;
+
+/// SQL to record a failed migration step (M-08 / v0.13).
+pub const FAIL_MIGRATION_STEP_SQL: &str = r#"
+UPDATE aqueduct.migration_steps
+SET status = 'failed', finished_at = now(), error_message = $3
+WHERE migration_id = $1 AND step_index = $2
+"#;
+
+/// SQL to list all steps for a migration (for `aqueduct status --verbose`).
+pub const LIST_MIGRATION_STEPS_SQL: &str = r#"
+SELECT step_index, step_type, status, started_at, finished_at, error_message
+FROM aqueduct.migration_steps
+WHERE migration_id = $1
+ORDER BY step_index
 "#;

@@ -84,6 +84,7 @@ pub async fn run(args: DiffArgs) -> anyhow::Result<()> {
     match args.format.as_str() {
         "json" => {
             let output = serde_json::json!({
+                "schema_version": 1,
                 "deltas": deltas.iter().map(|d| serde_json::json!({
                     "name": d.qualified_name.to_string(),
                     "kind": format!("{:?}", d.kind),

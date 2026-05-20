@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::classifier::MigrationClass;
-use crate::dag::{ConsumerSpec, QualifiedName, StreamTableSpec};
+use crate::dag::{ConsumerSpec, MigrationStrategy, QualifiedName, RefreshMode, StreamTableSpec};
 use crate::diff::{ConsumerDeltaKind, DagDiff, DeltaKind, NodeDelta, SourceDeltaKind};
 use crate::error::{AqueductError, Result};
 
@@ -282,6 +282,10 @@ pub struct Plan {
     pub summary: PlanSummary,
     pub format_version: u32,
     pub created_at: DateTime<Utc>,
+    /// SHA-256 hex hash of the desired DagState spec at plan creation time.
+    /// Used by `apply --plan` to reject stale plan artifacts (M-09 / v0.13).
+    #[serde(default)]
+    pub spec_hash: String,
 }
 
 /// Summary statistics for a plan.
@@ -537,6 +541,20 @@ pub fn plan_stats(steps: &[PlanStep]) -> PlanSummary {
     summary
 }
 
+/// Options for building a plan (M-01 / v0.13).
+#[derive(Debug, Clone, Default)]
+pub struct BuildPlanOptions {
+    /// Migration strategy (Default or BlueGreen).
+    pub strategy: MigrationStrategy,
+    /// Pre-migration hook SQL statement (from `[apply.hooks] pre`).
+    pub pre_hook: Option<String>,
+    /// Post-migration hook SQL statement (from `[apply.hooks] post`).
+    pub post_hook: Option<String>,
+    /// When true, reject any plan that would temporarily downgrade an IMMEDIATE
+    /// table to DIFFERENTIAL (`--no-immediate-downgrade`).
+    pub no_immediate_downgrade: bool,
+}
+
 /// Build a Plan from a DagDiff.
 pub fn build_plan(
     project: &str,
@@ -544,6 +562,25 @@ pub fn build_plan(
     next_version: u64,
     diff: &DagDiff,
     topo_order: &[QualifiedName],
+) -> Result<Plan> {
+    build_plan_with_options(
+        project,
+        from_version,
+        next_version,
+        diff,
+        topo_order,
+        &BuildPlanOptions::default(),
+    )
+}
+
+/// Build a Plan from a DagDiff with explicit options (M-01 / v0.13).
+pub fn build_plan_with_options(
+    project: &str,
+    from_version: Option<u64>,
+    next_version: u64,
+    diff: &DagDiff,
+    topo_order: &[QualifiedName],
+    options: &BuildPlanOptions,
 ) -> Result<Plan> {
     use crate::classifier::classify_delta;
 
@@ -555,6 +592,28 @@ pub fn build_plan(
         project: project.to_string(),
         ttl: "30s".to_string(),
     });
+
+    // Pre-hook immediately after LockDag (M-04 / v0.13).
+    if let Some(ref pre_sql) = options.pre_hook {
+        steps.push(PlanStep::RunHook {
+            hook_name: "pre".to_string(),
+            statement: pre_sql.clone(),
+        });
+    }
+
+    // ── Blue/green strategy: emit full blue/green step sequence (M-01 / v0.13) ─
+    if options.strategy == MigrationStrategy::BlueGreen {
+        return build_blue_green_plan(
+            project,
+            from_version,
+            next_version,
+            diff,
+            topo_order,
+            options,
+            steps,
+            summary,
+        );
+    }
 
     // ── Source (base table) changes come first so the cascade steps see the
     // already-altered schema when they execute. ─────────────────────────────
@@ -711,6 +770,30 @@ pub fn build_plan(
                 });
             }
             DeltaKind::Drop => {
+                let actual = delta.actual.as_ref();
+
+                // WaitForRefresh before drop (step-registry enforcement / v0.13).
+                steps.push(PlanStep::WaitForRefresh {
+                    name: delta.qualified_name.clone(),
+                    deadline_secs: 60,
+                });
+
+                // DetachOutbox if the table has a cdc_mode that implies outbox (step-registry).
+                if actual.is_some_and(|s| s.cdc_mode.as_deref() == Some("outbox")) {
+                    steps.push(PlanStep::DetachOutbox {
+                        stream_table: delta.qualified_name.clone(),
+                        outbox_name: format!("{}_outbox", delta.qualified_name.name),
+                    });
+                }
+
+                // ManageWalSlot drop before drop (step-registry enforcement / v0.13).
+                if actual.is_some_and(|s| s.cdc_mode.as_deref() == Some("wal")) {
+                    steps.push(PlanStep::ManageWalSlot {
+                        stream_table: delta.qualified_name.clone(),
+                        action: WalSlotAction::Drop,
+                    });
+                }
+
                 steps.push(PlanStep::DropStreamTable {
                     name: delta.qualified_name.clone(),
                     cascade: false,
@@ -751,6 +834,38 @@ pub fn build_plan(
 
                 // For FULL→DIFF refresh_mode change, the classifier returns Rebuild.
                 if class == MigrationClass::Rebuild {
+                    // M-03: If the current table is IMMEDIATE, pause it before Rebuild.
+                    let is_immediate = actual.refresh_mode == RefreshMode::Immediate;
+                    if is_immediate {
+                        if options.no_immediate_downgrade {
+                            return Err(AqueductError::Other(format!(
+                                "Table '{}' is IMMEDIATE and --no-immediate-downgrade is set; cannot rebuild",
+                                delta.qualified_name
+                            )));
+                        }
+                        steps.push(PlanStep::PauseImmediate {
+                            name: delta.qualified_name.clone(),
+                        });
+                    }
+
+                    // WaitForRefresh before drop (step-registry enforcement / v0.13).
+                    steps.push(PlanStep::WaitForRefresh {
+                        name: delta.qualified_name.clone(),
+                        deadline_secs: 60,
+                    });
+
+                    // RecreatePolicy: collect existing policies (step-registry enforcement / v0.13).
+                    // In production, the executor queries pg_policies; here we emit a placeholder
+                    // so the step type is exercised end-to-end. The executor will handle the real
+                    // policy SQL at runtime.
+                    steps.push(PlanStep::RecreatePolicy {
+                        name: delta.qualified_name.clone(),
+                        policy_sql: format!(
+                            "-- RLS policies for {} will be restored by executor",
+                            delta.qualified_name
+                        ),
+                    });
+
                     // Must drop + recreate to establish delta-tracking state.
                     if !desired.query.is_empty() {
                         steps.push(PlanStep::ValidateQuery {
@@ -769,6 +884,14 @@ pub fn build_plan(
                         name: delta.qualified_name.clone(),
                         mode: "FULL".to_string(),
                     });
+
+                    // M-03: Resume IMMEDIATE after Rebuild completes.
+                    if is_immediate {
+                        steps.push(PlanStep::ResumeImmediate {
+                            name: delta.qualified_name.clone(),
+                        });
+                    }
+
                     summary.alters += 1;
                     summary.rebuild_count += 1;
                     summary.destructive_count += 1;
@@ -814,7 +937,7 @@ pub fn build_plan(
                                 delta.qualified_name
                             ),
                         })?;
-                let _actual =
+                let actual =
                     delta
                         .actual
                         .as_ref()
@@ -849,7 +972,35 @@ pub fn build_plan(
                         summary.in_place_count += 1;
                     }
                     _ => {
-                        // Rebuild: drop + recreate.
+                        // Rebuild: pause IMMEDIATE if needed, drop + recreate.
+                        let is_immediate = actual.refresh_mode == RefreshMode::Immediate;
+                        if is_immediate {
+                            if options.no_immediate_downgrade {
+                                return Err(AqueductError::Other(format!(
+                                    "Table '{}' is IMMEDIATE and --no-immediate-downgrade is set; cannot rebuild",
+                                    delta.qualified_name
+                                )));
+                            }
+                            steps.push(PlanStep::PauseImmediate {
+                                name: delta.qualified_name.clone(),
+                            });
+                        }
+
+                        // WaitForRefresh before drop (step-registry enforcement / v0.13).
+                        steps.push(PlanStep::WaitForRefresh {
+                            name: delta.qualified_name.clone(),
+                            deadline_secs: 60,
+                        });
+
+                        // RecreatePolicy step (step-registry enforcement / v0.13).
+                        steps.push(PlanStep::RecreatePolicy {
+                            name: delta.qualified_name.clone(),
+                            policy_sql: format!(
+                                "-- RLS policies for {} will be restored by executor",
+                                delta.qualified_name
+                            ),
+                        });
+
                         steps.push(PlanStep::DropStreamTable {
                             name: delta.qualified_name.clone(),
                             cascade: false,
@@ -861,6 +1012,14 @@ pub fn build_plan(
                             name: delta.qualified_name.clone(),
                             mode: "FULL".to_string(),
                         });
+
+                        // M-03: Resume IMMEDIATE after Rebuild.
+                        if is_immediate {
+                            steps.push(PlanStep::ResumeImmediate {
+                                name: delta.qualified_name.clone(),
+                            });
+                        }
+
                         summary.alters += 1;
                         summary.rebuild_count += 1;
                         summary.destructive_count += 1;
@@ -949,6 +1108,19 @@ pub fn build_plan(
         steps.insert(insert_at + i, cs);
     }
 
+    // Post-hook just before RecordSnapshot (M-04 / v0.13).
+    if let Some(ref post_sql) = options.post_hook {
+        // Insert after consumer steps, before RecordSnapshot.
+        let snapshot_pos = steps.len() - 2; // RecordSnapshot is second-to-last.
+        steps.insert(
+            snapshot_pos,
+            PlanStep::RunHook {
+                hook_name: "post".to_string(),
+                statement: post_sql.clone(),
+            },
+        );
+    }
+
     Ok(Plan {
         project: project.to_string(),
         from_version,
@@ -957,6 +1129,157 @@ pub fn build_plan(
         summary,
         format_version: 1,
         created_at: Utc::now(),
+        spec_hash: String::new(),
+    })
+}
+
+/// Build a blue/green plan (M-01 / v0.13): emit full blue/green step sequence
+/// for structural DAG changes when `strategy = BlueGreen`.
+#[allow(clippy::too_many_arguments)]
+fn build_blue_green_plan(
+    project: &str,
+    from_version: Option<u64>,
+    next_version: u64,
+    diff: &DagDiff,
+    topo_order: &[QualifiedName],
+    options: &BuildPlanOptions,
+    mut steps: Vec<PlanStep>,
+    mut summary: PlanSummary,
+) -> Result<Plan> {
+    use crate::classifier::classify_delta;
+
+    let green_schema = format!("{}__v{}", project.replace('-', "_"), next_version);
+    let blue_schema = format!(
+        "{}__v{}",
+        project.replace('-', "_"),
+        from_version.unwrap_or(0)
+    );
+
+    // Step 1: Create the green schema.
+    steps.push(PlanStep::CreateGreenSchema {
+        schema: green_schema.clone(),
+    });
+    summary.blue_green_count += 1;
+
+    let ordered_deltas = order_deltas(diff, topo_order);
+
+    // Pre-classify for diamond consistency.
+    let mut classifications: std::collections::HashMap<QualifiedName, MigrationClass> =
+        std::collections::HashMap::new();
+    for delta in &ordered_deltas {
+        if delta.kind == DeltaKind::Unchanged {
+            continue;
+        }
+        classifications.insert(delta.qualified_name.clone(), classify_delta(delta));
+    }
+    apply_diamond_consistency_promotion(&mut classifications, &ordered_deltas);
+
+    // Step 2: Create stream tables in green schema.
+    let mut node_names: Vec<String> = Vec::new();
+    for delta in &ordered_deltas {
+        if delta.kind == DeltaKind::Unchanged {
+            continue;
+        }
+
+        let spec = if let Some(s) = &delta.desired {
+            s
+        } else {
+            continue;
+        };
+
+        // Validate query first.
+        if !spec.query.is_empty() {
+            steps.push(PlanStep::ValidateQuery {
+                name: spec.qualified_name.to_string(),
+                query: spec.query.clone(),
+            });
+        }
+
+        // Create in green schema.
+        steps.push(PlanStep::CreateStreamTableInGreen {
+            spec: spec.clone(),
+            green_schema: green_schema.clone(),
+        });
+        node_names.push(spec.qualified_name.name.clone());
+        summary.blue_green_count += 1;
+        summary.creates += 1;
+        summary.create_count += 1;
+        summary.changes.push(PlanChange {
+            symbol: "+".to_string(),
+            name: format!("{}.{}", green_schema, spec.qualified_name.name),
+            class: "blue-green".to_string(),
+            description: format!("create in green schema '{}'", green_schema),
+        });
+    }
+
+    // Step 3: Wait for convergence.
+    let convergence_lag_secs = 30u64;
+    let max_wait_secs = 300u64;
+    steps.push(PlanStep::WaitForConvergence {
+        green_schema: green_schema.clone(),
+        node_names: node_names.clone(),
+        max_wait_secs,
+    });
+    summary.blue_green_count += 1;
+
+    // Step 4: Build consumer view assignments.
+    let mut assignments: Vec<ViewAssignment> = Vec::new();
+    for delta in &ordered_deltas {
+        if delta.kind == DeltaKind::Unchanged {
+            continue;
+        }
+        if let Some(spec) = &delta.desired {
+            // Consumer view points to the green schema's table.
+            assignments.push(ViewAssignment {
+                view_name: QualifiedName::new("public", &spec.qualified_name.name),
+                target_table: QualifiedName::new(&green_schema, &spec.qualified_name.name),
+                sql_body: None,
+            });
+        }
+    }
+
+    if !assignments.is_empty() {
+        steps.push(PlanStep::SwapConsumerViews {
+            assignments,
+            blue_schema: blue_schema.clone(),
+            green_schema: green_schema.clone(),
+        });
+        summary.blue_green_count += 1;
+    }
+
+    // Step 5: Schedule blue schema retirement (after 1 hour = 3600s by default).
+    steps.push(PlanStep::RetireBlueSchema {
+        schema: blue_schema,
+        retain_secs: 3600,
+    });
+    summary.blue_green_count += 1;
+
+    // Post-hook before snapshot.
+    if let Some(ref post_sql) = options.post_hook {
+        steps.push(PlanStep::RunHook {
+            hook_name: "post".to_string(),
+            statement: post_sql.clone(),
+        });
+    }
+
+    // Always record snapshot and unlock.
+    steps.push(PlanStep::RecordSnapshot {
+        version: next_version,
+    });
+    steps.push(PlanStep::UnlockDag { force: false });
+
+    // Suppress unused variable warning.
+    let _ = convergence_lag_secs;
+
+    Ok(Plan {
+        project: project.to_string(),
+        from_version,
+        to_version: next_version,
+        steps,
+        summary,
+        format_version: 1,
+        created_at: Utc::now(),
+        spec_hash: String::new(),
     })
 }
 

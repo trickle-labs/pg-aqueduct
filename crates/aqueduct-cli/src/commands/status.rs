@@ -106,6 +106,7 @@ async fn poll_once(
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
+                    "schema_version": 1,
                     "project": status.project,
                     "version": status.current_version,
                     "stream_tables": status.stream_table_count,

@@ -88,6 +88,22 @@ pub enum AqueductError {
     )]
     PgtrickleApiMismatch { expected: String, found: String },
 
+    /// Returned when `apply --plan` is given a plan whose spec_hash does not
+    /// match the current desired state (M-09 / v0.13).
+    #[error(
+        "Stale plan artifact: the plan was generated from a different spec than \
+         the current migration files. Re-run `aqueduct plan --out plan.json`."
+    )]
+    StalePlanArtifact,
+
+    /// Returned when `--no-immediate-downgrade` is set and the plan would
+    /// temporarily downgrade an IMMEDIATE table (v0.13).
+    #[error(
+        "Plan would temporarily downgrade IMMEDIATE table '{table}'. \
+         Pass --allow-immediate-downgrade to allow this rebuild."
+    )]
+    ImmediateDowngradeRejected { table: String },
+
     #[error("{0}")]
     Other(String),
 }
@@ -128,6 +144,8 @@ impl AqueductError {
             AqueductError::DataLossRequired => 1303,
             AqueductError::OwnershipRequired { .. } => 1304,
             AqueductError::PgtrickleApiMismatch { .. } => 1005,
+            AqueductError::StalePlanArtifact => 1305,
+            AqueductError::ImmediateDowngradeRejected { .. } => 1306,
             AqueductError::Catalog(_) => 1400,
             AqueductError::Io(_) => 1500,
             AqueductError::Json(_) => 1501,

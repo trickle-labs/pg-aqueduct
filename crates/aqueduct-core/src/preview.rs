@@ -88,6 +88,8 @@ pub struct PreviewEnvironment {
     pub branch: String,
     /// The stream tables created in this preview.
     pub stream_tables: Vec<String>,
+    /// Optional connection string (for cloud backends: CNPG, Neon).
+    pub connection_string: Option<String>,
 }
 
 /// Collect the subgraph of stream tables that are ancestors or descendants of
@@ -257,6 +259,7 @@ pub async fn create_preview_native(
         schema_name: schema,
         branch: config.branch.clone(),
         stream_tables: created_tables,
+        connection_string: None,
     })
 }
 
@@ -451,35 +454,236 @@ fn quote_ident_preview(s: &str) -> String {
 
 /// Create a preview using a CloudNativePG cluster clone.
 ///
-/// This requires the CNPG operator to be installed and credentials configured.
-/// In v0.3, this emits a structured error with setup instructions.
+/// This calls the CNPG `cnpg.io/v1` Cluster Clone API via the Kubernetes API server.
+/// Requires `endpoint` (the Kubernetes API server URL), namespace, cluster name,
+/// and a bearer token from the environment (`KUBECONFIG` or `KUBE_TOKEN`).
+///
+/// M-05 / v0.13: real implementation replacing the config-error stub.
 pub async fn create_preview_cnpg(
-    _endpoint: &str,
-    _config: &PreviewConfig,
+    endpoint: &str,
+    config: &PreviewConfig,
     _desired: &DagState,
 ) -> Result<PreviewEnvironment> {
-    Err(AqueductError::Config(
-        "CloudNativePG preview backend requires --cnpg-endpoint and cluster credentials. \
-         See the aqueduct documentation for CNPG preview setup."
-            .to_string(),
-    ))
+    // Extract namespace and cluster from the endpoint config.
+    // Expected format: "https://k8s-api-host/namespaces/NAMESPACE/clusters/CLUSTER"
+    // or via separate CLI flags stored in endpoint as "namespace=NS,cluster=CL,api=URL".
+    let (namespace, cluster_name, api_url) = parse_cnpg_endpoint(endpoint)?;
+
+    // Get bearer token from environment.
+    let token = std::env::var("KUBE_TOKEN")
+        .or_else(|_| std::env::var("KUBERNETES_SERVICE_TOKEN"))
+        .map_err(|_| {
+            AqueductError::Config(
+                "CloudNativePG preview backend requires KUBE_TOKEN or KUBERNETES_SERVICE_TOKEN \
+                 environment variable."
+                    .to_string(),
+            )
+        })?;
+
+    let clone_name = format!(
+        "aqueduct-preview-{}",
+        config.branch.to_lowercase().replace('/', "-")
+    );
+    let clone_manifest = serde_json::json!({
+        "apiVersion": "postgresql.cnpg.io/v1",
+        "kind": "Cluster",
+        "metadata": {
+            "name": clone_name,
+            "namespace": namespace,
+            "labels": {
+                "aqueduct.io/preview": "true",
+                "aqueduct.io/branch": config.branch,
+            }
+        },
+        "spec": {
+            "instances": 1,
+            "bootstrap": {
+                "recovery": {
+                    "source": cluster_name,
+                }
+            },
+            "externalClusters": [
+                {
+                    "name": cluster_name,
+                    "connectionParameters": {
+                        "host": cluster_name,
+                        "dbname": "app",
+                    }
+                }
+            ]
+        }
+    });
+
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true) // Allow self-signed K8s certs
+        .build()
+        .map_err(|e| AqueductError::Config(format!("Failed to build HTTP client: {}", e)))?;
+
+    let url = format!(
+        "{}/apis/postgresql.cnpg.io/v1/namespaces/{}/clusters",
+        api_url, namespace
+    );
+    let resp = client
+        .post(&url)
+        .bearer_auth(&token)
+        .json(&clone_manifest)
+        .send()
+        .await
+        .map_err(|e| AqueductError::Config(format!("CNPG API request failed: {}", e)))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(AqueductError::Config(format!(
+            "CNPG clone request failed (HTTP {}): {}",
+            status, body
+        )));
+    }
+
+    tracing::info!(
+        "Created CNPG clone cluster '{}' in namespace '{}'",
+        clone_name,
+        namespace
+    );
+
+    Ok(PreviewEnvironment {
+        schema_name: config.schema_name(),
+        branch: config.branch.clone(),
+        stream_tables: vec![],
+        connection_string: Some(format!(
+            "host={}.{}.svc.cluster.local dbname=app",
+            clone_name, namespace
+        )),
+    })
+}
+
+/// Parse a CNPG endpoint string of the form
+/// "api=URL,namespace=NS,cluster=CL" or just "URL" (then NS and cluster from env).
+fn parse_cnpg_endpoint(endpoint: &str) -> Result<(String, String, String)> {
+    let mut api = String::new();
+    let mut namespace = String::new();
+    let mut cluster = String::new();
+
+    for part in endpoint.split(',') {
+        if let Some(v) = part.strip_prefix("api=") {
+            api = v.to_string();
+        } else if let Some(v) = part.strip_prefix("namespace=") {
+            namespace = v.to_string();
+        } else if let Some(v) = part.strip_prefix("cluster=") {
+            cluster = v.to_string();
+        } else if api.is_empty() {
+            api = part.to_string();
+        }
+    }
+
+    if api.is_empty() {
+        api = std::env::var("KUBERNETES_SERVICE_HOST")
+            .map(|h| {
+                let port =
+                    std::env::var("KUBERNETES_SERVICE_PORT").unwrap_or_else(|_| "443".to_string());
+                format!("https://{}:{}", h, port)
+            })
+            .unwrap_or_else(|_| "https://kubernetes.default.svc".to_string());
+    }
+    if namespace.is_empty() {
+        namespace = std::env::var("CNPG_NAMESPACE").unwrap_or_else(|_| "default".to_string());
+    }
+    if cluster.is_empty() {
+        cluster = std::env::var("CNPG_CLUSTER").map_err(|_| {
+            AqueductError::Config(
+                "CNPG cluster name not specified. Pass api=URL,namespace=NS,cluster=CL \
+                 to --cnpg-endpoint or set CNPG_CLUSTER env var."
+                    .to_string(),
+            )
+        })?;
+    }
+
+    Ok((namespace, cluster, api))
 }
 
 /// Create a preview using a Neon branch.
 ///
-/// This requires a Neon API token and project ID.
-/// In v0.3, this emits a structured error with setup instructions.
+/// Calls the Neon management API to create a branch from the project's default endpoint.
+/// Requires `NEON_API_KEY` environment variable.
+///
+/// M-05 / v0.13: real implementation replacing the config-error stub.
 pub async fn create_preview_neon(
-    _api_token: &str,
-    _project_id: &str,
-    _config: &PreviewConfig,
+    api_token: &str,
+    project_id: &str,
+    config: &PreviewConfig,
     _desired: &DagState,
 ) -> Result<PreviewEnvironment> {
-    Err(AqueductError::Config(
-        "Neon preview backend requires --neon-api-token and --neon-project-id. \
-         See the aqueduct documentation for Neon preview setup."
-            .to_string(),
-    ))
+    let token = if api_token.is_empty() {
+        std::env::var("NEON_API_KEY").map_err(|_| {
+            AqueductError::Config(
+                "Neon preview backend requires NEON_API_KEY environment variable.".to_string(),
+            )
+        })?
+    } else {
+        api_token.to_string()
+    };
+
+    let branch_name = format!("aqueduct-preview-{}", config.branch.replace('/', "-"));
+    let create_branch_body = serde_json::json!({
+        "branch": {
+            "name": branch_name,
+        },
+        "endpoints": [
+            {
+                "type": "read_write"
+            }
+        ]
+    });
+
+    let client = reqwest::Client::new();
+    let url = format!(
+        "https://console.neon.tech/api/v2/projects/{}/branches",
+        project_id
+    );
+    let resp = client
+        .post(&url)
+        .bearer_auth(&token)
+        .json(&create_branch_body)
+        .send()
+        .await
+        .map_err(|e| AqueductError::Config(format!("Neon API request failed: {}", e)))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(AqueductError::Config(format!(
+            "Neon branch creation failed (HTTP {}): {}",
+            status, body
+        )));
+    }
+
+    let resp_json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| AqueductError::Config(format!("Failed to parse Neon API response: {}", e)))?;
+
+    let branch_id = resp_json["branch"]["id"]
+        .as_str()
+        .unwrap_or("unknown")
+        .to_string();
+    let conn_string = resp_json["endpoints"][0]["host"]
+        .as_str()
+        .map(|h| format!("postgresql://neondb_owner@{}/neondb?sslmode=require", h))
+        .unwrap_or_default();
+
+    tracing::info!(
+        "Created Neon branch '{}' (id={}) for project '{}'",
+        branch_name,
+        branch_id,
+        project_id
+    );
+
+    Ok(PreviewEnvironment {
+        schema_name: config.schema_name(),
+        branch: config.branch.clone(),
+        stream_tables: vec![],
+        connection_string: Some(conn_string),
+    })
 }
 
 #[cfg(test)]

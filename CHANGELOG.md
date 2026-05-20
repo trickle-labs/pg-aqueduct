@@ -14,6 +14,7 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 - [v0.10.0 — Safety Contract Repair & Multi-Project Isolation](#v0100--safety-contract-repair--multi-project-isolation)
 - [v0.11.0 — Diagnostic Quality, CLI Surface & Documentation Correctness](#v0110--diagnostic-quality-cli-surface--documentation-correctness)
 - [v0.12.0 — Real pg_trickle Integration, Security & CI/CD Hardening](#v0120--real-pgtrickle-integration-security--cicd-hardening)
+- [v0.13.0 — Blue/Green End-to-End, IMMEDIATE Mode & Advanced Features](#v0130--bluegreen-end-to-end-immediate-mode--advanced-features)
 
 **Planned**
 - [v0.2.0 — Online Schema Evolution](#v020--online-schema-evolution)
@@ -26,6 +27,57 @@ For future plans and upcoming features, see [ROADMAP.md](ROADMAP.md).
 **Archive**
 - [Unreleased — Repository Bootstrap](#unreleased--repository-bootstrap)
 <!-- TOC end -->
+
+---
+
+## [v0.13.0] — Blue/Green End-to-End, IMMEDIATE Mode & Advanced Features
+
+**Status:** Released
+
+All roadmap items for v0.13 "Phase 16 — Blue/Green End-to-End, IMMEDIATE Mode &
+Advanced Features" are implemented and tested.
+
+### Highlights
+
+- **Blue/green migrations** (`--strategy blue-green`): The planner now generates the
+  full blue/green step sequence — `CreateGreenSchema`, `CreateStreamTableInGreen`,
+  `WaitForConvergence` (with real pg_trickle polling), `SwapConsumerViews`, and
+  `RetireBlueSchema` — for topology-restructuring diffs.
+
+- **IMMEDIATE refresh mode**: `RefreshMode::Immediate` is parsed from
+  `-- @aqueduct:refresh_mode = "IMMEDIATE"`, classified, stored, and correctly handled
+  in rebuild paths via `PauseImmediate`/`ResumeImmediate` steps. The new
+  `--no-immediate-downgrade` flag rejects plans that would temporarily degrade an
+  IMMEDIATE table.
+
+- **Pre/post migration hooks**: SQL statements from `[apply.hooks] pre` and `post`
+  in `aqueduct.toml` are emitted as `RunHook` steps. The pre-hook fires immediately
+  after `LockDag`; the post-hook fires just before `RecordSnapshot`.
+
+- **Immutable plan artifacts** (`--out` / `--plan`): `aqueduct plan --out plan.json`
+  writes the plan (with a SHA-256 spec hash) to a file. `aqueduct apply --plan plan.json`
+  loads and executes the pre-computed plan, validating the spec hash to reject stale
+  artifacts.
+
+- **Step observability** (`migration_steps`): The catalog is bumped to v5, adding
+  `aqueduct.migration_steps`. Every executed step writes a `running` row at start and
+  a `done` (or `failed`) row at completion, enabling audit and replay.
+
+- **Import baseline snapshot**: `aqueduct import` now calls `ensure_catalog_current`
+  and records version 1 in `aqueduct.dag_versions`. A subsequent `aqueduct plan`
+  returns an empty plan.
+
+- **Real preview backends**: The `create_preview_cnpg` and `create_preview_neon` stubs
+  are replaced with real HTTP implementations using the CNPG Kubernetes API and the
+  Neon management API respectively.
+
+- **Rollback classification** (`--within-window` / `--accept-data-loss`): The rollback
+  command now classifies each change as `Safe`, `PointInTime`, or `DataLoss` based on
+  when the version was applied relative to the pg_trickle WAL retention window.
+
+- **JSON schema versioning** (`schema_version: 1`): All structured JSON events emitted
+  by the CLI now include `"schema_version": 1`. The schema is published at
+  `docs/cli-events-schema.json`.
 
 ---
 

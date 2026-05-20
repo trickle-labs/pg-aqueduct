@@ -44,6 +44,7 @@ pub async fn run(args: ValidateArgs) -> anyhow::Result<()> {
     match args.format.as_str() {
         "json" => {
             let output = serde_json::json!({
+                "schema_version": 1,
                 "files": total_files,
                 "errors": file_result.errors,
                 "warnings": file_result.warnings,

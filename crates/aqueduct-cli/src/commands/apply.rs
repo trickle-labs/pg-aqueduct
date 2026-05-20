@@ -1,10 +1,10 @@
 use aqueduct_core::{
     config::AqueductConfig,
-    dag::{build_dag_state, topological_sort},
+    dag::{build_dag_state, topological_sort, MigrationStrategy},
     diff::compute_diff,
     executor::PlanExecutor,
     live_state::read_live_state,
-    plan::build_plan,
+    plan::{build_plan_with_options, BuildPlanOptions},
     renderer::render_plan_text,
 };
 use clap::Args;
@@ -34,6 +34,20 @@ pub struct ApplyArgs {
     /// Allow rebuild-class migrations even when allow_full_refresh = false.
     #[arg(long)]
     pub allow_rebuild: bool,
+
+    /// Migration strategy: "default" or "blue-green".
+    #[arg(long, default_value = "default")]
+    pub strategy: String,
+
+    /// Path to a pre-computed plan JSON file (produced by `aqueduct plan --out`).
+    /// The plan's spec_hash is validated against the current migration files.
+    #[arg(long)]
+    pub plan: Option<std::path::PathBuf>,
+
+    /// Reject plans that would temporarily downgrade an IMMEDIATE refresh-mode
+    /// table to DIFFERENTIAL during a rebuild.
+    #[arg(long)]
+    pub no_immediate_downgrade: bool,
 
     /// Resume an interrupted migration.
     #[arg(long)]
@@ -96,13 +110,55 @@ pub async fn run(args: ApplyArgs) -> anyhow::Result<()> {
 
     let diff = compute_diff(&desired, &actual);
     let topo_order = topological_sort(&desired)?;
-    let plan = build_plan(
-        &project_name,
-        current_version,
-        next_version,
-        &diff,
-        &topo_order,
-    )?;
+
+    // Parse strategy flag.
+    let strategy = match args.strategy.as_str() {
+        "blue-green" | "bluegreen" | "blue_green" => MigrationStrategy::BlueGreen,
+        _ => MigrationStrategy::Default,
+    };
+
+    // Wire hooks from config.
+    let pre_hook = config.as_ref().and_then(|c| c.apply.hooks.pre.clone());
+    let post_hook = config.as_ref().and_then(|c| c.apply.hooks.post.clone());
+
+    // Build plan (from file or freshly computed).
+    let plan = if let Some(ref plan_path) = args.plan {
+        // M-09: Load pre-computed plan and validate spec_hash.
+        let plan_json = std::fs::read_to_string(plan_path).map_err(|e| {
+            anyhow::anyhow!("Cannot read plan file '{}': {}", plan_path.display(), e)
+        })?;
+        let mut loaded_plan: aqueduct_core::plan::Plan = serde_json::from_str(&plan_json)
+            .map_err(|e| anyhow::anyhow!("Invalid plan file: {}", e))?;
+
+        // Validate spec hash matches current desired state.
+        let current_hash = compute_spec_hash(&desired);
+        if !loaded_plan.spec_hash.is_empty() && loaded_plan.spec_hash != current_hash {
+            anyhow::bail!(
+                "Stale plan artifact: the plan was generated from a different spec \
+                 than the current migration files. Re-run `aqueduct plan --out plan.json`."
+            );
+        }
+        // Patch from_version with current DB version.
+        loaded_plan.from_version = current_version;
+        loaded_plan
+    } else {
+        let opts = BuildPlanOptions {
+            strategy,
+            pre_hook,
+            post_hook,
+            no_immediate_downgrade: args.no_immediate_downgrade,
+        };
+        let mut p = build_plan_with_options(
+            &project_name,
+            current_version,
+            next_version,
+            &diff,
+            &topo_order,
+            &opts,
+        )?;
+        p.spec_hash = compute_spec_hash(&desired);
+        p
+    };
 
     if plan.summary.is_empty() {
         println!("No changes to apply. Project is up to date.");
@@ -184,6 +240,7 @@ pub async fn run(args: ApplyArgs) -> anyhow::Result<()> {
     // U-05: Emit a structured JSON event for CI parsers. Separates migration_id
     // (aqueduct.migrations row id) from dag_version (aqueduct.dag_versions bigserial).
     let migration_metadata = serde_json::json!({
+        "schema_version": 1,
         "event": "apply_complete",
         "migration_id": result.migration_id,
         "dag_version": result.dag_version,
@@ -214,4 +271,11 @@ pub async fn run(args: ApplyArgs) -> anyhow::Result<()> {
 fn is_interactive_tty() -> bool {
     use std::io::IsTerminal;
     std::io::stdin().is_terminal()
+}
+
+/// Compute a SHA-256 hex hash of the desired DagState (used for stale-plan detection).
+fn compute_spec_hash(desired: &aqueduct_core::dag::DagState) -> String {
+    use sha2::{Digest, Sha256};
+    let spec_json = serde_json::to_string(desired).unwrap_or_default();
+    format!("{:x}", Sha256::digest(spec_json.as_bytes()))
 }

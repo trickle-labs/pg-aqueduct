@@ -38,6 +38,7 @@ pub async fn run(args: LintArgs) -> anyhow::Result<()> {
                 })
                 .collect();
             let output = serde_json::json!({
+                "schema_version": 1,
                 "files": files.len(),
                 "diagnostics": diags,
                 "warnings": result.warnings().count(),

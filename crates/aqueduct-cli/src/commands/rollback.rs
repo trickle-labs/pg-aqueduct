@@ -10,6 +10,34 @@ use clap::Args;
 
 use super::connect_and_migrate;
 
+/// Rollback risk classification for a set of plan changes (M-10 / v0.13).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RollbackClass {
+    /// Free/in-place changes — no data loss, can always roll back.
+    Safe,
+    /// Rebuild within the lossless point-in-time window.
+    PointInTime,
+    /// Rebuild outside the lossless window or blue/green schema expired.
+    DataLoss,
+}
+
+impl RollbackClass {
+    fn symbol(&self) -> &'static str {
+        match self {
+            RollbackClass::Safe => "✓",
+            RollbackClass::PointInTime => "⚠",
+            RollbackClass::DataLoss => "✗",
+        }
+    }
+    fn label(&self) -> &'static str {
+        match self {
+            RollbackClass::Safe => "Safe",
+            RollbackClass::PointInTime => "PointInTime",
+            RollbackClass::DataLoss => "DataLoss",
+        }
+    }
+}
+
 #[derive(Debug, Args)]
 pub struct RollbackArgs {
     /// PostgreSQL connection string.
@@ -31,6 +59,10 @@ pub struct RollbackArgs {
     /// Accept data loss for rebuild-class rollbacks where the lossless window has passed.
     #[arg(long)]
     pub accept_data_loss: bool,
+
+    /// Allow PointInTime rollbacks even when close to window expiry.
+    #[arg(long)]
+    pub within_window: bool,
 
     /// Show what would be done without executing.
     #[arg(long)]
@@ -130,9 +162,66 @@ pub async fn run(args: RollbackArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // S-11: If the rollback plan includes destructive (rebuild) steps, require
-    // --accept-data-loss to proceed.
-    if plan.summary.rebuild_count > 0 && !args.accept_data_loss {
+    // M-10: Classify rollback risk by querying the applied_at timestamp of the
+    // current version.  Rebuilds applied within the last hour are "PointInTime"
+    // (pg_trickle WAL retention window); older rebuilds are "DataLoss".
+    let applied_at: Option<chrono::DateTime<chrono::Utc>> = client
+        .query_opt(
+            "SELECT applied_at FROM aqueduct.dag_versions WHERE project = $1 AND version = $2",
+            &[&project_name, &(current_v as i64)],
+        )
+        .await
+        .ok()
+        .flatten()
+        .and_then(|row| row.try_get::<_, chrono::DateTime<chrono::Utc>>(0).ok());
+
+    let lossless_window_secs: i64 = 3600; // 1 hour default
+    let in_window = applied_at
+        .map(|t| {
+            let age = chrono::Utc::now().signed_duration_since(t);
+            age.num_seconds() < lossless_window_secs
+        })
+        .unwrap_or(false);
+
+    // Classify overall rollback risk.
+    let overall_class = if plan.summary.rebuild_count == 0 {
+        RollbackClass::Safe
+    } else if in_window {
+        RollbackClass::PointInTime
+    } else {
+        RollbackClass::DataLoss
+    };
+
+    // Render rollback plan with classification.
+    println!("Rollback plan: v{} → v{}", current_v, target_version);
+    println!(
+        "Risk class: {} [{}]",
+        overall_class.symbol(),
+        overall_class.label()
+    );
+    println!();
+    for change in &plan.summary.changes {
+        let class = if change.class == "rebuild" {
+            if in_window {
+                &RollbackClass::PointInTime
+            } else {
+                &RollbackClass::DataLoss
+            }
+        } else {
+            &RollbackClass::Safe
+        };
+        println!(
+            "  {} {} {} ({})",
+            class.symbol(),
+            change.symbol,
+            change.name,
+            change.description
+        );
+    }
+    println!();
+
+    // S-11: Guard against data loss.
+    if overall_class == RollbackClass::DataLoss && !args.accept_data_loss {
         let lossy_changes: Vec<_> = plan
             .summary
             .changes
@@ -142,14 +231,31 @@ pub async fn run(args: RollbackArgs) -> anyhow::Result<()> {
             .collect();
         return Err(anyhow::anyhow!(
             "Rollback would cause data loss for {} rebuild-class change(s):\n{}\n\n\
+             The lossless point-in-time window has expired. \
              Pass --accept-data-loss to proceed.",
             plan.summary.rebuild_count,
             lossy_changes.join("\n")
         ));
     }
 
+    // M-10: Warn on PointInTime rollbacks.
+    if overall_class == RollbackClass::PointInTime && !args.within_window && !args.accept_data_loss
+    {
+        return Err(anyhow::anyhow!(
+            "Rollback includes rebuild-class changes within the lossless window \
+             (applied < {}s ago).\n\
+             Pass --within-window to proceed, or --accept-data-loss to skip the window check.",
+            lossless_window_secs
+        ));
+    }
+
+    if args.dry_run {
+        println!("Dry run: no changes applied.");
+        return Ok(());
+    }
+
     println!(
-        "Rolling back from v{} to v{} (applying {} change{})...",
+        "Applying rollback: v{} → v{} ({} change{})...",
         current_v,
         target_version,
         plan.summary.changes.len(),
@@ -159,11 +265,6 @@ pub async fn run(args: RollbackArgs) -> anyhow::Result<()> {
             "s"
         }
     );
-
-    if args.dry_run {
-        println!("Dry run: no changes applied.");
-        return Ok(());
-    }
 
     let executor = PlanExecutor::new(&client, &project_name, env!("CARGO_PKG_VERSION"), false)
         .with_desired_state(desired)

@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/pgaqueduct/pg-aqueduct/docs/cli-events-schema.json",
+  "title": "Aqueduct CLI Events Schema",
+  "description": "JSON output schema for all structured events emitted by the aqueduct CLI (M-12 / v0.13).",
+  "version": "1",
+  "type": "object",
+  "required": ["schema_version"],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Schema version for this event. Always 1 in v0.13."
+    }
+  },
+  "oneOf": [
+    {
+      "title": "apply_complete",
+      "description": "Emitted to stderr after a successful `aqueduct apply`.",
+      "required": ["schema_version", "event", "migration_id", "dag_version", "from_version", "to_version", "project"],
+      "properties": {
+        "schema_version": { "type": "integer", "const": 1 },
+        "event": { "type": "string", "const": "apply_complete" },
+        "migration_id": { "type": ["integer", "null"] },
+        "dag_version": { "type": "integer" },
+        "from_version": { "type": ["integer", "null"] },
+        "to_version": { "type": "integer" },
+        "project": { "type": "string" }
+      }
+    },
+    {
+      "title": "plan",
+      "description": "Output of `aqueduct plan --format json`.",
+      "required": ["schema_version", "project", "from_version", "to_version", "is_empty"],
+      "properties": {
+        "schema_version": { "type": "integer", "const": 1 },
+        "project": { "type": "string" },
+        "from_version": { "type": ["integer", "null"] },
+        "to_version": { "type": "integer" },
+        "is_empty": { "type": "boolean" },
+        "creates": { "type": "integer" },
+        "drops": { "type": "integer" },
+        "alters": { "type": "integer" }
+      }
+    },
+    {
+      "title": "diff",
+      "description": "Output of `aqueduct diff --format json`.",
+      "required": ["schema_version", "deltas", "changed", "total"],
+      "properties": {
+        "schema_version": { "type": "integer", "const": 1 },
+        "deltas": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "kind"],
+            "properties": {
+              "name": { "type": "string" },
+              "kind": { "type": "string" }
+            }
+          }
+        },
+        "changed": { "type": "integer" },
+        "total": { "type": "integer" }
+      }
+    },
+    {
+      "title": "lint",
+      "description": "Output of `aqueduct lint --format json`.",
+      "required": ["schema_version", "files", "diagnostics", "ok"],
+      "properties": {
+        "schema_version": { "type": "integer", "const": 1 },
+        "files": { "type": "integer" },
+        "diagnostics": { "type": "array" },
+        "warnings": { "type": "integer" },
+        "errors": { "type": "integer" },
+        "ok": { "type": "boolean" }
+      }
+    },
+    {
+      "title": "validate",
+      "description": "Output of `aqueduct validate --format json`.",
+      "required": ["schema_version", "files", "ok"],
+      "properties": {
+        "schema_version": { "type": "integer", "const": 1 },
+        "files": { "type": "integer" },
+        "errors": { "type": "array" },
+        "warnings": { "type": "array" },
+        "ok": { "type": "boolean" }
+      }
+    },
+    {
+      "title": "fmt",
+      "description": "Output of `aqueduct fmt --format json`.",
+      "required": ["schema_version", "changed", "unchanged", "check_only"],
+      "properties": {
+        "schema_version": { "type": "integer", "const": 1 },
+        "changed": { "type": "array", "items": { "type": "string" } },
+        "unchanged": { "type": "array", "items": { "type": "string" } },
+        "errors": { "type": "array" },
+        "check_only": { "type": "boolean" }
+      }
+    },
+    {
+      "title": "status",
+      "description": "Output of `aqueduct status --format json`.",
+      "required": ["schema_version", "project", "version"],
+      "properties": {
+        "schema_version": { "type": "integer", "const": 1 },
+        "project": { "type": "string" },
+        "version": { "type": ["integer", "null"] },
+        "stream_tables": { "type": "integer" },
+        "drift": { "type": "integer" },
+        "pgtrickle_version": { "type": ["string", "null"] },
+        "polled_at": { "type": "string", "format": "date-time" }
+      }
+    }
+  ]
+}

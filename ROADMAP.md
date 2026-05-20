@@ -2095,7 +2095,7 @@ described in the original pg-aqueduct-plan.
 
 #### Blue/Green End-to-End Implementation
 
-- [ ] **Wire blue/green planner generation from `--strategy blue-green` (M-01).**
+- [x] **Wire blue/green planner generation from `--strategy blue-green` (M-01).**
   `build_plan` currently never generates `CreateGreenSchema`, `CreateStreamTableInGreen`,
   `WaitForConvergence`, `SwapConsumerViews`, or `RetireBlueSchema` steps from real
   project diffs. Fix:
@@ -2113,13 +2113,13 @@ described in the original pg-aqueduct-plan.
   - Emit `RetireBlueSchema` scheduled after `--blue-ttl` (default 1 h).
   - Add `--strategy blue-green` to `ApplyArgs`; update apply action accordingly.
 
-- [ ] **Implement `WaitForConvergence` with real pg_trickle API (M-02).** Replace the
+- [x] **Implement `WaitForConvergence` with real pg_trickle API (M-02).** Replace the
   debug-log no-op with a polling loop that queries pg_trickle's convergence metric for
   each green node. Add a `convergence_lag` config key to `aqueduct.toml` (default: 30 s
   max lag). Surface timeout as a `AqueductError::ConvergenceTimeout` with per-node lag
   information so the operator can diagnose which nodes are behind.
 
-- [ ] **Add real blue/green integration tests.** A diamond DAG of 4 nodes; apply a
+- [x] **Add real blue/green integration tests.** A diamond DAG of 4 nodes; apply a
   topology restructuring change with `--strategy blue-green`; assert:
   (a) green schema exists during swap with all nodes populated,
   (b) consumer views atomically switch to green in a single transaction (verified via
@@ -2129,27 +2129,27 @@ described in the original pg-aqueduct-plan.
 
 #### IMMEDIATE Mode Full Support
 
-- [ ] **Add `IMMEDIATE` to `RefreshMode` enum (M-03).** Extend `parser.rs` to parse
+- [x] **Add `IMMEDIATE` to `RefreshMode` enum (M-03).** Extend `parser.rs` to parse
   `@aqueduct:refresh_mode = "IMMEDIATE"` and the `IMMEDIATE` value in pg_trickle's
   catalog. Add `RefreshMode::Immediate` to the `DagState` stream-table spec. Planner
   now generates `PauseImmediate` and `ResumeImmediate` for Rebuild-class migrations
   affecting IMMEDIATE tables. Add `--no-immediate-downgrade` flag to `aqueduct apply`
   that rejects plans with any `PauseImmediate` step.
 
-- [ ] **Wire `PauseImmediate` and `ResumeImmediate` via the capability probe.** Call
+- [x] **Wire `PauseImmediate` and `ResumeImmediate` via the capability probe.** Call
   `pgtrickle.alter_stream_table(name, refresh_mode := 'DIFFERENTIAL')` for pause and
   `pgtrickle.alter_stream_table(name, refresh_mode := 'IMMEDIATE')` for resume.
   Wrap both in the capability probe; return `AqueductError::ImmediateModeUnsupported`
   when the pg_trickle version predates IMMEDIATE mode support.
 
-- [ ] **Add IMMEDIATE mode integration tests.** Create an IMMEDIATE stream table; apply
+- [x] **Add IMMEDIATE mode integration tests.** Create an IMMEDIATE stream table; apply
   a Rebuild-class change; assert `PauseImmediate` and `ResumeImmediate` appear in the
   plan and execute without error; assert the table is IMMEDIATE again after apply;
   assert `--no-immediate-downgrade` rejects the same plan.
 
 #### Config-Driven Hooks
 
-- [ ] **Wire `RunHook` from `[apply.hooks]` config through planner (M-04).** Add a
+- [x] **Wire `RunHook` from `[apply.hooks]` config through planner (M-04).** Add a
   `hooks: Hooks { pre: Option<String>, post: Option<String> }` struct to `ApplyConfig`.
   When `hooks.pre` is set, `build_plan` emits `RunHook { hook_name: "pre", statement }`
   immediately after `LockDag`. When `hooks.post` is set, emit `RunHook { hook_name:
@@ -2160,7 +2160,7 @@ described in the original pg-aqueduct-plan.
 
 #### Advanced Observability
 
-- [ ] **Add `aqueduct.migration_steps` catalog table (M-08).** Add the table in
+- [x] **Add `aqueduct.migration_steps` catalog table (M-08).** Add the table in
   `CATALOG_INIT_V2_SQL`:
   ```sql
   CREATE TABLE IF NOT EXISTS aqueduct.migration_steps (
@@ -2179,14 +2179,14 @@ described in the original pg-aqueduct-plan.
   Write a row for each step at start and finish. Expose the table via
   `aqueduct status --verbose` and the `aqueduct.migration_history()` SQL view.
 
-- [ ] **Version JSON output schemas (M-12).** Add `"schema_version": 1` to every JSON
+- [x] **Version JSON output schemas (M-12).** Add `"schema_version": 1` to every JSON
   event emitted by the CLI. Publish the schema as `docs/cli-events-schema.json`.
   Add a CI check that validates all JSON events in integration test output against the
   published schema.
 
 #### Immutable Plan Artifacts
 
-- [ ] **Support `aqueduct plan --out plan.json` and `aqueduct apply --plan plan.json`
+- [x] **Support `aqueduct plan --out plan.json` and `aqueduct apply --plan plan.json`
   (M-09).** When `--out` is passed, serialize the full `PlanOutput` (steps, summary,
   format version, content hash of migration files, live spec hash) to the file. When
   `--plan` is passed to `apply`, deserialize and skip re-planning; validate that the
@@ -2196,7 +2196,7 @@ described in the original pg-aqueduct-plan.
 
 #### Rollback Strategy by Change Class
 
-- [ ] **Render rollback-specific classifications (M-10, S-11 full).** After building the
+- [x] **Render rollback-specific classifications (M-10, S-11 full).** After building the
   rollback plan, classify each step as `Safe` (Free/In-place rollback, lossless),
   `PointInTime` (Rebuild rollback within lossless window), or `DataLoss` (Rebuild
   rollback outside lossless window or Blue/green expired). Render these classifications
@@ -2206,18 +2206,18 @@ described in the original pg-aqueduct-plan.
 
 #### Preview Backend Completions
 
-- [ ] **Implement CloudNativePG clone preview backend (M-05 partial).** Replace the
+- [x] **Implement CloudNativePG clone preview backend (M-05 partial).** Replace the
   config-error stub with a real CloudNativePG clone via the `cnpg.io/v1` `Clone` API.
   Requires `--cnpg-namespace` and `--cnpg-cluster` args. Tear down the clone on
   `aqueduct preview --drop`.
 
-- [ ] **Implement Neon branch preview backend (M-05 partial).** Replace the stub with a
+- [x] **Implement Neon branch preview backend (M-05 partial).** Replace the stub with a
   real Neon branch via the Neon management API. Requires `--neon-project-id` and
   `NEON_API_KEY` env var. Delete the branch on `aqueduct preview --drop`.
 
 #### Import Baseline Snapshot
 
-- [ ] **Record a baseline DAG version on `aqueduct import` (M-06).** After writing
+- [x] **Record a baseline DAG version on `aqueduct import` (M-06).** After writing
   migration files and `aqueduct.toml`, `import_from_live` calls `connect_and_migrate`,
   builds a fake `RecordSnapshot` step for the imported state, and writes it as version 1
   to `aqueduct.dag_versions`. After import, `aqueduct plan` produces an empty plan and
@@ -2225,7 +2225,7 @@ described in the original pg-aqueduct-plan.
 
 #### Step Registry Enforcement (via v0.11 contract)
 
-- [ ] **Verify all previously-scaffolded step variants satisfy the v0.11 "done" definition.**
+- [x] **Verify all previously-scaffolded step variants satisfy the v0.11 "done" definition.**
   `DetachOutbox`, `ReattachOutbox`, `ManageWalSlot`, `RecreatePolicy`, `WaitForRefresh`
   were checked in v0.9 but the planner never generated them. For each: (a) add the
   planning trigger in `build_plan`, (b) add real pg_trickle API calls in the executor,

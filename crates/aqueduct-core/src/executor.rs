@@ -3,9 +3,10 @@ use tokio::sync::oneshot;
 use tokio_postgres::NoTls;
 
 use crate::catalog::{
-    ACQUIRE_LOCK_SQL, DEREGISTER_OWNERSHIP_SQL, FINISH_MIGRATION_SQL,
+    ACQUIRE_LOCK_SQL, DEREGISTER_OWNERSHIP_SQL, FINISH_MIGRATION_SQL, FINISH_MIGRATION_STEP_SQL,
     GET_RUNNING_OR_RECOVERABLE_MIGRATION_SQL, HEARTBEAT_LOCK_SQL, INSERT_DAG_VERSION_SQL,
-    REGISTER_OWNERSHIP_SQL, RELEASE_LOCK_SQL, START_MIGRATION_SQL, UPDATE_MIGRATION_PROGRESS_SQL,
+    REGISTER_OWNERSHIP_SQL, RELEASE_LOCK_SQL, START_MIGRATION_SQL, START_MIGRATION_STEP_SQL,
+    UPDATE_MIGRATION_PROGRESS_SQL,
 };
 use crate::dag::DagState;
 use crate::error::{AqueductError, Result};
@@ -410,6 +411,18 @@ impl<'a> PlanExecutor<'a> {
                 }
 
                 tracing::debug!("Executing step {}: {}", step_idx, step.description());
+
+                // M-08: Record migration step start (best-effort).
+                let step_type = step_type_name(step);
+                let step_hash = step_hash_hex(step_idx, step_type);
+                let _ = self
+                    .client
+                    .execute(
+                        START_MIGRATION_STEP_SQL,
+                        &[&migration_id, &(step_idx as i32), &step_type, &step_hash],
+                    )
+                    .await;
+
                 match step {
                     PlanStep::LockDag { project, ttl } => {
                         self.acquire_lock(project, &lock_holder, ttl).await?;
@@ -633,13 +646,51 @@ impl<'a> PlanExecutor<'a> {
                     PlanStep::WaitForConvergence {
                         green_schema,
                         node_names,
-                        ..
+                        max_wait_secs,
                     } => {
                         tracing::info!(
-                            "Waiting for green schema '{}' to converge ({} nodes)",
+                            "Waiting for green schema '{}' to converge ({} nodes, max {}s)",
                             green_schema,
-                            node_names.len()
+                            node_names.len(),
+                            max_wait_secs
                         );
+                        // M-02: Poll pgtrickle.pgt_stream_tables for each node in
+                        // the green schema.  Nodes must transition out of 'running'
+                        // (i.e., reach 'idle' or 'ready') before we proceed.
+                        if pgtrickle_caps.installed && pgtrickle_caps.has_refresh_status && !node_names.is_empty() {
+                            let deadline = std::time::Instant::now()
+                                + std::time::Duration::from_secs(*max_wait_secs);
+                            'outer: loop {
+                                let mut all_converged = true;
+                                for node in node_names {
+                                    let row = self
+                                        .client
+                                        .query_opt(
+                                            "SELECT refresh_status \
+                                             FROM pgtrickle.pgt_stream_tables \
+                                             WHERE schema_name = $1 AND table_name = $2",
+                                            &[green_schema, node],
+                                        )
+                                        .await?;
+                                    let status: Option<String> =
+                                        row.as_ref().and_then(|r| r.try_get(0).ok());
+                                    if status.as_deref() == Some("running") {
+                                        all_converged = false;
+                                        break;
+                                    }
+                                }
+                                if all_converged {
+                                    break 'outer;
+                                }
+                                if std::time::Instant::now() >= deadline {
+                                    return Err(AqueductError::Other(format!(
+                                        "WaitForConvergence: green schema '{}' did not converge within {}s",
+                                        green_schema, max_wait_secs
+                                    )));
+                                }
+                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            }
+                        }
                     }
 
                     PlanStep::SwapConsumerViews {
@@ -980,6 +1031,14 @@ impl<'a> PlanExecutor<'a> {
 
                 // S-06: Checkpoint writes are fatal — a failed progress record
                 // means we cannot safely resume.
+                // M-08: Mark step completed (best-effort).
+                let _ = self
+                    .client
+                    .execute(
+                        FINISH_MIGRATION_STEP_SQL,
+                        &[&migration_id, &(step_idx as i32)],
+                    )
+                    .await;
                 self.client
                     .execute(
                         UPDATE_MIGRATION_PROGRESS_SQL,
@@ -1134,6 +1193,42 @@ async fn run_heartbeat(
 fn quote_ident(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
 }
+
+/// Return a short string tag for a plan step (used in migration_steps tracking).
+fn step_type_name(step: &PlanStep) -> &'static str {
+    match step {
+        PlanStep::LockDag { .. } => "LockDag",
+        PlanStep::UnlockDag { .. } => "UnlockDag",
+        PlanStep::ValidateQuery { .. } => "ValidateQuery",
+        PlanStep::AlterBaseTable { .. } => "AlterBaseTable",
+        PlanStep::CreateStreamTable { .. } => "CreateStreamTable",
+        PlanStep::AlterStreamTable { .. } => "AlterStreamTable",
+        PlanStep::DropStreamTable { .. } => "DropStreamTable",
+        PlanStep::Backfill { .. } => "Backfill",
+        PlanStep::RecordSnapshot { .. } => "RecordSnapshot",
+        PlanStep::CreateGreenSchema { .. } => "CreateGreenSchema",
+        PlanStep::CreateStreamTableInGreen { .. } => "CreateStreamTableInGreen",
+        PlanStep::WaitForConvergence { .. } => "WaitForConvergence",
+        PlanStep::SwapConsumerViews { .. } => "SwapConsumerViews",
+        PlanStep::RetireBlueSchema { .. } => "RetireBlueSchema",
+        PlanStep::ManageConsumerView { .. } => "ManageConsumerView",
+        PlanStep::RecreatePolicy { .. } => "RecreatePolicy",
+        PlanStep::DetachOutbox { .. } => "DetachOutbox",
+        PlanStep::ReattachOutbox { .. } => "ReattachOutbox",
+        PlanStep::ManageWalSlot { .. } => "ManageWalSlot",
+        PlanStep::WaitForRefresh { .. } => "WaitForRefresh",
+        PlanStep::PauseImmediate { .. } => "PauseImmediate",
+        PlanStep::ResumeImmediate { .. } => "ResumeImmediate",
+        PlanStep::RunHook { .. } => "RunHook",
+    }
+}
+
+/// Compute a simple hex hash for a step (used as an idempotency key).
+fn step_hash_hex(step_idx: usize, step_type: &str) -> String {
+    use sha2::Digest;
+    let input = format!("{}:{}", step_idx, step_type);
+    format!("{:x}", sha2::Sha256::digest(input.as_bytes()))
+}
 /// Import stream tables from the live pg_trickle catalog into a migrations directory.
 pub async fn import_from_live(
     client: &tokio_postgres::Client,
@@ -1210,7 +1305,54 @@ allow_full_refresh = true
         std::fs::write(&toml_path, toml_content)?;
     }
 
+    // M-06: Record an initial baseline snapshot (version 1) in the catalog so
+    // that a subsequent `aqueduct plan` returns an empty plan.
+    // Best-effort: if the catalog tables don't exist yet, skip silently.
+    if let Err(e) = record_import_baseline(client, project, &state).await {
+        tracing::warn!(
+            "Could not record import baseline snapshot (non-fatal): {}",
+            e
+        );
+    }
+
     Ok(count)
+}
+
+/// M-06: Write an initial baseline snapshot (version 1) into aqueduct.dag_versions
+/// so that `aqueduct plan` returns an empty plan immediately after `import`.
+async fn record_import_baseline(
+    client: &tokio_postgres::Client,
+    project: &str,
+    state: &crate::dag::DagState,
+) -> Result<()> {
+    use sha2::Digest;
+
+    // Ensure the catalog schema is bootstrapped.
+    crate::catalog::ensure_catalog_current(client).await?;
+
+    // Serialize the live state as our desired spec snapshot.
+    let spec_json = serde_json::to_value(state).map_err(crate::error::AqueductError::Json)?;
+    let spec_hash: Vec<u8> = sha2::Sha256::digest(spec_json.to_string().as_bytes()).to_vec();
+    let applied_by = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "aqueduct-import".to_string());
+    let plan_json = serde_json::json!({
+        "source": "import",
+        "steps": []
+    });
+
+    client
+        .execute(
+            INSERT_DAG_VERSION_SQL,
+            &[&project, &spec_hash, &applied_by, &plan_json, &spec_json],
+        )
+        .await?;
+
+    tracing::info!(
+        "Recorded import baseline snapshot for project '{}' in aqueduct.dag_versions",
+        project
+    );
+    Ok(())
 }
 
 #[cfg(test)]
