@@ -131,6 +131,7 @@ See [`benchmarks/`](benchmarks/) for full results.
 
 | Document | Description |
 |----------|-------------|
+| [Glossary](GLOSSARY.md) | Shared vocabulary for the stream-table migration domain |
 | [API Reference](docs/api-reference.md) | CLI commands, front-matter directives, `aqueduct.toml` |
 | [Cookbook](docs/cookbook/README.md) | 30 worked migration patterns |
 | [Security Guide](docs/security.md) | Least-privilege role, secret backends, audit trail |
